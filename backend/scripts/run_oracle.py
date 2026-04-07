@@ -31,6 +31,13 @@ def _default_payload_paths(out_dir: Path, session_id: str) -> List[Path]:
     ]
 
 
+def _resolve_input_path(raw_path: str, backend_root: Path) -> Path:
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return candidate
+    return (backend_root / candidate).resolve()
+
+
 def main() -> int:
     args = parse_args()
     backend_root = Path(__file__).resolve().parents[1]
@@ -50,8 +57,15 @@ def main() -> int:
         compliance = str(defaults[1])
         economic = str(defaults[2])
 
-    input_paths = [Path(str(analysis)), Path(str(compliance)), Path(str(economic))]
-    missing_paths = [str(path) for path in input_paths if not path.exists()]
+    analysis_path = _resolve_input_path(str(analysis), backend_root)
+    compliance_path = _resolve_input_path(str(compliance), backend_root)
+    economic_path = _resolve_input_path(str(economic), backend_root)
+
+    missing_paths = [
+        str(path)
+        for path in (analysis_path, compliance_path, economic_path)
+        if not path.exists()
+    ]
     if missing_paths:
         print("Error: faltan archivos de entrada para validacion oracle:", file=sys.stderr)
         for missing in missing_paths:
@@ -65,11 +79,11 @@ def main() -> int:
         "--oracle",
         args.oracle,
         "--analysis",
-        analysis,
+        str(analysis_path),
         "--compliance",
-        compliance,
+        str(compliance_path),
         "--economic",
-        economic,
+        str(economic_path),
         "--max-fixes",
         str(args.max_fixes),
         "--save-report",

@@ -26,11 +26,11 @@ jobs:
       - name: Run oracle validator (expected success)
         run: >
           python backend/scripts/run_oracle.py
-          --oracle backend/tests/oracle_v1.0.1-runtime-final.json
-          --analysis backend/tests/mocks/analysis_ok.json
-          --compliance backend/tests/mocks/compliance_ok.json
-          --economic backend/tests/mocks/economic_ok.json
-          --out backend/out
+          --oracle tests/oracle_v1.0.1-runtime-final.json
+          --analysis tests/mocks/analysis_ok.json
+          --compliance tests/mocks/compliance_ok.json
+          --economic tests/mocks/economic_ok.json
+          --out out
 
       - name: Upload oracle artifacts (ok)
         uses: actions/upload-artifact@v4
@@ -62,11 +62,11 @@ jobs:
         continue-on-error: true
         run: >
           python backend/scripts/run_oracle.py
-          --oracle backend/tests/oracle_v1.0.1-runtime-final.json
-          --analysis backend/tests/mocks/analysis_ok.json
-          --compliance backend/tests/mocks/compliance_ok.json
-          --economic backend/tests/mocks/economic_blocking.json
-          --out backend/out
+          --oracle tests/oracle_v1.0.1-runtime-final.json
+          --analysis tests/mocks/analysis_ok.json
+          --compliance tests/mocks/compliance_ok.json
+          --economic tests/mocks/economic_blocking.json
+          --out out
 
       - name: Assert blocking exists in report
         shell: python
