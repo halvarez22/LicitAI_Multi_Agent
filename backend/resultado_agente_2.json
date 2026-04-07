@@ -1,0 +1,263 @@
+{
+  "status": "success",
+  "agent": "compliance_001",
+  "summary": {
+    "estado_global": "🔴 CRÍTICO",
+    "total_requisitos": 29,
+    "riesgos_desechamiento": 12,
+    "veredicto": "Se han detectado 29 requisitos obligatorios. La auditoría exhaustiva identificó 12 puntos de descalificación automática."
+  },
+  "data": {
+    "administrativo": [
+      {
+        "id": "DA-01",
+        "nombre": "Identificaci├│n oficial del licitante persona f├¡sica (o de representante legal del licitante persona moral que suscribe las proposiciones)",
+        "pagina": "6.3.",
+        "descripcion": "entre las cuales podr├í exhibirse la credencial para votar expedida por el Instituto Federal Electoral o Instituto Nacional Electoral, Pasaporte",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-02",
+        "nombre": "Identificaci├│n oficial vigente con fotograf├¡a del asistente al acto de presentaci├│n y apertura que lo identifique plenamente",
+        "pagina": "6.1.",
+        "descripcion": "entre las cuales podr├í exhibirse la credencial para votar expedida por el Instituto Federal Electoral o Instituto Nacional Electoral",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-03",
+        "nombre": "Escrito en el que su firmante manifieste bajo protesta de decir verdad",
+        "pagina": "6.2.",
+        "descripcion": "que cuenta con facultades suficientes para comprometerse yy por s├¡ o por su representada, sin que resulte necesario acreditar su personalidad jur├¡dica (Forma DD-01) seg├║n el Articulo 5 Fracci├│n XXI, P├írrafo Ill, inciso d) de la Ley",
+        "es_causal_desechamiento": true,
+        "formato": ""
+      },
+      {
+        "id": "DA-04",
+        "nombre": "Forma DD-01",
+        "pagina": "6.2.",
+        "descripcion": "seg├║n el Articulo 5 Fracci├│n XXI, P├írrafo Ill, inciso d) de la Ley",
+        "es_causal_desechamiento": true,
+        "formato": ""
+      },
+      {
+        "id": "DA-05",
+        "nombre": "Credencial para votar expedida por el Instituto Federal Electoral o Instituto Nacional Electoral",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-06",
+        "nombre": "Pasaporte",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-07",
+        "nombre": "Lugar y fecha de la convocatoria p├║blica internacional No.",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-08",
+        "nombre": "Convocatoria p├║blica internacional No.",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-09",
+        "nombre": "LA CONVOCATORIA correspondiente",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-10",
+        "nombre": "FORMATO 04",
+        "pagina": "",
+        "descripcion": "manifestamos nuestra conformidad de ajustarnos a las leyes y reglamentos aplicables, a los t├®rminos de la convocatoria de la licitaci├│n, sus anexos y las modificaciones que, en su caso, se hayan efectuado",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "DA-11",
+        "nombre": "Formato de aceptación de la convocatoria",
+        "pagina": "",
+        "descripcion": "",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      }
+    ],
+    "tecnico": [
+      {
+        "id": "PT-1",
+        "nombre": "Recibo original y copia simple del pago de costo de participación del licitante.",
+        "pagina": "Sección 7, párrafo 1",
+        "descripcion": "Presentar recibo original y copia simple del pago de costo de participación.",
+        "es_causal_desechamiento": true,
+        "formato": "Recibo original y copia simple"
+      },
+      {
+        "id": "PT-2",
+        "nombre": "Padrón Único de Proveedores.",
+        "pagina": "Sección 7, párrafo 2",
+        "descripcion": "Verificar el cumplimiento del capital contable mínimo requerido y la capacidad financiera y especialidades de experiencia en el Padrón Único de Proveedores.",
+        "es_causal_desechamiento": true,
+        "formato": "Padrón Único de Proveedores"
+      },
+      {
+        "id": "PT-3",
+        "nombre": "Catálogo de Conceptos.",
+        "pagina": "Sección 8.12",
+        "descripcion": "Presentar catálogo de conceptos en formato libre.",
+        "es_causal_desechamiento": false,
+        "formato": "Formato libre"
+      },
+      {
+        "id": "PT-4",
+        "nombre": "Programa de suministro e instalación y montos mensuales, por concepto.",
+        "pagina": "Sección 8.13",
+        "descripcion": "Presentar programa de suministro e instalación convenido conforme al catálogo de conceptos con sus erogaciones, calendarizado y cuantificado de acuerdo a los periodos determinados por la Convocante.",
+        "es_causal_desechamiento": true,
+        "formato": "Programa de suministro e instalación"
+      }
+    ],
+    "economico": [
+      {
+        "id": "PE-07",
+        "nombre": "Recibo original y copia simple del pago de costo de participaci├│n del licitante",
+        "pagina": "7.1",
+        "descripcion": "Emitido por autoridad competente donde se pueda apreciar el n├║mero de la licitaci├│n y la fecha que se encuentre dentro del periodo establecido para ello.",
+        "es_causal_desechamiento": true,
+        "formato": "Recibo"
+      },
+      {
+        "id": "PE-08",
+        "nombre": "Padr├│n ├Ünico de Proveedores",
+        "pagina": "7.2",
+        "descripcion": "Para verificar el cumplimiento del capital contable m├¡nimo requerido, as├¡ como la capacidad financiera y especialidades de los licitantes.",
+        "es_causal_desechamiento": false,
+        "formato": "Padr├│n ├Ünico de Proveedores"
+      },
+      {
+        "id": "PE-09",
+        "nombre": "Declaraci├│n de integridad",
+        "pagina": "",
+        "descripcion": "Mediante la cual los licitantes manifiesten que por s├¡ mismos, o a trav├®s de interp├│sita persona, se abstendr├ín de adoptar conductas para que los servidores p├║blicos de la dependencia o entidad convocante, induzcan o alteren las evaluaciones de las propuestas.",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      },
+      {
+        "id": "PE-10",
+        "nombre": "Opini├│n de cumplimiento de obligaciones fiscales en materia de seguridad social, expedida por el Instituto Mexicano del Seguro Social (IMSS)",
+        "pagina": "6.7",
+        "descripcion": "Para verificar que los licitantes cumplan con las obligaciones fiscales en materia de seguridad social.",
+        "es_causal_desechamiento": false,
+        "formato": "Opini├│n"
+      },
+      {
+        "id": "PE-11",
+        "nombre": "Garant├¡a de pago",
+        "pagina": "",
+        "descripcion": "Para garantizar el pago de los trabajos realizados.",
+        "es_causal_desechamiento": true,
+        "formato": ""
+      },
+      {
+        "id": "PE-12",
+        "nombre": "Recibo del pago de la garant├¡a",
+        "pagina": "",
+        "descripcion": "Para verificar que se haya realizado el pago de la garant├¡a.",
+        "es_causal_desechamiento": false,
+        "formato": ""
+      }
+    ],
+    "formatos": [
+      {
+        "id": "Forma DD-09",
+        "nombre": "CARTA DE AUSENCIA DE CONFLICTO DE INTERÉS",
+        "pagina": "Página 27",
+        "descripcion": "Declaración de ausencia de conflicto de intereses para participar en la licitación",
+        "es_causal_desechamiento": false,
+        "formato": "DD-09"
+      },
+      {
+        "id": "Forma AT-01",
+        "nombre": "Programa de Erogaciones a Costo Directo, Calendarizados y Cuantificados",
+        "pagina": "Página 1 de la tabla/formato AE-08",
+        "descripcion": "Detalla los recursos necesarios para la ejecución de los trabajos en la licitación",
+        "es_causal_desechamiento": false,
+        "formato": "AE-08"
+      },
+      {
+        "id": "Forma AE-02",
+        "nombre": "Proposición económica",
+        "pagina": "Página 1 de la propuesta económica",
+        "descripcion": "Información financiera y presupuestaria para ejecutar los trabajos",
+        "es_causal_desechamiento": true,
+        "formato": "AE-02"
+      },
+      {
+        "id": "Forma AT-09",
+        "nombre": "Manifestación bajo protesta de decir verdad de que los datos son verídicos",
+        "pagina": "Página 1 del documento",
+        "descripcion": "Declaración de cumplimiento con lo solicitado en las bases de la licitación",
+        "es_causal_desechamiento": true,
+        "formato": "AT-09"
+      },
+      {
+        "id": "Forma AT-13",
+        "nombre": "Programa calendarizado de materiales proporcionados en el registro o solicitud de inscripción, revalidación, modificación o reexpedición",
+        "pagina": "Página 1 del programa calendarizado",
+        "descripcion": "Desglose de los materiales necesarios para la ejecución de los trabajos",
+        "es_causal_desechamiento": true,
+        "formato": "AT-13"
+      },
+      {
+        "id": "Forma AE-04",
+        "nombre": "Catálogo de conceptos",
+        "pagina": "Página 1 del catálogo",
+        "descripcion": "Listado de los trabajos y materiales a realizar durante la ejecución de los proyectos",
+        "es_causal_desechamiento": false,
+        "formato": "AE-04"
+      },
+      {
+        "id": "Forma AT-06",
+        "nombre": "Lista de maquinaria y equipo de instalación necesario para la ejecución de los trabajos",
+        "pagina": "Página 1 del documento",
+        "descripcion": "Detalla la maquinaria y equipo requeridos para realizar los trabajos solicitados en la licitación",
+        "es_causal_desechamiento": true,
+        "formato": "AT-06"
+      },
+      {
+        "id": "Forma AT-07",
+        "nombre": "Programa calendarizado de utilización de maquinaria y equipo de instalación necesario para la ejecución de los trabajos",
+        "pagina": "Página 1 del programa calendarizado",
+        "descripcion": "Desglose de la programación de la maquinaria y equipo necesarios para realizar los trabajos solicitados en la licitación",
+        "es_causal_desechamiento": true,
+        "formato": "AT-07"
+      }
+    ],
+    "causales_criticas": [
+      "Cancelación o declaración de licitación desierta",
+      "Fallo",
+      "Contratación y reserva de segundo licitante",
+      "Condiciones de pago",
+      "Penas convencionales P",
+      "Quejas e inconformidades",
+      "Evaluación legal, financiera y de especialidades W",
+      "Acceso a información pública y protección de datos personales"
+    ]
+  },
+  "observaciones_auditor": "Auditoría de Alta Fidelidad completada. Se barrió todo el espectro de las bases buscando formatos AT/AE."
+}

@@ -1,0 +1,51 @@
+{
+  "started_at_utc": "2026-04-01T20:57:45.384030+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corridas_prueba_inteligencia_20260401_205745.json",
+  "checkpoint_mode": "resume_skip_completed",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+      "session_id": "lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_1ea507ac",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_1ea507ac\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"f9131346-ebe1-4610-9bf7-beb341608f11\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' analizado con éxito.\",\"data\":null}"
+        },
+        "agents_process_timeout_sec": 18000,
+        "agents_process_accept": {
+          "status_code": 202,
+          "body_preview": "{\"success\":true,\"message\":\"Análisis iniciado. Job ID: ca861edd-56cf-43c6-b48a-b80d8d58adaf\",\"data\":{\"job_id\":\"ca861edd-56cf-43c6-b48a-b80d8d58adaf\",\"session_id\":\"lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_1ea507ac\"}}"
+        },
+        "job_id": "ca861edd-56cf-43c6-b48a-b80d8d58adaf",
+        "agents_process_job_final": {
+          "status": "COMPLETED",
+          "error": null,
+          "forensic_traceback": null
+        }
+      },
+      "orchestrator_status": "success",
+      "analysis_status": "success",
+      "compliance_status": "partial",
+      "error": null
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 1,
+    "cases_recorded": 1,
+    "ok": 1,
+    "failed": 0
+  },
+  "finished_at_utc": "2026-04-01T23:15:32.297711+00:00"
+}

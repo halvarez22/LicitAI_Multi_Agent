@@ -1,0 +1,58 @@
+{
+  "started_at_utc": "2026-03-30T23:14:33.528528+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corridas_prueba_inteligencia_20260330_231433.json",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "BAS_003_024.docx",
+      "session_id": "lic_p_intel_01_bas_003_024",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":false,\"message\":\"Ya existe una licitación con ese nombre\",\"data\":null}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BAS_003_024.docx' subido correctamente.\",\"data\":{\"doc_id\":\"152be8ec-b970-46fb-bfca-958d4604a35f\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 502,
+          "body": "{\"detail\":\"Fallo en Extracción: Unable to get page count.\\nSyntax Warning: May not be a PDF file (continuing anyway)\\nSyntax Error: Couldn't find trailer dictionary\\nSyntax Error: Couldn't find trailer dictionary\\nSyntax Error: Couldn't read xref table\\n\"}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "process failed"
+    },
+    {
+      "index": 2,
+      "filename": "Bases licitacion OPM-001-2026.pdf",
+      "session_id": "lic_p_intel_02_bases_licitacion_opm-001-2026",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":false,\"message\":\"Ya existe una licitación con ese nombre\",\"data\":null}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'Bases licitacion OPM-001-2026.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"89994e7a-19ac-4291-8063-b3b6b3da5913\",\"status\":\"UPLOADED\"}}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=900)"
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 2,
+    "cases_recorded": 2,
+    "ok": 0,
+    "failed": 2
+  },
+  "finished_at_utc": "2026-03-30T23:29:37.063083+00:00"
+}

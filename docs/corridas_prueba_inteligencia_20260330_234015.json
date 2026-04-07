@@ -1,0 +1,122 @@
+{
+  "started_at_utc": "2026-03-30T23:40:15.629315+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corridas_prueba_inteligencia_20260330_234015.json",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "Bases licitacion OPM-001-2026.pdf",
+      "session_id": "lic_p_intel_01_bases_licitacion_opm-001-2026_b94d5896",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_bases_licitacion_opm-001-2026_b94d5896\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'Bases licitacion OPM-001-2026.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"f9377fc1-06cf-4e91-8a1e-d009726996d7\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'Bases licitacion OPM-001-2026.pdf' analizado con éxito.\",\"data\":null}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=2400)"
+    },
+    {
+      "index": 2,
+      "filename": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+      "session_id": "lic_p_intel_02_bases_servicio_limpieza_2024_issste_bcs_b94d5896",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_02_bases_servicio_limpieza_2024_issste_bcs_b94d5896\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"adfa1934-26a6-49df-8620-80ee72222661\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' analizado con éxito.\",\"data\":null}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=2400)"
+    },
+    {
+      "index": 3,
+      "filename": "bases_0001.pdf",
+      "session_id": "lic_p_intel_03_bases_0001_b94d5896",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_03_bases_0001_b94d5896\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'bases_0001.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"0a76a0f9-756f-40c3-9473-3f3bf629fabf\",\"status\":\"UPLOADED\"}}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=900)"
+    },
+    {
+      "index": 4,
+      "filename": "CONVOCATORIA-13.pdf",
+      "session_id": "lic_p_intel_04_convocatoria-13_b94d5896",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_04_convocatoria-13_b94d5896\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'CONVOCATORIA-13.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"91856af1-9d39-416c-8a6e-5fee0c62b218\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'CONVOCATORIA-13.pdf' analizado con éxito.\",\"data\":null}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=2400)"
+    },
+    {
+      "index": 5,
+      "filename": "FOCON 04.pdf",
+      "session_id": "lic_p_intel_05_focon_04_b94d5896",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_05_focon_04_b94d5896\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'FOCON 04.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"1f254428-068b-498a-a1e4-151005b2804f\",\"status\":\"UPLOADED\"}}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=900)"
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 10,
+    "cases_recorded": 5,
+    "ok": 0,
+    "failed": 5
+  }
+}

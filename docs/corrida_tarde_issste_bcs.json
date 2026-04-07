@@ -1,0 +1,41 @@
+{
+  "started_at_utc": "2026-03-31T17:37:10.977478+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corrida_tarde_issste_bcs.json",
+  "checkpoint_mode": "resume_skip_completed",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+      "session_id": "lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_8cf70fbf",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_8cf70fbf\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"a189a20f-2110-40c6-873c-571fd6c501d2\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' analizado con éxito.\",\"data\":null}"
+        },
+        "agents_process_timeout_sec": 2410
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "timeout: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=2410)"
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 1,
+    "cases_recorded": 1,
+    "ok": 0,
+    "failed": 1
+  },
+  "finished_at_utc": "2026-03-31T18:18:04.435540+00:00"
+}

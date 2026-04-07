@@ -1,0 +1,140 @@
+{
+  "started_at_utc": "2026-03-30T22:55:20.859974+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "BAS_003_024.docx",
+      "session_id": "lic_p_intel_01_bas_003_024",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_bas_003_024\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BAS_003_024.docx' subido correctamente.\",\"data\":{\"doc_id\":\"86584de0-34d2-4b0f-9f59-f2e4d5dba042\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 502,
+          "body": "{\"detail\":\"Fallo en Extracción: Unable to get page count.\\nSyntax Warning: May not be a PDF file (continuing anyway)\\nSyntax Error: Couldn't find trailer dictionary\\nSyntax Error: Couldn't find trailer dictionary\\nSyntax Error: Couldn't read xref table\\n\"}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "process failed"
+    },
+    {
+      "index": 2,
+      "filename": "Bases licitacion OPM-001-2026.pdf",
+      "session_id": "lic_p_intel_02_bases_licitacion_opm-001-2026",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_02_bases_licitacion_opm-001-2026\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'Bases licitacion OPM-001-2026.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"d79892f1-cd1b-4092-ab97-419886a5e3ac\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'Bases licitacion OPM-001-2026.pdf' analizado con éxito.\",\"data\":null}"
+        }
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    },
+    {
+      "index": 3,
+      "filename": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+      "session_id": "lic_p_intel_03_bases_servicio_limpieza_2024_issste_bcs",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    },
+    {
+      "index": 4,
+      "filename": "bases_0001.pdf",
+      "session_id": "lic_p_intel_04_bases_0001",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    },
+    {
+      "index": 5,
+      "filename": "CONVOCATORIA TREN MAYA.docx",
+      "session_id": "lic_p_intel_05_convocatoria_tren_maya",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', ConnectionAbortedError(10053, 'Se ha anulado una conexión establecida por el software en su equipo host', None, 10053, None)))"
+    },
+    {
+      "index": 6,
+      "filename": "CONVOCATORIA-13.pdf",
+      "session_id": "lic_p_intel_06_convocatoria-13",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', ConnectionAbortedError(10053, 'Se ha anulado una conexión establecida por el software en su equipo host', None, 10053, None)))"
+    },
+    {
+      "index": 7,
+      "filename": "FOCON 04.pdf",
+      "session_id": "lic_p_intel_07_focon_04",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', ConnectionAbortedError(10053, 'Se ha anulado una conexión establecida por el software en su equipo host', None, 10053, None)))"
+    },
+    {
+      "index": 8,
+      "filename": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "session_id": "lic_p_intel_08_la-51-gyn-051gyn025-n-8-2024_vigilancia",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', ConnectionAbortedError(10053, 'Se ha anulado una conexión establecida por el software en su equipo host', None, 10053, None)))"
+    },
+    {
+      "index": 9,
+      "filename": "T5 BASES DD-PM-ILUM-2019-SUM CAMBIO ILUMINACION.pdf",
+      "session_id": "lic_p_intel_09_t5_bases_dd-pm-ilum-2019-sum_cambio_iluminacion",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    },
+    {
+      "index": 10,
+      "filename": "TECNICO FINAL.pdf",
+      "session_id": "lic_p_intel_10_tecnico_final",
+      "steps": {},
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected('Remote end closed connection without response')))"
+    }
+  ],
+  "errors": [],
+  "finished_at_utc": "2026-03-30T23:37:21.886302+00:00",
+  "summary": {
+    "total": 10,
+    "ok": 0,
+    "failed": 10
+  }
+}

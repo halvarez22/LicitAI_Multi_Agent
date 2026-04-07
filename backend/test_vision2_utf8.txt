@@ -1,0 +1,17 @@
+﻿==================================================
+­ƒøá´©Å INICIANDO PRUEBA DE LABORATORIO: DOBLE AGENTE
+­ƒôä Archivo Objetivo: 7d400ae0-7ca7-446e-ab19-c95c2335e685_bases_licitacion_opm-001-2026.pdf
+==================================================
+
+ÔûÂ´©Å PASO 1: Disparando DigitalExtractorAgent (Bistur├¡)...
+[DigitalExtractorAgent] ­ƒòÁ´©Å Iniciando escaneo quir├║rgico: /data/uploads/7d400ae0-7ca7-446e-ab19-c95c2335e685_bases_licitacion_opm-001-2026.pdf
+[DigitalExtractorAgent] ÔÜá´©Å PDF detectado como ESCANEO (0 chars extractables). Requiere visi├│n.
+Ô£à COMPORTAMIENTO ESPERADO: El Bistur├¡ detect├│ el escaneo y abort├│. Raz├│n: scanned_document
+
+ÔûÂ´©Å PASO 2: Lanzando VisionExtractorAgent (Tanque Forense)...
+ÔÅ│ Esto puede tomar varios minutos debido a las pausas de limpieza de RAM...
+[VisionExtractorAgent] ­ƒæü´©Å Iniciando Visi├│n Forense (v├¡a Ollama Local glm-ocr): /data/uploads/7d400ae0-7ca7-446e-ab19-c95c2335e685_bases_licitacion_opm-001-2026.pdf
+[VisionExtractorAgent] ­ƒôä P├íg 1/50 Extra├¡da (50 chars)
+[VisionExtractorAgent] ­ƒôä P├íg 2/50 Extra├¡da (50 chars)
+[VisionExtractorAgent] ­ƒôä P├íg 3/50 Extra├¡da (50 chars)
+[VisionExtractorAgent] ­ƒôä P├íg 4/50 Extra├¡da (50 chars)

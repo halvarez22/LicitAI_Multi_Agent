@@ -1,0 +1,25 @@
+{
+  "status": "waiting_for_data",
+  "auto_filled": [],
+  "missing": [
+    {
+      "field": "cedula_representante",
+      "label": "Número de INE/Cédula del Representante Legal",
+      "question": "Para las declaraciones y cartas formales necesito el **número de identificación oficial** (INE, Pasaporte o Cédula Profesional) de **HECTOR MANUEL ALVAREZ GUTIERREZ**. ¿Me lo puedes escribir aquí directamente?",
+      "document_hint": "INE, Pasaporte o Cédula Profesional"
+    },
+    {
+      "field": "email",
+      "label": "Correo electrónico de la empresa",
+      "question": "¿Cuál es el **correo electrónico oficial** de SERVICIOS DE TECNOLOGIA INTEGRALES, SOCIEDAD ANÓNIMA DE CAPITAL VARIABLE?",
+      "document_hint": "Membrete corporativo"
+    },
+    {
+      "field": "web",
+      "label": "Sitio web de la empresa",
+      "question": "¿Tiene SERVICIOS DE TECNOLOGIA INTEGRALES, SOCIEDAD ANÓNIMA DE CAPITAL VARIABLE un sitio web? Escríbelo o escribe **'No aplica'**.",
+      "document_hint": "Membrete corporativo"
+    }
+  ],
+  "chatbot_message": "\n🔍 Me faltan **3** dato(s) para completar todos los documentos:\n   • **Número de INE/Cédula del Representante Legal** _(fuente sugerida: INE, Pasaporte o Cédula Profesional)_\n   • **Correo electrónico de la empresa** _(fuente sugerida: Membrete corporativo)_\n   • **Sitio web de la empresa** _(fuente sugerida: Membrete corporativo)_\n\nEmpecemos por el primero:\n\n📋 Para las declaraciones y cartas formales necesito el **número de identificación oficial** (INE, Pasaporte o Cédula Profesional) de **HECTOR MANUEL ALVAREZ GUTIERREZ**. ¿Me lo puedes escribir aquí directamente?\n\n_También puedes subir el documento **'INE, Pasaporte o Cédula Profesional'** a Fuentes de Verdad y dar clic en Analizar Fuentes._"
+}

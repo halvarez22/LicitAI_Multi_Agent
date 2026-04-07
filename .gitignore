@@ -1,0 +1,65 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build / cache
+dist/
+build/
+tmp/
+temp/
+*.tmp
+
+# Project runtime artifacts
+logs/
+uploads/
+backups/
+data/
+models/
+out/
+
+# Local reports and generated text artifacts
+*.log
+agent_result*.txt
+*_report*.txt
+*_report*.json
+backend_live_monitor*.txt
+full_orchestrator_log*.txt
+manual_analysis*.txt
+salida.txt
+test_out.txt
+*_log*.txt
+*_output*.txt
+inspect_out.txt
+test_page1.jpg

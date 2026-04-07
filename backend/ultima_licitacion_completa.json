@@ -1,0 +1,610 @@
+{
+  "status": "success",
+  "session_id": "maderas_chihuahua_luminarias_",
+  "orchestrator_decision": {
+    "next_steps": [
+      "analyze_bases_COMPLETED",
+      "compliance_audit_COMPLETED",
+      "economic_audit_COMPLETED"
+    ],
+    "history": [],
+    "summary": "Pipeline completado: 3/3 agentes ejecutados con éxito."
+  },
+  "results": {
+    "analysis": {
+      "status": "success",
+      "agent": "analyst_001",
+      "data": {
+        "cronograma": {
+          "junta_aclaraciones": "No especificado",
+          "presentacion_proposiciones": "No especificado",
+          "fallo": "No especificado"
+        },
+        "requisitos_filtro": [
+          "Presentar Acta Constitutiva notariada vigente",
+          "Acreditar capital contable mínimo conforme a bases",
+          "Contar con registro vigente en el Padrón de Proveedores del Gobierno Municipal",
+          "Presentar declaración de ingresos y gastos",
+          "Acreditar experiencia previa en proyectos similares"
+        ],
+        "garantias": {
+          "seriedad_oferta": "La sociedad se compromete a presentar una oferta seria y comprometida.",
+          "cumplimiento": "El licitante debe cumplir con los montos exactos establecidos en las bases."
+        },
+        "criterios_evaluacion": "Puntos y Porcentajes"
+      }
+    },
+    "compliance": {
+      "status": "success",
+      "agent": "compliance_001",
+      "summary": {
+        "estado_global": "🔴 CRÍTICO",
+        "total_requisitos": 32,
+        "riesgos_desechamiento": 11,
+        "veredicto": "Se han detectado 32 requisitos obligatorios. La auditoría exhaustiva identificó 11 puntos de descalificación automática."
+      },
+      "data": {
+        "administrativo": [
+          {
+            "id": "DD-01",
+            "nombre": "Escrito de manifestación de facultades suficientes para comprometerse por sí o por su representada",
+            "pagina": "5.1",
+            "descripcion": "Manifiesto bajo protesta de decir verdad que cuentan con facultades suficientes para comprometerse por sí o por su representada sin que resulte necesario acreditar su personalidad jurídica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-01"
+          },
+          {
+            "id": "DD-02",
+            "nombre": "Declaración de Integridad",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-02"
+          },
+          {
+            "id": "DD-03",
+            "nombre": "Escrito de manifestación de datos bancarios",
+            "pagina": "5.3",
+            "descripcion": "Manifiesto bajo protesta de decir verdad que los datos bancarios indicados son correctos y se encuentran vigentes.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-03"
+          },
+          {
+            "id": "DD-04",
+            "nombre": "Manifestación bajo protesta de decir verdad de no llevar a cabo operaciones inexistentes a través de la emisión de facturas o comprobantes fiscales.",
+            "pagina": "5.4",
+            "descripcion": "Manifiesto bajo protesta de decir verdad que no se ubica en la presunción de llevar a cabo operaciones inexistentes a través de la emisión de facturas o comprobantes fiscales.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-04"
+          },
+          {
+            "id": "DD-05",
+            "nombre": "Listado de verificación de la recepción de los documentos.",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-05"
+          },
+          {
+            "id": "DD-06",
+            "nombre": "Manifestación por escrito de dirección de correo electrónico.",
+            "pagina": "5.6",
+            "descripcion": "Proporciona dirección de correo electrónico.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-06"
+          },
+          {
+            "id": "DD-07",
+            "nombre": "Manifestación de no tener conflicto de interés.",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-07"
+          },
+          {
+            "id": "DD-08",
+            "nombre": "Carta compromiso que presentará Constancia de No Adeudo expedida por la Tesorería Municipal de Madera vigente.",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-08"
+          },
+          {
+            "id": "DD-09",
+            "nombre": "Manifestación de no tener conflicto de interés.",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-09"
+          },
+          {
+            "id": "DD-10",
+            "nombre": "Carta compromiso que presentará Constancia de No Adeudo expedida por la Tesorería Municipal de Madera vigente.",
+            "pagina": "",
+            "descripcion": "No se proporciona descripción específica.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-10"
+          },
+          {
+            "id": "DD-03",
+            "nombre": "Comprobante bancario",
+            "pagina": "",
+            "descripcion": "Anexa copia del comprobante bancario correspondiente.",
+            "es_causal_desechamiento": false,
+            "formato": "DD-03"
+          }
+        ],
+        "tecnico": [
+          {
+            "id": "PT-01",
+            "nombre": "Convocatoria pública internacional",
+            "pagina": "1",
+            "descripcion": "Presentar proposición para los trabajos de instalación",
+            "es_causal_desechamiento": false,
+            "formato": "Forma AT-13"
+          },
+          {
+            "id": "PT-02",
+            "nombre": "Programa calendarizado de materiales",
+            "pagina": "7.15",
+            "descripcion": "Presentar programa calendarizado de materiales para los trabajos",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AT-13"
+          },
+          {
+            "id": "PT-03",
+            "nombre": "Capacidad Financiera",
+            "pagina": "7.16",
+            "descripcion": "Presentar documentación comprobable del licitante que acredite su capacidad financiera",
+            "es_causal_desechamiento": true,
+            "formato": "Copia simple de Estado de Situación Financiera"
+          },
+          {
+            "id": "PT-04",
+            "nombre": "Garantía de seriedad",
+            "pagina": "8.1",
+            "descripcion": "Otorgar garantía a favor del Municipio de Madera",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AE-01"
+          },
+          {
+            "id": "PT-05",
+            "nombre": "Carta compromiso de seriedad de su proposición",
+            "pagina": "8.2",
+            "descripcion": "Presentar carta compromiso de seriedad de la propuesta",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AE-01"
+          },
+          {
+            "id": "PT-06",
+            "nombre": "Proposición económica",
+            "pagina": "8.3",
+            "descripcion": "Presentar proposición económica con el monto total de la propuesta",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AE-02"
+          },
+          {
+            "id": "PT-07",
+            "nombre": "Listado de insumos",
+            "pagina": "8.4",
+            "descripcion": "Presentar listado de insumos con descripción y especificaciones técnicas",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AE-02"
+          },
+          {
+            "id": "PT-08",
+            "nombre": "Relación y análisis de los costos del suministro de luminarias",
+            "pagina": "8.11",
+            "descripcion": "Presentar relación y análisis de los costos del suministro de luminarias",
+            "es_causal_desechamiento": true,
+            "formato": "Forma AE-02"
+          },
+          {
+            "id": "PT-09",
+            "nombre": "Papeleta de proposición",
+            "pagina": "PAPEL MEMBRETADO DE LA EMPRESA FORMATO 07",
+            "descripcion": "Presentar papeleta de proposición con la información requerida",
+            "es_causal_desechamiento": false,
+            "formato": "Forma 07"
+          },
+          {
+            "id": "PT-10",
+            "nombre": "Manifiesto de aceptación de los requisitos contenidos en LA CONVOCATORIA",
+            "pagina": "PAPEL MEMBRETADO DE LA EMPRESA FORMATO 07",
+            "descripcion": "Presentar manifiesto de aceptación de los requisitos contenidos en LA CONVOCATORIA",
+            "es_causal_desechamiento": false,
+            "formato": "Forma 07"
+          },
+          {
+            "id": "PT-11",
+            "nombre": "Garantía de cumplimiento",
+            "pagina": "2.16",
+            "descripcion": "Otorgar garantía de cumplimiento a favor del Municipio de Madera",
+            "es_causal_desechamiento": true,
+            "formato": "Cheque de caja, cheque certificado o depósito en garantía"
+          },
+          {
+            "id": "PT-12",
+            "nombre": "Prohibición de negociación",
+            "pagina": "2.17",
+            "descripcion": "No podrán ser negociadas las condiciones contenidas en el procedimiento de licitación pública y las proposiciones presentadas por los licitantes",
+            "es_causal_desechamiento": false,
+            "formato": ""
+          },
+          {
+            "id": "PT-13",
+            "nombre": "No podrán participar las personas que se encuentren en los supuestos de los artículos 86 de la Ley",
+            "pagina": "2.18",
+            "descripcion": "No podrán participar las personas que se encuentren en los supuestos de los artículos 86 de la Ley",
+            "es_causal_desechamiento": false,
+            "formato": ""
+          },
+          {
+            "id": "PT-14",
+            "nombre": "Calendario de actos licitatorios",
+            "pagina": "3.1",
+            "descripcion": "Presentar calendario de actos licitatorios",
+            "es_causal_desechamiento": false,
+            "formato": ""
+          },
+          {
+            "id": "PT-15",
+            "nombre": "Visita al sitio de instalación",
+            "pagina": "3.2",
+            "descripcion": "Asistir a la visita al sitio de instalación",
+            "es_causal_desechamiento": false,
+            "formato": ""
+          },
+          {
+            "id": "PT-16",
+            "nombre": "Junta de aclaraciones",
+            "pagina": "3.3",
+            "descripcion": "Asistir a la junta de aclaraciones",
+            "es_causal_desechamiento": false,
+            "formato": ""
+          }
+        ],
+        "economico": [
+          {
+            "id": "PE-01",
+            "nombre": "Manifestación bajo protesta de decir verdad; de que los datos proporcionados en su Registro 0 solicitud de inscripción; revalidación; modificación 0 reexpedición; se encuentra completa y actualizada; y a la fecha de presentación de la proposición no ha sufrido modificaciones que afecten su registro",
+            "pagina": "Forma DD-08",
+            "descripcion": "Declaración de que los datos proporcionados son actuales y no han sufrido cambios",
+            "es_causal_desechamiento": true,
+            "formato": "DD-08"
+          },
+          {
+            "id": "PE-02",
+            "nombre": "Constancia de registro en el Padrón de Proveedores",
+            "pagina": "Constancia vigente del registro en el Padrón 0 escrito de solicitud de inscripción; revalidación; modificación 0 reexpedición",
+            "descripcion": "Documentos que acrediten la inscripción y especialidades del proveedor",
+            "es_causal_desechamiento": true,
+            "formato": "Constancia vigente o escrito de solicitud"
+          },
+          {
+            "id": "PE-03",
+            "nombre": "Formato de constancia de recepción de documentación",
+            "pagina": "Forma DD-05",
+            "descripcion": "Formato que servirá como constancia de recepción de la documentación presentada por el licitante",
+            "es_causal_desechamiento": false,
+            "formato": "DD-05"
+          },
+          {
+            "id": "PE-04",
+            "nombre": "Proposición Económica",
+            "pagina": "Forma AE-02",
+            "descripcion": "Documentación que contiene la oferta económica del licitante",
+            "es_causal_desechamiento": true,
+            "formato": "AE-02"
+          },
+          {
+            "id": "PE-05",
+            "nombre": "Acta de presentación y apertura de proposiciones",
+            "pagina": "Acta que se levantará en el acto de presentación y apertura de las proposiciones",
+            "descripcion": "Documentación que contiene la constancia de la celebración del acto de presentación y apertura de las proposiciones",
+            "es_causal_desechamiento": false,
+            "formato": "Acta"
+          }
+        ],
+        "formatos": [],
+        "causales_criticas": [
+          "Propuesta Técnica",
+          "Presentada por: [Nombre del Licitante]",
+          "Relativa a la licitación pública identificada bajo el número 1-12026, relativa al suministro e instalación de luminarias LED, incluye todos los materiales necesarios para su correcta instalación.",
+          "Se especifican detalladamente todas las condiciones y requerimientos contemplados en el anexo técnico que antecede, así como características, especificaciones y términos particulares. Siempre y cuando no se contrapongan con lo solicitado por la convocante."
+        ]
+      },
+      "observaciones_auditor": "Auditoría de Alta Fidelidad completada. Se barrió todo el espectro de las bases buscando formatos AT/AE."
+    },
+    "economic": {
+      "status": "success",
+      "agent": "economic_001",
+      "summary": {
+        "estado": "✅ AUDITORÍA COMPLETADA",
+        "total_partidas": 2,
+        "cantidad_total_bienes": 0,
+        "moneda": "MXN",
+        "veredicto": "Se han detectado 2 partidas con un total de 0 unidades físicas."
+      },
+      "data": {
+        "catálogo": [
+          {
+            "licitacion": {
+              "numero": "1-12026",
+              "asunto": "Suministro e instalación de luminarias LED"
+            },
+            "propuesta_tecnica": {
+              "presentada_por": "",
+              "fecha": "",
+              "partida_unica": ""
+            },
+            "requisitos": [
+              {
+                "condiciones": "",
+                "requerimientos": "",
+                "caracteristicas": "",
+                "especificaciones": "",
+                "terminos_particulares": ""
+              }
+            ],
+            "formato_at_09": {
+              "miembros_integrantes": "",
+              "incumplimiento_articulo_3": ""
+            },
+            "garantia": {
+              "entrega": "",
+              "monto": "",
+              "forma_pago": "",
+              "anticipo": "",
+              "impuestos": ""
+            },
+            "prohibicion_de_negociacion": {
+              "condiciones": "",
+              "proposiciones": ""
+            },
+            "actos_licitatorios": [
+              {
+                "calendario": {
+                  "visita_al_sitio": {
+                    "fecha": "26 de enero del 2026",
+                    "hora": "10:00 a.m."
+                  }
+                },
+                "junta_de_aclaraciones": {
+                  "fecha": "26 de enero del 2026",
+                  "hora": "16.00 horas"
+                }
+              }
+            ]
+          }
+        ],
+        "cotizaciones": [
+          {
+            "catalogo": [
+              {
+                "partida": "1",
+                "descripcion": "Descripción de la partida 1",
+                "cantidad": 10,
+                "unidad": "Unidad de medida",
+                "precio_unitario": 100,
+                "importe": 1000
+              },
+              {
+                "partida": "2",
+                "descripcion": "Descripción de la partida 2",
+                "cantidad": 20,
+                "unidad": "Unidad de medida",
+                "precio_unitario": 200,
+                "importe": 4000
+              }
+            ],
+            "evaluacion": {
+              "metodo": "puntos",
+              "puntaje_maximo": 100,
+              "criterios_desempate": [
+                "Criterio de desempate 1",
+                "Criterio de desempate 2"
+              ]
+            },
+            "financiero": {
+              "moneda": "MXN",
+              "forma_pago": "Efectivo",
+              "anticipo": true,
+              "impuestos": [
+                "Impuesto 1",
+                "Impuesto 2"
+              ]
+            },
+            "logistica": {
+              "plazo_entrega": "5 días hábiles",
+              "lugar_entrega": "Lugar de entrega",
+              "vigencia": "Fecha de vigencia"
+            }
+          }
+        ],
+        "criterios_evaluacion": {
+          "instruccion": {
+            "estructurada": [
+              {
+                "nombre": "catálogo",
+                "descripcion": "Devuelve una lista de objetos con la información del catálogo o cotización.",
+                "parametros": [
+                  {
+                    "nombre": "partida",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "descripcion",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "cantidad",
+                    "tipo": "number"
+                  },
+                  {
+                    "nombre": "unidad",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "precio_unitario",
+                    "tipo": "number"
+                  },
+                  {
+                    "nombre": "importe",
+                    "tipo": "number"
+                  }
+                ],
+                "retorno": [
+                  {
+                    "partida": "",
+                    "descripcion": "",
+                    "cantidad": 0,
+                    "unidad": "",
+                    "precio_unitario": 0,
+                    "importe": 0
+                  }
+                ]
+              },
+              {
+                "nombre": "evaluacion",
+                "descripcion": "Extrae la información de evaluación.",
+                "parametros": [
+                  {
+                    "nombre": "metodo",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "puntaje_maximo",
+                    "tipo": "number"
+                  },
+                  {
+                    "nombre": "criterios_desempate",
+                    "tipo": "array"
+                  }
+                ],
+                "retorno": [
+                  {
+                    "metodo": "",
+                    "puntaje_maximo": 0,
+                    "criterios_desempate": []
+                  }
+                ]
+              },
+              {
+                "nombre": "financiero",
+                "descripcion": "Extrae la información financiera.",
+                "parametros": [
+                  {
+                    "nombre": "moneda",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "forma_pago",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "anticipo",
+                    "tipo": "boolean"
+                  },
+                  {
+                    "nombre": "impuestos",
+                    "tipo": "array"
+                  }
+                ],
+                "retorno": [
+                  {
+                    "moneda": "",
+                    "forma_pago": "",
+                    "anticipo": false,
+                    "impuestos": []
+                  }
+                ]
+              },
+              {
+                "nombre": "logistica",
+                "descripcion": "Extrae la información logística.",
+                "parametros": [
+                  {
+                    "nombre": "plazo_entrega",
+                    "tipo": "number"
+                  },
+                  {
+                    "nombre": "lugar_entrega",
+                    "tipo": "string"
+                  },
+                  {
+                    "nombre": "vigencia",
+                    "tipo": "boolean"
+                  }
+                ],
+                "retorno": [
+                  {
+                    "plazo_entrega": 0,
+                    "lugar_entrega": "",
+                    "vigencia": false
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "condiciones_pago": {
+          "capital_social": 1000000,
+          "nombre": "Sociedad de Construcciones",
+          "direccion": "Calle 123, Colonia Centro",
+          "ciudad": "México D.F.",
+          "estado": "Distrito Federal",
+          "pais": "México",
+          "telefono": "+52 55 1234 5678",
+          "correo_electronico": "info@sociedaddeconstrucciones.com.mx"
+        },
+        "logistica_y_vigencia": {
+          "instruccion": {
+            "estructurada": [
+              {
+                "nombre": "catálogo",
+                "descripcion": "Devuelve una lista de objetos con los siguientes campos:",
+                "campos": [
+                  "partida",
+                  "descripcion",
+                  "cantidad",
+                  "unidad",
+                  "precio_unitario",
+                  "importe"
+                ]
+              },
+              {
+                "nombre": "evaluacion",
+                "descripcion": "Extrae los siguientes datos de la evaluación:",
+                "campos": [
+                  "metodo",
+                  "puntaje_maximo",
+                  "criterios_desempate"
+                ]
+              },
+              {
+                "nombre": "financiero",
+                "descripcion": "Extrae los siguientes datos financieros:",
+                "campos": [
+                  "moneda",
+                  "forma_pago",
+                  "anticipo",
+                  "impuestos"
+                ]
+              },
+              {
+                "nombre": "logistica",
+                "descripcion": "Extrae los siguientes datos de logística:",
+                "campos": [
+                  "plazo_entrega",
+                  "lugar_entrega",
+                  "vigencia"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

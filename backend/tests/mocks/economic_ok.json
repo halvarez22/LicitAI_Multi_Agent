@@ -1,0 +1,19 @@
+{
+  "data": {
+    "proposal_items": [
+      {
+        "concepto": "Servicio de supervisor sin costo para la convocante",
+        "descripcion": "Supervisor sin costo",
+        "precio_unitario": 0
+      }
+    ],
+    "validation_result": {
+      "validations": [
+        {
+          "regla": "consistencia_total_iva",
+          "estado": "ok"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "metadata": {
+    "template_version": "1.0.0",
+    "project": "LicitAI",
+    "scenario_name": "ISSSTE_BCS_E2E",
+    "created_at_utc": "YYYY-MM-DDTHH:MM:SSZ",
+    "owner": "team",
+    "notes": "Plantilla para comparar baseline vs post-cambio"
+  },
+  "dataset": {
+    "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+    "target_file": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+    "file_size_bytes": 0,
+    "file_hash_sha256": ""
+  },
+  "environment": {
+    "api_base_url": "http://localhost:8001/api/v1",
+    "ollama_model": "llama3.1:8b",
+    "gpu": "RTX 4060 8GB",
+    "cpu": "i9-14900HX",
+    "ram_gb": 32,
+    "timeouts_sec": {
+      "upload": 300,
+      "process": 900,
+      "orchestrator": 2410
+    }
+  },
+  "baseline": {
+    "run_id": "baseline_YYYYMMDD_HHMMSS",
+    "commit_or_tag": "",
+    "status": "failed",
+    "error_type": "timeout",
+    "error_message": "",
+    "metrics": {
+      "e2e_total_duration_sec": 0,
+      "stage_duration_sec": {
+        "analysis": null,
+        "compliance": null,
+        "economic": null
+      },
+      "job_success_rate_24h": null,
+      "job_retry_count": null,
+      "resume_success_rate": null,
+      "forensic_quality_gate_pass_rate": null
+    },
+    "orchestrator": {
+      "stop_reason": null,
+      "aggregate_health": null
+    },
+    "evidence": {
+      "report_json_path": "docs/corrida_tarde_issste_bcs.json",
+      "logs_reference": "docker-compose logs backend --tail N",
+      "session_id": ""
+    }
+  },
+  "post_change": {
+    "run_id": "post_YYYYMMDD_HHMMSS",
+    "commit_or_tag": "",
+    "change_set": [
+      "Ejemplo: async endpoint 202 + job_id",
+      "Ejemplo: checkpoint por stage",
+      "Ejemplo: RQ worker persistente",
+      "Ejemplo: chunking 2k"
+    ],
+    "status": "pending",
+    "error_type": null,
+    "error_message": null,
+    "metrics": {
+      "e2e_total_duration_sec": null,
+      "stage_duration_sec": {
+        "analysis": null,
+        "compliance": null,
+        "economic": null
+      },
+      "job_success_rate_24h": null,
+      "job_retry_count": null,
+      "resume_success_rate": null,
+      "forensic_quality_gate_pass_rate": null
+    },
+    "orchestrator": {
+      "stop_reason": null,
+      "aggregate_health": null
+    },
+    "evidence": {
+      "report_json_path": "",
+      "logs_reference": "",
+      "session_id": ""
+    }
+  },
+  "comparison": {
+    "improvements": {
+      "e2e_total_duration_sec_delta": null,
+      "e2e_total_duration_sec_delta_pct": null,
+      "analysis_duration_delta_pct": null,
+      "compliance_duration_delta_pct": null,
+      "economic_duration_delta_pct": null
+    },
+    "quality_and_reliability": {
+      "timeout_resolved": false,
+      "resume_validated": false,
+      "forensic_quality_regression": false
+    },
+    "acceptance_checklist": {
+      "returns_202_with_job_id_under_2s": false,
+      "job_status_transitions_visible": false,
+      "issste_bcs_two_runs_without_timeout": false,
+      "checkpoint_after_each_critical_stage": false,
+      "resume_from_last_checkpoint": false
+    }
+  }
+}

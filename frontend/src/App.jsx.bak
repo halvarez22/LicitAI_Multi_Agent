@@ -1,0 +1,457 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+    FileText, Shield, BarChart3, ChevronRight,
+    Upload, CheckCircle2, AlertCircle, ExternalLink,
+    Plus, Trash2, Play, Circle, Loader2, Send, Search, Layout, Sparkles,
+    Settings, Bell, User, Info, FileSearch, Zap, ArrowLeft
+} from 'lucide-react';
+import axios from 'axios';
+import './index.css';
+
+// Componentes
+import LicitacionesGrid from './components/LicitacionesGrid';
+import Dashboard from './components/Dashboard';
+
+const API_BASE = "http://localhost:8001/api/v1";
+
+const App = () => {
+    const fileInputRef = useRef(null);
+    const [sessionId, setSessionId] = useState(null);
+    const [sources, setSources] = useState([]);
+    const [chatMessages, setChatMessages] = useState([
+        { sender: 'system', text: 'Protocolos de auditoría estables. Selecciona una licitación para comenzar.' }
+    ]);
+    const [auditResults, setAuditResults] = useState(null);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [chatInput, setChatInput] = useState("");
+    const [isThinking, setIsThinking] = useState(false);
+    const [auditProgress, setAuditProgress] = useState({ percent: 0, currentFile: "" });
+
+    // Cargar documentos cuando cambia la sesión
+    useEffect(() => {
+        if (!sessionId) return;
+
+        const loadSessionData = async () => {
+            try {
+                const docsRes = await axios.get(`${API_BASE}/upload/list/${sessionId}?_t=${new Date().getTime()}`);
+                if (docsRes.data.success && docsRes.data.data?.documents) {
+                    setSources(docsRes.data.data.documents.map(d => ({ ...d, processing: false })));
+                }
+                
+                // Reset chat
+                setChatMessages([{ sender: 'system', text: `Conectado a la licitación: ${sessionId}. Cargando contexto experto...` }]);
+            } catch (err) {
+                console.error("Error cargando datos de la sesión:", err);
+            }
+        };
+        loadSessionData();
+    }, [sessionId]);
+
+    const handleFileUpload = async (e) => {
+        const files = Array.from(e.target.files);
+        if (!files.length || !sessionId) return;
+
+        const newSources = files.map(f => ({
+            id: `temp-${Math.random()}`,
+            name: f.name,
+            status: 'UPLOADING',
+            processing: false
+        }));
+        setSources(prev => [...prev, ...newSources]);
+
+        for (const file of files) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('session_id', sessionId);
+
+            try {
+                const res = await axios.post(`${API_BASE}/upload/document`, formData);
+                const docId = res.data.data.doc_id;
+                setSources(prev => prev.map(s =>
+                    s.name === file.name && s.status === 'UPLOADING' ? { ...s, id: docId, status: 'UPLOADED' } : s
+                ));
+            } catch (err) {
+                setSources(prev => prev.map(s =>
+                    s.name === file.name && s.status === 'UPLOADING' ? { ...s, status: 'ERROR' } : s
+                ));
+            }
+        }
+    };
+
+    const analyzeDocument = async (docId) => {
+        if (!docId || String(docId).startsWith('temp-') || !sessionId) return;
+
+        setSources(prev => prev.map(s => s.id === docId ? { ...s, processing: true } : s));
+        const target = sources.find(s => s.id === docId);
+
+        try {
+            const formData = new FormData();
+            formData.append('session_id', sessionId);
+            await axios.post(`${API_BASE}/upload/process/${docId}`, formData);
+
+            setSources(prev => prev.map(s => s.id === docId ? { ...s, status: 'ANALYZED', processing: false } : s));
+            setChatMessages(prev => [...prev, { sender: 'system', text: `Conocimiento consolidado para '${target?.name}'.` }]);
+        } catch (err) {
+            setSources(prev => prev.map(s => s.id === docId ? { ...s, processing: false, status: 'ERROR' } : s));
+        }
+    };
+
+    const triggerFullAudit = async () => {
+        console.log("--- INICIO AUDITORÍA MAESTRA ---");
+        console.log("Sesión:", sessionId);
+        console.log("Archivos actuales:", sources);
+
+        // Filtro robusto (insensible a mayúsculas)
+        const pending = sources.filter(s => {
+            const status = (s.status || "").toUpperCase();
+            return status !== 'ANALYZED';
+        });
+
+        if (sources.length === 0) {
+            console.warn("No hay fuentes cargadas.");
+            setChatMessages(prev => [...prev, { sender: 'system', text: 'Sube al menos un documento para iniciar la auditoría.' }]);
+            return;
+        }
+
+        setIsAnalyzing(true);
+        setAuditProgress({ percent: 5, currentFile: "Iniciando orquestación..." });
+        setChatMessages(prev => [...prev, { sender: 'agent', text: 'Iniciando Auditoría Maestra sobre el expediente...' }]);
+
+        try {
+            // Un pequeño delay para asegurar que el DOM se actualice y el usuario vea el spinner
+            await new Promise(r => setTimeout(r, 800));
+
+            let count = 0;
+            for (const doc of pending) {
+                const progress = Math.round(((count) / pending.length) * 100);
+                setAuditProgress({ 
+                    percent: Math.max(progress, 1), 
+                    currentFile: doc.name 
+                });
+                console.log(`[*] Analizando [${count+1}/${pending.length}]: ${doc.name}`);
+                await analyzeDocument(doc.id);
+                count++;
+            }
+            
+            setAuditProgress({ percent: 90, currentFile: "Agentes consolidando dictamen final..." });
+            
+            const response = await axios.post(`${API_BASE}/agents/process`, {
+                session_id: sessionId,
+                company_data: { "mode": "complete_audit" }
+            });
+
+            setAuditProgress({ percent: 100, currentFile: "¡Dictamen listo!" });
+            await new Promise(r => setTimeout(r, 800));
+
+            const results = response.data.data;
+            const analysis = results?.analysis?.data;
+            const economic = results?.economic?.data;
+
+            setAuditResults({
+                status: analysis ? "✅ COMPLETADO" : "⚠️ REVISIÓN",
+                veredicto: analysis 
+                    ? `Análisis finalizado para ${sessionId}. Se ha detectado un esquema de evaluación ${analysis.criterios_evaluacion || 'no especificado'} y se extrajeron las fechas clave del cronograma.`
+                    : "La auditoría terminó pero no se encontró información estructurada suficiente.",
+                riesgos: economic?.alertas?.length || 0,
+                totalRequisitos: analysis?.requisitos_filtro?.length || 0,
+                causales: [
+                    ...(analysis?.requisitos_filtro || []),
+                    ...(economic?.observaciones || [])
+                ].slice(0, 6) // Mostramos hasta 6 puntos clave
+            });
+
+            setChatMessages(prev => [...prev, { 
+                sender: 'agent', 
+                text: analysis 
+                    ? `Auditoría finalizada. El fallo está programado para el ${analysis.cronograma?.fallo}. He listado los requisitos críticos en el monitor lateral.`
+                    : 'Análisis completado, pero los documentos parecen no contener las bases estándar de licitación.' 
+            }]);
+        } catch (err) {
+            console.error("Error en Auditoría:", err);
+            setChatMessages(prev => [...prev, { sender: 'system', text: "Error en la comunicación con los agentes." }]);
+        } finally {
+            // Dejamos el progreso al 100% un segundo más para que el usuario lo aprecie
+            setTimeout(() => {
+                setIsAnalyzing(false);
+                setAuditProgress({ percent: 0, currentFile: "" });
+            }, 1000);
+        }
+    };
+
+    const handleChatSubmit = async (e) => {
+        if (e) e.preventDefault();
+        if (!chatInput.trim() || isThinking || !sessionId) return;
+
+        const userMsg = chatInput;
+        setChatInput("");
+        setChatMessages(prev => [...prev, { sender: 'user', text: userMsg }]);
+        setIsThinking(true);
+
+        try {
+            const res = await axios.post(`${API_BASE}/chatbot/ask`, {
+                session_id: sessionId,
+                query: userMsg
+            });
+            setChatMessages(prev => [...prev, { sender: 'agent', text: res.data.reply }]);
+        } catch (err) {
+            setChatMessages(prev => [...prev, { sender: 'agent', text: "Error de conexión con el agente RAG." }]);
+        } finally {
+            setIsThinking(false);
+        }
+    };
+
+    if (!sessionId) {
+        return <div className="app-shell" style={{ overflowY: 'auto' }}><LicitacionesGrid onSelectSession={(id) => setSessionId(id)} /></div>;
+    }
+
+    return (
+        <div className="app-shell">
+            <header className="app-header">
+                <div className="brand" onClick={() => setSessionId(null)} style={{ cursor: 'pointer' }}>
+                    <ArrowLeft size={20} style={{ marginRight: '10px', color: 'var(--primary)' }} />
+                    <span className="brand-name">LicitAI <span style={{ opacity: 0.5, fontWeight: 400 }}>/ Workspace</span></span>
+                </div>
+
+                <div className="header-actions">
+                    <div className="status-indicator">
+                        <span className="dot" style={{ background: 'var(--success)', boxShadow: '0 0 8px var(--success)' }}></span>
+                        <span style={{ fontSize: '11px', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                            {sessionId}
+                        </span>
+                    </div>
+                    <button className="icon-btn"><Bell size={18} /></button>
+                    <div className="user-profile">
+                        <User size={16} />
+                    </div>
+                </div>
+            </header>
+
+            <main className="app-main">
+                {/* PANEL FUENTES */}
+                <aside className="panel-sources glass-panel" style={{ 
+                    width: '320px',
+                    borderRadius: '24px',
+                    margin: '10px 0',
+                    animation: 'slideInLeft 0.5s ease-out' 
+                }}>
+                    <div className="panel-header">
+                        <span className="panel-title">Fuentes de Verdad</span>
+                        <button className="icon-btn" onClick={() => fileInputRef.current.click()} style={{ background: 'var(--primary-glow)', color: 'var(--primary)' }}>
+                            <Plus size={16} />
+                        </button>
+                        <input type="file" ref={fileInputRef} hidden multiple onChange={handleFileUpload} />
+                    </div>
+                    <div className="panel-body" style={{ position: 'relative' }}>
+                        {/* DEPURACIÓN: Visualizar estado en consola */}
+                        {isAnalyzing && console.log("JSX Rendering Progress:", auditProgress)}
+
+                        {isAnalyzing && (
+                            <div style={{ 
+                                padding: '20px', 
+                                background: 'rgba(255, 255, 255, 0.03)',
+                                borderRadius: '24px',
+                                border: '1px solid var(--glass-border)',
+                                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+                                marginBottom: '20px',
+                                position: 'relative',
+                                overflow: 'hidden',
+                                animation: 'fadeIn 0.5s ease-out'
+                            }}>
+                                {/* Background glow effect */}
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '-50%',
+                                    left: '-50%',
+                                    width: '200%',
+                                    height: '200%',
+                                    background: `radial-gradient(circle at 50% 50%, ${auditProgress.percent > 50 ? 'rgba(0, 255, 136, 0.05)' : 'rgba(0, 212, 255, 0.05)'}, transparent 50%)`,
+                                    pointerEvents: 'none',
+                                    zIndex: 0
+                                }}></div>
+
+                                <div style={{ position: 'relative', zIndex: 1 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '12px' }}>
+                                        <div>
+                                            <div style={{ fontSize: '10px', color: 'var(--primary)', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '2px', marginBottom: '4px' }}>
+                                                PROCESANDO INTELIGENCIA
+                                            </div>
+                                            <div style={{ fontSize: '24px', fontWeight: 900, color: '#fff', display: 'flex', alignItems: 'baseline', gap: '4px' }}>
+                                                {auditProgress.percent}<span style={{ fontSize: '14px', opacity: 0.5 }}>%</span>
+                                            </div>
+                                        </div>
+                                        <div className="loader-ring">
+                                            <Loader2 size={24} className="animate-spin" color="var(--primary)" />
+                                        </div>
+                                    </div>
+
+                                    <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '10px', overflow: 'hidden', marginBottom: '12px' }}>
+                                        <div style={{ 
+                                            height: '100%', 
+                                            width: `${auditProgress.percent}%`, 
+                                            background: 'linear-gradient(90deg, var(--primary), var(--success))',
+                                            boxShadow: '0 0 15px var(--primary-glow)',
+                                            transition: 'width 0.6s cubic-bezier(0.4, 0, 0.2, 1)',
+                                            borderRadius: '10px'
+                                        }}></div>
+                                    </div>
+
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--primary)', animation: 'pulse 1.5s infinite' }}></div>
+                                        <div style={{ 
+                                            fontSize: '11px', 
+                                            color: 'var(--text-secondary)', 
+                                            fontWeight: 500,
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis'
+                                        }}>
+                                            {auditProgress.currentFile || "Analizando expediente..."}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div style={{ marginBottom: '1.5rem' }}>
+                            <button className="btn-primary glow-active" style={{ 
+                                width: '100%', 
+                                justifyContent: 'center', 
+                                padding: '14px',
+                                fontSize: '1rem',
+                                border: isAnalyzing ? '1px solid var(--primary)' : 'none'
+                            }} onClick={triggerFullAudit} disabled={isAnalyzing}>
+                                {isAnalyzing ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
+                                {isAnalyzing ? 'PROCESANDO...' : 'Auditoría Maestra'}
+                            </button>
+                        </div>
+                        
+                        <div className="sources-list" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            {sources.map(src => (
+                                <div key={src.id} className={`source-card ${src.status === 'ANALYZED' ? 'active' : ''}`} style={{ margin: 0 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                        <div style={{ 
+                                            padding: '8px', 
+                                            borderRadius: '8px', 
+                                            background: src.status === 'ANALYZED' ? 'var(--primary-glow)' : 'rgba(255,255,255,0.03)',
+                                            color: src.status === 'ANALYZED' ? 'var(--primary)' : 'var(--text-muted)'
+                                        }}>
+                                            <FileText size={16} />
+                                        </div>
+                                        <div style={{ flex: 1, overflow: 'hidden' }}>
+                                            <div style={{ fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{src.name}</div>
+                                            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>{src.status}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                            {sources.length === 0 && (
+                                <div style={{ textAlign: 'center', padding: '40px 10px', opacity: 0.3 }}>
+                                    <Upload size={32} style={{ marginBottom: '12px' }} />
+                                    <p style={{ fontSize: '12px' }}>Sin documentos cargados</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </aside>
+
+                {/* PANEL DE TRABAJO */}
+                <section className="panel-workspace glass-panel" style={{ 
+                    flex: 1, 
+                    borderRadius: 'var(--radius-l)', 
+                    margin: '10px 0',
+                    display: 'flex', 
+                    flexDirection: 'column', 
+                    animation: 'fadeIn 0.7s ease-in' 
+                }}>
+                     {/* Dashboard Integrado estilo NotebookLM */}
+                     <Dashboard sessionId={sessionId} />
+                     
+                     <div className="workspace-chat" style={{ flex: 1, marginTop: '20px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                        <div className="chat-history" style={{ padding: '0 2rem' }}>
+                            {chatMessages.map((msg, i) => (
+                                <div key={i} className={`msg-wrapper ${msg.sender === 'agent' ? 'msg-agent' : msg.sender === 'user' ? 'msg-user' : 'msg-system'}`}>
+                                    {msg.text}
+                                </div>
+                            ))}
+                            {isThinking && (
+                                <div className="msg-wrapper msg-agent" style={{ opacity: 0.7, fontStyle: 'italic' }}>
+                                    Procesando consulta...
+                                </div>
+                            )}
+                        </div>
+                        <div className="chat-input-container">
+                            <form className="chat-input-wrapper" onSubmit={handleChatSubmit} style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
+                                <input
+                                    type="text"
+                                    placeholder="Consultar sobre esta licitación..."
+                                    value={chatInput}
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    style={{ background: 'transparent', border: 'none', color: 'white', flex: 1, outline: 'none', padding: '8px' }}
+                                />
+                                <button type="submit" className="btn-primary" style={{ padding: '10px', borderRadius: '10px' }}><Send size={18} /></button>
+                            </form>
+                        </div>
+                    </div>
+                </section>
+
+                <aside className="panel-audit glass-panel" style={{ 
+                    width: '400px',
+                    borderRadius: 'var(--radius-l)',
+                    margin: '10px',
+                    display: 'flex',
+                    animation: 'slideInRight 0.5s ease-out' 
+                }}>
+                    <div className="panel-header">
+                        <span className="panel-title">Monitor de Cumplimiento</span>
+                    </div>
+                    <div className="panel-body">
+                        {auditResults ? (
+                            <div className="audit-widget glow-active" style={{ 
+                                borderLeft: `4px solid ${auditResults.status.includes('✅') ? 'var(--success)' : 'var(--error)'}`, 
+                                background: auditResults.status.includes('✅') ? 'rgba(0, 255, 136, 0.05)' : 'rgba(244, 63, 94, 0.05)' 
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                    <span className={`compliance-tag ${auditResults.status.includes('✅') ? 'tag-success' : 'tag-critical'}`}>{auditResults.status}</span>
+                                    {auditResults.status.includes('✅') ? <CheckCircle size={18} color="var(--success)" /> : <AlertCircle size={18} color="var(--error)" />}
+                                </div>
+                                <div className="stat-value" style={{ 
+                                    color: auditResults.status.includes('✅') ? 'var(--success)' : 'var(--error)', 
+                                    fontSize: '1.2rem',
+                                    fontWeight: 800
+                                }}>
+                                    {auditResults.status.includes('✅') ? 'Auditoría Exitosa' : 'Riesgo Detectado'}
+                                </div>
+                                <p style={{ fontSize: '13px', lineHeight: '1.6', color: 'rgba(255,255,255,0.8)', marginTop: '8px' }}>{auditResults.veredicto}</p>
+                                
+                                <div style={{ marginTop: '20px' }}>
+                                    <p style={{ fontSize: '11px', fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px' }}>Hallazgos y Requisitos:</p>
+                                    <ul style={{ listStyle: 'none', padding: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        {auditResults.causales.map((c, i) => (
+                                            <li key={i} style={{ 
+                                                fontSize: '12px', 
+                                                padding: '8px', 
+                                                background: 'rgba(0,0,0,0.2)', 
+                                                borderRadius: '6px', 
+                                                borderLeft: `2px solid ${auditResults.status.includes('✅') ? 'var(--success)' : 'var(--error)'}` 
+                                            }}>
+                                                {c}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            </div>
+                        ) : (
+                            <div style={{ textAlign: 'center', padding: '60px 20px', opacity: 0.3 }}>
+                                <FileSearch size={48} style={{ marginBottom: '16px' }} />
+                                <p style={{ fontSize: '14px' }}>Inicia la Auditoría Maestra para ver el dictamen de cumplimiento.</p>
+                            </div>
+                        )}
+                    </div>
+                </aside>
+            </main>
+        </div>
+    );
+};
+
+
+export default App;

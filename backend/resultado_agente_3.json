@@ -1,0 +1,117 @@
+{
+  "status": "success",
+  "agent": "economic_001",
+  "summary": {
+    "estado": "✅ AUDITORÍA COMPLETADA",
+    "total_partidas": 0,
+    "cantidad_total_bienes": 0,
+    "moneda": "MXN",
+    "veredicto": "Se han detectado 0 partidas con un total de 0 unidades físicas."
+  },
+  "data": {
+    "catálogo": [],
+    "criterios_evaluacion": {
+      "limitacionesDeReclamacion": {
+        "1": "Características, si las ha proporcionado la Dirección de Obras Públicas, son únicamente como orientación y a título informativo",
+        "2": "Que ninguna de las diferencias que pudieran resultar en las cantidades de luminarias anotadas por Dirección de Obras Públicas justificarán reclamación alguna del licitante"
+      },
+      "requisitosParaLaAdjudicacion": {
+        "1": "El licitante en caso de resultar adjudicado, reconoce que las características proporcionadas son únicamente como orientación y a título informativo",
+        "2": "Que los ajustes al programa y montos mensuales del suministro e instalación justificarán reclamación alguna del licitante"
+      },
+      "evaluacionDePropuestas": {
+        "a": "Una vez recibidas las proposiciones en sobres cerrados, se iniciarán con la revisión cuantitativa y se desecharán aquellas que hubieren omitido alguno de los requisitos o documentos exigidos",
+        "b": "Se hará constar las propuestas técnicas aceptadas para su análisis detallado"
+      }
+    },
+    "condiciones_pago": {
+      "rubros": [
+        {
+          "nombre": "Suministro de luminarias",
+          "unidad_de_medicion": "",
+          "importe": ""
+        },
+        {
+          "nombre": "Equipo de instalación",
+          "unidad_de_medicion": "",
+          "importe": ""
+        },
+        {
+          "nombre": "Mano de obra de instalación",
+          "unidad_de_medicion": "",
+          "importe": ""
+        }
+      ],
+      "costos_unitarios_basicos": [
+        {
+          "material": "",
+          "costo_unitario": ""
+        }
+      ],
+      "relacion_y_analisis_costos": {
+        "suministro_luminarias": {
+          "costo_total": "",
+          "num_luminarias": ""
+        },
+        "instalacion_equipo": {
+          "costo_total": "",
+          "num_equipo": ""
+        }
+      },
+      "impuesto_al_valor_agregado": false,
+      "contrato_adjudicado": true
+    },
+    "logistica_y_vigencia": {
+      "licitacion": {
+        "materiales": [
+          {
+            "nombre": "Luminarias Led viales de 40w",
+            "cantidad": 1259
+          },
+          {
+            "nombre": "Luminarias Led viales de 100w",
+            "cantidad": 650
+          }
+        ],
+        "fecha_inicio": "2026-01-26",
+        "fecha_fin": "2027-08-31",
+        "plazo_entrega": "20 días hábiles"
+      },
+      "pagos": {
+        "forma_pago": [
+          {
+            "nombre": "Cheque de caja"
+          },
+          {
+            "nombre": "Cheque certificado"
+          },
+          {
+            "nombre": "Depósito en garantía"
+          }
+        ],
+        "frecuencia_pago": "mensualidades fijas",
+        "fecha_inicio_pago": "2026-02-01",
+        "fecha_fin_pago": "2027-08-31"
+      },
+      "garantia": {
+        "tipo_garantia": [
+          {
+            "nombre": "Cheque de caja"
+          },
+          {
+            "nombre": "Cheque certificado"
+          },
+          {
+            "nombre": "Depósito en garantía"
+          }
+        ],
+        "porcentaje_garantia": 10,
+        "fecha_entrega_garantia": "dentro de los 10 días hábiles siguientes a la determinación del monto"
+      },
+      "procedimiento": {
+        "tipo_procedimiento": "licitación pública nacional",
+        "criterio_selección": "suministro e instalación de luminarias Led viales de 40w y 100w"
+      }
+    }
+  }
+}

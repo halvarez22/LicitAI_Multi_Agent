@@ -1,0 +1,98 @@
+name: Oracle Validation
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  oracle-ok:
+    name: Oracle OK (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run oracle validator (expected success)
+        run: >
+          python backend/scripts/run_oracle.py
+          --oracle backend/tests/oracle_v1.0.1-runtime-final.json
+          --analysis backend/tests/mocks/analysis_ok.json
+          --compliance backend/tests/mocks/compliance_ok.json
+          --economic backend/tests/mocks/economic_ok.json
+          --out backend/out
+
+      - name: Upload oracle artifacts (ok)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-ok-${{ matrix.os }}
+          path: backend/out/oracle_report.*
+          retention-days: 7
+          if-no-files-found: error
+
+  oracle-blocking:
+    name: Oracle Blocking Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run oracle validator (expected blocking)
+        id: oracle_block
+        continue-on-error: true
+        run: >
+          python backend/scripts/run_oracle.py
+          --oracle backend/tests/oracle_v1.0.1-runtime-final.json
+          --analysis backend/tests/mocks/analysis_ok.json
+          --compliance backend/tests/mocks/compliance_ok.json
+          --economic backend/tests/mocks/economic_blocking.json
+          --out backend/out
+
+      - name: Assert blocking exists in report
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+
+          report_path = Path("backend/out/oracle_report.json")
+          if not report_path.exists():
+              raise SystemExit("oracle_report.json no fue generado.")
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          blocking_count = int(report.get("blocking_issues", 0))
+          if blocking_count < 1:
+              raise SystemExit("Se esperaba >=1 blocking_issue y no se encontro.")
+
+      - name: Assert exit code was blocking (1)
+        if: steps.oracle_block.outcome != 'failure'
+        run: |
+          echo "Se esperaba fallo (exit 1) por blocking y el comando no fallo."
+          exit 1
+
+      - name: Upload oracle artifacts (blocking)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-blocking-${{ matrix.os }}
+          path: backend/out/oracle_report.*
+          retention-days: 7
+          if-no-files-found: error

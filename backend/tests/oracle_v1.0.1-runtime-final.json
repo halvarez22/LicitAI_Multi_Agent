@@ -1,0 +1,37 @@
+{
+  "version": "1.0.1-runtime-final-min",
+  "cases": [
+    {
+      "case_id": "A01_min",
+      "agent": "AnalystAgent",
+      "agent_contract_path": "analysis.cronograma.plazo_minimo_meses",
+      "expected_now": {
+        "type": "string_or_null"
+      },
+      "criticality": "warn"
+    },
+    {
+      "case_id": "C01",
+      "agent": "ComplianceAgent",
+      "agent_contract_path": "compliance.causas_desechamiento",
+      "expected_now": {
+        "type": "array_string_or_object",
+        "min_items": 1
+      },
+      "criticality": "blocking"
+    },
+    {
+      "case_id": "E01",
+      "agent": "EconomicAgent",
+      "agent_contract_path": "economic.proposal_items",
+      "expected_now": {
+        "type": "array",
+        "min_items": 1
+      },
+      "evidence_min": {
+        "regex_pattern": "supervisor.*sin costo"
+      },
+      "criticality": "blocking"
+    }
+  ]
+}

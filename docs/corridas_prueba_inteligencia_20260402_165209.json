@@ -1,0 +1,52 @@
+{
+  "started_at_utc": "2026-04-02T16:52:09.357128+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corridas_prueba_inteligencia_20260402_165209.json",
+  "checkpoint_mode": "resume_skip_completed",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "session_id": "lic_p_intel_01_la-51-gyn-051gyn025-n-8-2024_vigilancia_5a298e2c",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_la-51-gyn-051gyn025-n-8-2024_vigilancia_5a298e2c\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"fb4e22f2-973a-40ec-8fc1-19a73daf5cea\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf' analizado con éxito.\",\"data\":null}"
+        },
+        "agents_process_timeout_sec": 18000,
+        "agents_process_accept": {
+          "status_code": 202,
+          "body_preview": "{\"success\":true,\"message\":\"Análisis iniciado. Job ID: df08ace7-b629-4f2e-868c-0a5ce08e379f\",\"data\":{\"job_id\":\"df08ace7-b629-4f2e-868c-0a5ce08e379f\",\"session_id\":\"lic_p_intel_01_la-51-gyn-051gyn025-n-8-2024_vigilancia_5a298e2c\"}}"
+        },
+        "job_id": "df08ace7-b629-4f2e-868c-0a5ce08e379f",
+        "agents_process_job_final": {
+          "status": "COMPLETED",
+          "error": null,
+          "forensic_traceback": null
+        }
+      },
+      "orchestrator_status": "success",
+      "analysis_status": "success",
+      "compliance_status": "success",
+      "error": null,
+      "compliance_message": null
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 1,
+    "cases_recorded": 1,
+    "ok": 1,
+    "failed": 0
+  },
+  "finished_at_utc": "2026-04-02T17:01:46.799791+00:00"
+}

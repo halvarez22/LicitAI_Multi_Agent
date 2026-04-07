@@ -1,0 +1,46 @@
+{
+  "started_at_utc": "2026-03-31T22:48:51.850000+00:00",
+  "api_base": "http://localhost:8001/api/v1",
+  "source_dir": "C:\\LicitAI_Multi_Agent\\bases y convocatorias de prueba\\bases_licitai_prueba_inteligencia",
+  "report_path": "C:\\LicitAI_Multi_Agent\\licitaciones-ai\\docs\\corridas_prueba_inteligencia_20260331_224851.json",
+  "checkpoint_mode": "resume_skip_completed",
+  "cases": [
+    {
+      "index": 1,
+      "filename": "BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf",
+      "session_id": "lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_de05e0f2",
+      "steps": {
+        "create_session": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Licitación creada\",\"data\":{\"session_id\":\"lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_de05e0f2\"}}"
+        },
+        "upload": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Archivo 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' subido correctamente.\",\"data\":{\"doc_id\":\"5fb33e60-160c-4a0a-9c0a-ac1b4dfeb2d9\",\"status\":\"UPLOADED\"}}"
+        },
+        "process": {
+          "status_code": 200,
+          "body": "{\"success\":true,\"message\":\"Documento 'BASES SERVICIO LIMPIEZA 2024 ISSSTE BCS.pdf' analizado con éxito.\",\"data\":null}"
+        },
+        "agents_process_timeout_sec": 7200,
+        "agents_process_accept": {
+          "status_code": 202,
+          "body_preview": "{\"success\":true,\"message\":\"Análisis iniciado. Job ID: 9158dea8-b58d-49b2-b5be-93058f89807b\",\"data\":{\"job_id\":\"9158dea8-b58d-49b2-b5be-93058f89807b\",\"session_id\":\"lic_p_intel_01_bases_servicio_limpieza_2024_issste_bcs_de05e0f2\"}}"
+        },
+        "job_id": "9158dea8-b58d-49b2-b5be-93058f89807b"
+      },
+      "orchestrator_status": null,
+      "analysis_status": null,
+      "compliance_status": null,
+      "error": "Job 9158dea8-b58d-49b2-b5be-93058f89807b no terminó en 7200s (último estado: RUNNING)"
+    }
+  ],
+  "errors": [],
+  "summary": {
+    "total_files": 1,
+    "cases_recorded": 1,
+    "ok": 0,
+    "failed": 1
+  },
+  "finished_at_utc": "2026-04-01T00:48:59.973739+00:00"
+}
