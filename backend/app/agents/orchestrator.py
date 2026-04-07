@@ -475,7 +475,7 @@ class OrchestratorAgent(BaseAgent):
                     res = await DataGapAgent(self.context_manager).process(agent_input)
                     execution_results["datagap"] = res
                     stages_executed.append("datagap")
-                    if res.status == AgentStatus.WAITING_FOR_DATA:
+                    if _result_status_value(res) == AgentStatus.WAITING_FOR_DATA.value:
                         decision = OrchestratorState(stop_reason="INCOMPLETE_DATA", aggregate_health="partial", next_steps=next_steps, correlation_id=correlation_id).model_dump()
                         # REFRESH para no borrar pending_questions que DataGap acaba de guardar
                         latest_session = await self.context_manager.memory.get_session(session_id) or {}
@@ -484,7 +484,7 @@ class OrchestratorAgent(BaseAgent):
                         return {
                             "status": "waiting_for_data",
                             "session_id": session_id,
-                            "chatbot_message": res.message,
+                            "chatbot_message": _result_message(res) or "",
                             "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
                             "orchestrator_decision": decision,
                         }

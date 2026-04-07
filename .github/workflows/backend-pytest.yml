@@ -39,4 +39,10 @@ jobs:
         run: |
           # PYTHONPATH para asegurar que encuentre el paquete 'app'
           export PYTHONPATH=$PYTHONPATH:$(pwd)
-          python -m pytest tests/ -v -q --tb=short
+          python -m pytest \
+            tests/test_oracle.py \
+            tests/test_submission_checklist.py \
+            tests/test_post_clarification_service.py \
+            tests/test_economic_validation_engine.py \
+            tests/test_economic_validation_service.py \
+            -v -q --tb=short

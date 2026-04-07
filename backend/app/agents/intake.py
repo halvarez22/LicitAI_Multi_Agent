@@ -108,7 +108,12 @@ INSTRUCCIONES:
             system_prompt="Eres un extractor de datos de chat ultra-preciso y minimalista.",
             format="text"
         )
-        return resp.response.strip() if resp.success else ""
+        if isinstance(resp, dict):
+            raw = str(resp.get("response", "")).strip()
+            if "success" in resp:
+                return raw if resp.get("success") else ""
+            return raw
+        return resp.response.strip() if getattr(resp, "success", False) else ""
 
     async def _update_master_profile(self, company_id: str, field: str, value: str):
         try:
@@ -123,7 +128,20 @@ INSTRUCCIONES:
         except Exception as e:
             logger.error(f"[Intake] Error en BD: {e}")
 
-    async def process(self, agent_input: AgentInput) -> AgentOutput:
+    async def process(self, agent_input: AgentInput | str, input_data: Optional[Dict[str, Any]] = None) -> AgentOutput:
+        if not isinstance(agent_input, AgentInput):
+            payload = input_data or {}
+            if not isinstance(payload, dict):
+                payload = {}
+            agent_input = AgentInput(
+                session_id=str(agent_input),
+                company_id=str(payload.get("company_id")) if payload.get("company_id") else None,
+                company_data=payload.get("company_data") if isinstance(payload.get("company_data"), dict) else payload,
+                mode=payload.get("mode", "full"),
+                correlation_id=payload.get("correlation_id"),
+                resume_generation=bool(payload.get("resume_generation", False)),
+                job_id=payload.get("job_id"),
+            )
         return AgentOutput(
             status=AgentStatus.ERROR,
             agent_id=self.agent_id,
