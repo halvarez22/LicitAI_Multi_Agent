@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -24,6 +25,31 @@ def _is_pdf(filename: str) -> bool:
 
 def _storable(model: PostClarificationContextModel) -> Dict[str, Any]:
     return model.model_dump(mode="json")
+
+
+def _resolve_post_clarification_output_dir(session_id: str) -> str:
+    """
+    Resuelve directorio de salida para post-aclaraciones.
+
+    Prioriza `LICITAI_OUTPUTS_DIR` (si existe), luego `/data/outputs` y si no es
+    escribible en el entorno (p.ej. CI runner), cae a un directorio temporal.
+    """
+    preferred_base = os.getenv("LICITAI_OUTPUTS_DIR", os.path.join("/data", "outputs"))
+    relative = os.path.join(session_id, "4.post_aclaraciones")
+
+    preferred_dir = os.path.join(preferred_base, relative)
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+        return preferred_dir
+    except PermissionError:
+        fallback_base = os.path.join(tempfile.gettempdir(), "licitai_outputs")
+        fallback_dir = os.path.join(fallback_base, relative)
+        os.makedirs(fallback_dir, exist_ok=True)
+        logger.warning(
+            "post_clarification_output_fallback_tmp",
+            extra={"preferred_dir": preferred_dir, "fallback_dir": fallback_dir},
+        )
+        return fallback_dir
 
 
 async def get_post_clarification_context(
@@ -91,8 +117,7 @@ async def process_acta_document(
         )
         estado = "borrador_listo"
 
-    output_dir = os.path.join("/data", "outputs", session_id, "4.post_aclaraciones")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = _resolve_post_clarification_output_dir(session_id)
     out_path = os.path.join(output_dir, "CARTA_CONFORMIDAD_33_BIS_BORRADOR.docx")
     write_carta_docx(out_path, draft)
 
@@ -141,8 +166,7 @@ async def generate_carta_33_bis(
         acta_excerpt=(ctx.texto_extraido or "")[:12000],
         correlation_id=correlation_id,
     )
-    output_dir = os.path.join("/data", "outputs", session_id, "4.post_aclaraciones")
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = _resolve_post_clarification_output_dir(session_id)
     out_path = os.path.join(output_dir, "CARTA_CONFORMIDAD_33_BIS_BORRADOR.docx")
     write_carta_docx(out_path, draft)
 
