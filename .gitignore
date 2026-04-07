@@ -47,6 +47,10 @@ uploads/
 backups/
 data/
 models/
+!backend/app/models/
+!backend/app/models/**
+backend/app/models/__pycache__/
+backend/app/models/**/*.pyc
 out/
 
 # Local reports and generated text artifacts
