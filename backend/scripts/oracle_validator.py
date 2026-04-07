@@ -66,6 +66,11 @@ def state_rank(status: str) -> int:
     return {"blocking": 3, "missing": 3, "warn": 2, "rule_fail": 2, "wrong_value": 2, "ok": 0}.get(status, 1)
 
 
+def is_blocking_issue(result: CaseResult) -> bool:
+    """Define si un hallazgo debe bloquear el pipeline."""
+    return result.criticidad == "blocking" and result.estado_actual in {"missing", "rule_fail", "blocking"}
+
+
 @dataclass
 class CaseResult:
     """Resultado de evaluacion de un caso del oracle."""
@@ -117,11 +122,20 @@ def match_regex_in_items(items: List[Any], pattern: str) -> bool:
 def _agent_root(agent_name: str, payloads: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Construye root de path segun el agente del caso."""
     if agent_name == "AnalystAgent":
-        return {"analysis": payloads.get("analysis", {})}
+        data = payloads.get("analysis", {}) or {}
+        if isinstance(data, dict) and "data" not in data:
+            data = {"data": data, **data}
+        return {"analysis": data}
     if agent_name == "ComplianceAgent":
-        return {"compliance": payloads.get("compliance", {})}
+        data = payloads.get("compliance", {}) or {}
+        if isinstance(data, dict) and "data" not in data:
+            data = {"data": data, **data}
+        return {"compliance": data}
     if agent_name == "EconomicAgent":
-        return {"economic": payloads.get("economic", {})}
+        data = payloads.get("economic", {}) or {}
+        if isinstance(data, dict) and "data" not in data:
+            data = {"data": data, **data}
+        return {"economic": data}
     return None
 
 
@@ -281,7 +295,7 @@ def build_json_report(results: List[CaseResult], max_fixes: int) -> Dict[str, An
         "timestamp": _utc_now_iso(),
         "total_issues": len(results),
         "reported_issues": len(selected),
-        "blocking_issues": sum(1 for r in results if r.estado_actual == "blocking"),
+        "blocking_issues": sum(1 for r in results if is_blocking_issue(r)),
         "issues": [asdict(r) for r in selected],
     }
 
@@ -325,9 +339,11 @@ def run_validation(args: argparse.Namespace) -> int:
     }
 
     issues = evaluate_cases(oracle, payloads)
+    blocking_issues = sum(1 for issue in issues if is_blocking_issue(issue))
     text_report = render_text_report(issues, args.max_fixes)
     json_report = build_json_report(issues, args.max_fixes)
     print(text_report)
+    print(f"RESUMEN: {len(issues)} hallazgos | {blocking_issues} blocking_issues")
 
     if args.save_report:
         report_dir = (project_root / args.report_dir).resolve()
@@ -338,8 +354,7 @@ def run_validation(args: argparse.Namespace) -> int:
         json_path.write_text(json.dumps(json_report, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info("Reportes guardados en %s", report_dir)
 
-    has_blocking = any(issue.estado_actual == "blocking" for issue in issues)
-    return 1 if has_blocking else 0
+    return 1 if blocking_issues > 0 else 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:

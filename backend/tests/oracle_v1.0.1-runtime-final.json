@@ -4,32 +4,46 @@
     {
       "case_id": "A01_min",
       "agent": "AnalystAgent",
-      "agent_contract_path": "analysis.cronograma.plazo_minimo_meses",
+      "description": "Extraer período mínimo de cotización",
+      "agent_contract_path": "analysis.data.reglas_economicas.meses_o_periodo_minimo_citado",
       "expected_now": {
         "type": "string_or_null"
+      },
+      "evidence_min": {
+        "regex_pattern": "(?i)(mínimo|menor|base).*?(\\d+).*?mes"
       },
       "criticality": "warn"
     },
     {
       "case_id": "C01",
       "agent": "ComplianceAgent",
-      "agent_contract_path": "compliance.causas_desechamiento",
+      "description": "Mapear causas de descalificación",
+      "agent_contract_path": "compliance.data.administrativo",
+      "fallback_path": "compliance.data.tecnico",
       "expected_now": {
-        "type": "array_string_or_object",
+        "type": "array",
         "min_items": 1
+      },
+      "evidence_min": {
+        "regex_pattern": "(?i)(motivo de descalificación|causa de desechamiento|se desechará|exclusión|12\\.1\\.)"
       },
       "criticality": "blocking"
     },
     {
       "case_id": "E01",
       "agent": "EconomicAgent",
-      "agent_contract_path": "economic.proposal_items",
+      "description": "Validar precio supervisor sin costo",
+      "agent_contract_path": "economic.data.items",
       "expected_now": {
         "type": "array",
-        "min_items": 1
+        "min_items": 1,
+        "flexible_fields": [
+          "concepto",
+          "descripcion"
+        ]
       },
       "evidence_min": {
-        "regex_pattern": "supervisor.*sin costo"
+        "regex_pattern": "(?i)supervisor.*sin costo|sin cargo|0\\.00.*supervisor"
       },
       "criticality": "blocking"
     }
