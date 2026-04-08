@@ -10,6 +10,7 @@ from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.services.resilient_llm import ResilientLLMClient
 from app.core.observability import get_logger
+from app.core.template_engine import LegalTemplateEngine, TemplateIntegrityError
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 
 logger = get_logger(__name__)
@@ -28,6 +29,37 @@ class FormatsAgent(BaseAgent):
         )
         # Instanciado en constructor para que sea mockeable en tests unitarios
         self.llm = ResilientLLMClient()
+        self.template_engine = LegalTemplateEngine()
+
+    @staticmethod
+    def _template_id_for_requirement(req: Dict[str, Any]) -> str | None:
+        """Mapea un requisito de formato a template legal bloqueado."""
+        rid = str(req.get("id", "")).strip().lower()
+        name = str(req.get("nombre", "")).strip().lower()
+        desc = str(req.get("descripcion", "")).strip().lower()
+        text = f"{rid} {name} {desc}"
+        if "anexo 7" in text or "personalidad" in text:
+            return "anexo_7"
+        if "anexo 11" in text or "conformidad" in text:
+            return "anexo_11"
+        if "anexo 15" in text or "50" in text or "60" in text:
+            return "anexo_15"
+        return None
+
+    @staticmethod
+    def _template_data(session_id: str, master_profile: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Construye datos dinámicos para render de templates legales."""
+        return {
+            "razon_social": master_profile.get("razon_social", "N/A"),
+            "rfc": master_profile.get("rfc", "N/A"),
+            "numero_licitacion": session_id,
+            "servicio": master_profile.get("giro", "servicio licitado"),
+            "nombre_representante": master_profile.get("representante_legal", "N/A"),
+            "lugar": master_profile.get("ciudad", "Mexico"),
+            "fecha": metadata.get("fecha", ""),
+            "tipo_licitacion": "Licitacion Publica",
+            "autoridad_convocante": "Convocante",
+        }
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
@@ -156,22 +188,33 @@ class FormatsAgent(BaseAgent):
             filename = f"{rid}_{raw_name.replace(' ', '_')[:30]}"
             filename = re.sub(r'[^\w\s-]', '', filename).replace(' ', '_')
             
-            prompt = f"Genera el contenido legal oficial para el requisito {req.get('id')}: {raw_name}\nDescripción: {req.get('descripcion')}\nEmpresa: {razon_social}\nRepresentante: {representante}\nRFC: {rfc}"
-            resp = await llm.generate(prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id)
-            
-            # Verificar fallo explícito de LLM antes de escribir el archivo
-            if not resp.success:
-                logger.error("llm_generation_failed", agent=self.agent_id, req_name=raw_name, error=resp.error)
-                continue
-            content = resp.response
-            if not content.strip():
-                logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
-                continue
+            template_id = self._template_id_for_requirement(req)
+            if template_id:
+                tpl_data = self._template_data(session_id, master_profile, doc_metadata)
+                content = self.template_engine.render(template_id, tpl_data)
+                if not self.template_engine.verify_integrity(content, template_id):
+                    raise TemplateIntegrityError(f"Integridad inválida para template {template_id}")
+            else:
+                prompt = f"Genera el contenido legal oficial para el requisito {req.get('id')}: {raw_name}\nDescripción: {req.get('descripcion')}\nEmpresa: {razon_social}\nRepresentante: {representante}\nRFC: {rfc}"
+                resp = await llm.generate(prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id)
+                if not resp.success:
+                    logger.error("llm_generation_failed", agent=self.agent_id, req_name=raw_name, error=resp.error)
+                    continue
+                content = resp.response
+                if not content.strip():
+                    logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
+                    continue
             
             filepath = os.path.join(output_dir, f"{filename}.docx")
             try:
                 _save_docx(f"{rid} - {raw_name}", content, filepath, doc_metadata)
-                generated_files.append({"nombre": raw_name, "ruta": filepath, "status": "FINAL"})
+                generated_files.append({
+                    "nombre": raw_name,
+                    "ruta": filepath,
+                    "status": "FINAL",
+                    "template_id": template_id,
+                    "template_static_hash": self.template_engine.static_hash(template_id) if template_id else None,
+                })
                 logger.info("docx_generated", agent=self.agent_id, filename=filename)
             except Exception as e:
                 logger.error("docx_save_failed", agent=self.agent_id, filename=filename, error=str(e))
