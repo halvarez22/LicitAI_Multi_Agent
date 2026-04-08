@@ -1,6 +1,6 @@
 # LicitAI
 
-![Oracle Validation](https://github.com/{OWNER}/{REPO}/actions/workflows/oracle-validation.yml/badge.svg)
+![Oracle Validation](https://github.com/halvarez22/LicitAI_Multi_Agent/actions/workflows/oracle-validation.yml/badge.svg)
 
 ## 📊 Status
 
