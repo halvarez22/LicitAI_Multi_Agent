@@ -221,13 +221,22 @@ class AnalystAgent(BaseAgent):
     def _infer_periodo_minimo_from_context(self, context_str: str) -> str:
         """Fallback determinista para meses mínimos cuando no quedan explícitos en el JSON del LLM."""
         txt = context_str or ""
+        words = {
+            "uno": "1", "dos": "2", "tres": "3", "cuatro": "4", "cinco": "5", "seis": "6",
+            "siete": "7", "ocho": "8", "nueve": "9", "diez": "10", "once": "11", "doce": "12",
+        }
+        for w, d in words.items():
+            txt = re.sub(rf"(?i)\b{w}\b", d, txt)
         for pat in (
             r"(?i)(?:periodo base|mínimo cotizable|plazo mínimo|periodo mínimo).*?(\d{1,2})\s*mes(?:es)?",
             r"(?i)importe mínimo.*?(?:para|de)\s*(\d{1,2})\s*mes(?:es)?",
+            r"(?i)(?:m[íi]nimo|base|menor|importe\s*m[íi]nimo).*?(\d{1,3})",
+            r"(?i)(\d{1,2})\s*d[íi]a(?:s)?\s*(?:naturales)?\s*(?:posteriores|m[íi]nimo|base)?",
         ):
             m = re.search(pat, txt)
             if m:
-                return f"{m.group(1)} meses"
+                unit = "días" if "d[íi]a" in pat else "meses"
+                return f"{m.group(1)} {unit}"
         return "No especificado"
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:

@@ -20,7 +20,7 @@ from app.config.settings import settings
 # Logger estructurado
 logger = get_logger(__name__)
 _C01_SEMANTIC_PATTERN = re.compile(
-    r"(?i)(se desech|causa de exclus|motivo de no selección|12\.1|desechará la propuesta|causa de descalif)"
+    r"(?i)(motivo de descalif|causa de desech|se desech|exclusi[oó]n|causa de rechazo|12\.1\.|inhabilit|descalif)"
 )
 
 # --- DOCUMENTACIÓN DE VARIABLES DE OPERACIÓN (PRODUCCIÓN) ---
@@ -209,6 +209,11 @@ class ComplianceAgent(BaseAgent):
                 "tier_stats": tier_stats,
                 "global_match_pct": round((ev_ok / max(total_final, 1)) * 100, 1) if total_final > 0 else 0.0,
                 "total_items": total_final,
+                "causas_desechamiento": [
+                    (it.get("snippet") or it.get("descripcion") or "")[:300]
+                    for it in all_audit_items
+                    if _C01_SEMANTIC_PATTERN.search(f"{it.get('descripcion','')} {it.get('snippet','')}")
+                ],
             }
             full_master_list["audit_summary"] = audit_summary
 

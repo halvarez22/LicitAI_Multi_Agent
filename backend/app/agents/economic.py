@@ -308,9 +308,17 @@ class EconomicAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         """Inyecta un renglón de supervisión sin costo cuando el alcance lo exige."""
         joined = " ".join(str(r.get("texto_literal_fila") or r.get("puesto_funcion_o_servicio") or "") for r in (alcance or []))
-        if not re.search(r"(?i)(supervisor|coordinador|jefe de turno)", joined):
+        if not re.search(r"(?i)(supervisor|coordinador|jefe de turno|vigilancia|guardia|turno)", joined):
             return proposal_items
-        has_item = any(re.search(r"(?i)(supervisor|coordinador|jefe de turno)", f"{it.get('concepto','')} {it.get('descripcion','')}") for it in proposal_items)
+        has_item = False
+        for it in proposal_items:
+            text = f"{it.get('concepto','')} {it.get('descripcion','')}"
+            if re.search(r"(?i)(supervisor|coordinador|jefe de turno)", text):
+                has_item = True
+                if re.search(r"(?i)(sin costo|0\.00|sin cargo)", text):
+                    it["precio_unitario"] = 0.0
+                    it["subtotal"] = 0.0
+                    it["supervisor_sin_costo"] = True
         if has_item:
             return proposal_items
         return proposal_items + [{
@@ -322,6 +330,7 @@ class EconomicAgent(BaseAgent):
             "subtotal": 0.0,
             "status": "matched",
             "incluir_en_indirectos": True,
+            "supervisor_sin_costo": True,
         }]
 
     def _format_bases_economic_context(
