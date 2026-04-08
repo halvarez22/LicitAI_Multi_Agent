@@ -12,6 +12,7 @@ Variables opcionales:
   E2E_POLL_SEC=20
   E2E_MAX_WAIT_SEC=7200
   E2E_OUTPUTS_HOST=C:/data/outputs
+  E2E_LOG_COMPLIANCE_TICKS=1  (imprime cada poll en stage=compliance: pct, updated_at)
 """
 from __future__ import annotations
 
@@ -108,6 +109,11 @@ def main() -> int:
     poll = int(os.getenv("E2E_POLL_SEC", "25"))
     max_wait = int(os.getenv("E2E_MAX_WAIT_SEC", "7200"))
     outputs_host = os.getenv("E2E_OUTPUTS_HOST", "C:/data/outputs")
+    log_compliance_ticks = os.getenv("E2E_LOG_COMPLIANCE_TICKS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     payload = {
         "session_id": session_id,
@@ -167,6 +173,12 @@ def main() -> int:
         if stage != last_stage or status in ("COMPLETED", "FAILED"):
             print(f"  [{int(time.time() - t0)}s] {status} | {stage} {pct}% {msg}")
             last_stage = stage
+        elif log_compliance_ticks and stage == "compliance":
+            ua = job.get("updated_at", "")
+            print(
+                f"  [{int(time.time() - t0)}s] {status} | {stage} {pct}% {msg} | "
+                f"updated_at={ua}"
+            )
 
         if status == "COMPLETED":
             print("\n[E2E] ===== RESULTADO =====")
