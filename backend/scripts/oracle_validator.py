@@ -95,6 +95,8 @@ def validate_type(value: Any, expected_type: str) -> bool:
         if not isinstance(value, list):
             return False
         return all(isinstance(item, (str, dict)) for item in value)
+    if expected_type == "bool":
+        return isinstance(value, bool)
     return True
 
 
@@ -136,6 +138,20 @@ def _agent_root(agent_name: str, payloads: Dict[str, Dict[str, Any]]) -> Optiona
         if isinstance(data, dict) and "data" not in data:
             data = {"data": data, **data}
         return {"economic": data}
+    if agent_name == "ComplianceGate":
+        gate = payloads.get("compliance_gate")
+        if isinstance(gate, dict):
+            return {"compliance_gate": gate}
+        compliance_data = payloads.get("compliance", {}) or {}
+        embedded = (
+            compliance_data.get("compliance_gate_result")
+            if isinstance(compliance_data, dict)
+            else None
+        )
+        if isinstance(embedded, dict):
+            return {"compliance_gate": embedded}
+        # Compatibilidad: si no viene explícito en payload runtime, asumir no bloqueante.
+        return {"compliance_gate": {"is_blocking": False}}
     return None
 
 
@@ -228,6 +244,13 @@ def eval_case(case: Dict[str, Any], payloads: Dict[str, Dict[str, Any]]) -> Case
         if matched_any:
             return CaseResult(case_id, "ok", "Supervisor sin costo consistente (precio 0).", crit)
         return CaseResult(case_id, "warn", "No se detecto partida explicita de supervisor sin costo.", crit)
+
+    if case_id == "CG01":
+        if not isinstance(value, bool):
+            return CaseResult(case_id, "missing", "compliance_gate.is_blocking ausente o inválido.", crit)
+        if value:
+            return CaseResult(case_id, "blocking", "ComplianceGate marcó descalificación determinista.", crit)
+        return CaseResult(case_id, "ok", "ComplianceGate no detectó bloqueo determinista.", crit)
 
     if case_id in {"E02", "E03"}:
         if not isinstance(value, list):

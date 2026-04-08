@@ -46,6 +46,17 @@
         "regex_pattern": "(?i)(supervisor|coordinador|jefe de turno).*(sin costo|0\\.00|sin cargo)"
       },
       "criticality": "blocking"
+    },
+    {
+      "case_id": "CG01",
+      "agent": "ComplianceGate",
+      "description": "Evaluar causas de descalificación 12.1",
+      "agent_contract_path": "compliance_gate.is_blocking",
+      "expected_now": {
+        "type": "bool"
+      },
+      "criticality": "blocking",
+      "validation_rule": "Si is_blocking==true -> pipeline debe detenerse. Si false -> continuar."
     }
   ]
 }
