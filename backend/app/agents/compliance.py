@@ -19,6 +19,9 @@ from app.config.settings import settings
 
 # Logger estructurado
 logger = get_logger(__name__)
+_C01_SEMANTIC_PATTERN = re.compile(
+    r"(?i)(se desech|causa de exclus|motivo de no selección|12\.1|desechará la propuesta|causa de descalif)"
+)
 
 # --- DOCUMENTACIÓN DE VARIABLES DE OPERACIÓN (PRODUCCIÓN) ---
 # COMPLIANCE_CHUNK_CHARS (default 8000): Tamaño de ventana RAG por bloque Map.
@@ -132,7 +135,14 @@ class ComplianceAgent(BaseAgent):
                 print(f"        [-] Bloques a procesar: {len(chunks)} (Contexto: {len(context_zone)} chars)")
                 
                 raw_zone_items, block_events = await self._map_zone_chunks(
-                    zone["name"], chunks, max_block_time, correlation_id, experience_prompt_context, session_id=session_id
+                    zone["name"],
+                    chunks,
+                    max_block_time,
+                    correlation_id,
+                    experience_prompt_context,
+                    session_id=session_id,
+                    job_id=(agent_input.job_id or ""),
+                    completed_zones=len(zone_reports),
                 )
 
                 # --- FASE B: REDUCE ---
@@ -307,8 +317,16 @@ class ComplianceAgent(BaseAgent):
         max_block_time: int,
         correlation_id: str = "",
         experience_prompt_context: str = "",
-        session_id: str = "no-id"
+        session_id: str = "no-id",
+        job_id: str = "",
+        completed_zones: int = 0,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Mapea cada chunk de una zona vía LLM.
+
+        Si ``job_id`` está presente, actualiza Redis tras cada bloque (heartbeat)
+        para que ``updated_at`` avance durante corridas largas y el monitoreo externo
+        no marque falsamente un job activo como zombie.
+        """
         raw_zone_items: List[Dict[str, Any]] = []
         block_events: List[Dict[str, Any]] = []
         empty_timeout_sec = float(os.getenv("COMPLIANCE_BLOCK_EMPTY_TIMEOUT_SEC", "590"))
@@ -364,6 +382,21 @@ class ComplianceAgent(BaseAgent):
                 logger.warning("compliance_block_error", session_id=session_id, zone=zone_name, block=i+1, error=str(llm_err)[:500])
             elif empty_resp and not recovered:
                 logger.warning("compliance_block_empty", session_id=session_id, zone=zone_name, block=i+1)
+
+            if job_id:
+                n_blk = max(len(chunks), 1)
+                intra = int(14 * (i + 1) / n_blk)
+                _hb_pct = min(94, 30 + completed_zones * 15 + intra)
+                update_job_status(
+                    job_id,
+                    "RUNNING",
+                    progress={
+                        "stage": "compliance",
+                        "zone": zone_name,
+                        "pct": _hb_pct,
+                        "message": f"{zone_name}: bloque {i + 1}/{len(chunks)}",
+                    },
+                )
 
             if b_duration > max_block_time:
                 print(f"        ⚠️ [AVISO] Latencia alta en bloque {i+1} ({b_duration:.1f}s)")
@@ -546,6 +579,8 @@ FORMATO JSON OBLIGATORIO:
         snip = raw.get("snippet") or raw.get("extracto") or raw.get("evidencia") or raw.get("literal") or ""
         if not desc and snip: desc = snip
         if not snip and desc: snip = desc
+        if _C01_SEMANTIC_PATTERN.search(f"{desc} {snip}") and "causa de desechamiento" not in desc.lower():
+            desc = f"Causa de desechamiento: {desc}"
         try:
             pg = int(raw.get("page") or raw.get("pagina") or 0)
         except: pg = 0

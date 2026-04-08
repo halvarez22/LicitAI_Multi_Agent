@@ -43,7 +43,7 @@
         ]
       },
       "evidence_min": {
-        "regex_pattern": "(?i)supervisor.*sin costo|sin cargo|0\\.00.*supervisor"
+        "regex_pattern": "(?i)(supervisor|coordinador|jefe de turno).*(sin costo|0\\.00|sin cargo)"
       },
       "criticality": "blocking"
     }

@@ -169,6 +169,7 @@ class EconomicAgent(BaseAgent):
         proposal_draft = self._apply_tabular_prices_to_proposal(
             proposal_draft, tech_requirements, session_line_items
         )
+        proposal_draft = self._ensure_supervisor_no_cost_item(proposal_draft, alcance_bases)
 
         # 5. Detección de Gaps Económicos
         # El LLM a menudo devuelve "matched" con precio 0 o sin precio: eso NO es cotizable.
@@ -301,6 +302,27 @@ class EconomicAgent(BaseAgent):
                 res = task.get("result")
                 return res if isinstance(res, dict) else {}
         return {}
+
+    def _ensure_supervisor_no_cost_item(
+        self, proposal_items: List[Dict[str, Any]], alcance: List[Dict[str, str]]
+    ) -> List[Dict[str, Any]]:
+        """Inyecta un renglón de supervisión sin costo cuando el alcance lo exige."""
+        joined = " ".join(str(r.get("texto_literal_fila") or r.get("puesto_funcion_o_servicio") or "") for r in (alcance or []))
+        if not re.search(r"(?i)(supervisor|coordinador|jefe de turno)", joined):
+            return proposal_items
+        has_item = any(re.search(r"(?i)(supervisor|coordinador|jefe de turno)", f"{it.get('concepto','')} {it.get('descripcion','')}") for it in proposal_items)
+        if has_item:
+            return proposal_items
+        return proposal_items + [{
+            "concepto": "Supervisor General (Sin costo)",
+            "descripcion": "Supervisor General (Sin costo)",
+            "concepto_id": "AUTO-SUP-NC",
+            "cantidad": 1,
+            "precio_unitario": 0.0,
+            "subtotal": 0.0,
+            "status": "matched",
+            "incluir_en_indirectos": True,
+        }]
 
     def _format_bases_economic_context(
         self,

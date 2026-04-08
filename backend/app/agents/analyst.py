@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import unicodedata
 from typing import Any, Dict, Final, List, Set, Tuple
 from app.agents.base_agent import BaseAgent
@@ -216,6 +217,18 @@ class AnalystAgent(BaseAgent):
             "senal_tabular_coincidencias": sig.get("coincidencias_aproximadas", 0),
             "alerta_faltante": alerta,
         }
+
+    def _infer_periodo_minimo_from_context(self, context_str: str) -> str:
+        """Fallback determinista para meses mínimos cuando no quedan explícitos en el JSON del LLM."""
+        txt = context_str or ""
+        for pat in (
+            r"(?i)(?:periodo base|mínimo cotizable|plazo mínimo|periodo mínimo).*?(\d{1,2})\s*mes(?:es)?",
+            r"(?i)importe mínimo.*?(?:para|de)\s*(\d{1,2})\s*mes(?:es)?",
+        ):
+            m = re.search(pat, txt)
+            if m:
+                return f"{m.group(1)} meses"
+        return "No especificado"
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         """
@@ -440,6 +453,9 @@ Responde con este JSON:
                     extracted_data["reglas_economicas"] = normalize_reglas_economicas_dict(
                         extracted_data.get("reglas_economicas")
                     )
+                    reglas = extracted_data.get("reglas_economicas") or {}
+                    if isinstance(reglas, dict) and reglas.get("meses_o_periodo_minimo_citado") == "No especificado":
+                        reglas["meses_o_periodo_minimo_citado"] = self._infer_periodo_minimo_from_context(context_str)
                 if "alcance_operativo" in extracted_data:
                     extracted_data["alcance_operativo"] = normalize_alcance_operativo_list(
                         extracted_data.get("alcance_operativo")
