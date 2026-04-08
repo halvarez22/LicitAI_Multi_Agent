@@ -1,0 +1,62 @@
+{
+  "session_id": "regression_real_anon_blocking_r_2026_04_08",
+  "analysis": {
+    "data": {
+      "requisitos_participacion": [
+        {
+          "inciso": "",
+          "texto_literal": "Carta bajo protesta de decir verdad."
+        }
+      ],
+      "propuesta": {
+        "idioma": "español"
+      },
+      "muestras_entregadas": false
+    }
+  },
+  "compliance": {
+    "data": {
+      "administrativo": [
+        {
+          "id": "AD-01",
+          "descripcion": "Carta bajo protesta de decir verdad",
+          "snippet": "bajo protesta de decir verdad"
+        }
+      ],
+      "tecnico": [
+        {
+          "id": "TE-01",
+          "descripcion": "Personal operativo",
+          "snippet": "Se solicita personal operativo"
+        }
+      ],
+      "formatos": [
+        {
+          "id": "FO-01",
+          "descripcion": "Formato de proposición",
+          "snippet": "Anexo de proposición técnica"
+        }
+      ]
+    }
+  },
+  "economic": {
+    "data": {
+      "currency": "MXN",
+      "items": [
+        {
+          "concepto_id": "TE-01",
+          "concepto": "Propuestas electrónicas",
+          "precio_unitario": 0.0
+        }
+      ],
+      "validation_result": {
+        "validations": [
+          {
+            "regla": "consistencia_total_iva",
+            "estado": "ok"
+          }
+        ]
+      }
+    }
+  }
+}

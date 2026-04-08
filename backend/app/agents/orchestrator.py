@@ -361,6 +361,41 @@ class OrchestratorAgent(BaseAgent):
                     input_data["compliance_master_list"] = res_data.get("data", {})
                     logger.info("resume_data_reconstructed", stage="compliance", session_id=session_id)
 
+                # ComplianceGate determinista (12.1): corta pipeline antes de evaluación económica.
+                from app.agents.compliance_gate import ComplianceGate
+                gate_payload = {
+                    "session_id": session_id,
+                    "analysis": execution_results.get("analysis", {}),
+                    "compliance": execution_results.get("compliance", {}),
+                    "economic": execution_results.get("economic", {}),
+                }
+                gate_result = ComplianceGate().evaluate(gate_payload)
+                gate_result_dict = ComplianceGate.to_dict(gate_result)
+                session_state["compliance_gate_result"] = gate_result_dict
+                execution_results["compliance_gate"] = {
+                    "status": "success",
+                    "agent_id": "compliance_gate_001",
+                    "session_id": session_id,
+                    "data": gate_result_dict,
+                    "message": "Evaluación determinista 12.1 completada.",
+                }
+                if gate_result.is_blocking:
+                    decision = OrchestratorState(
+                        stop_reason="COMPLIANCE_GATE_BLOCKING",
+                        aggregate_health="failed",
+                        next_steps=next_steps,
+                        correlation_id=correlation_id,
+                    ).model_dump()
+                    session_state["last_orchestrator_decision"] = decision
+                    await self.context_manager.memory.save_session(session_id, session_state)
+                    return {
+                        "status": "hard_disqualification",
+                        "session_id": session_id,
+                        "message": "Pipeline detenido por causas deterministas de descalificación (12.1).",
+                        "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
+                        "orchestrator_decision": decision,
+                    }
+
                 # Error check (Legacy Support)
                 comp_res = execution_results.get("compliance")
                 comp_st = _result_status_value(comp_res)
