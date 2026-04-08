@@ -104,6 +104,9 @@ services:
       - EXPERIENCE_DEBUG=true
       - COMPLIANCE_BLOCK_EXTRA_RETRIES=3
       - COMPLIANCE_BLOCK_RETRY_DELAY_SEC=5
+      - COMPLIANCE_CHUNK_CHARS=3000
+      - COMPLIANCE_CHUNK_OVERLAP=300
+      - COMPLIANCE_BLOCK_EMPTY_TIMEOUT_SEC=120
     volumes:
       - C:/data:/data
       - ./logs:/app/logs
