@@ -169,7 +169,9 @@ class EconomicAgent(BaseAgent):
         proposal_draft = self._apply_tabular_prices_to_proposal(
             proposal_draft, tech_requirements, session_line_items
         )
-        proposal_draft = self._ensure_supervisor_no_cost_item(proposal_draft, alcance_bases)
+        proposal_draft = self._ensure_supervisor_no_cost_item(
+            proposal_draft, alcance_bases, tech_requirements
+        )
 
         # 5. Detección de Gaps Económicos
         # El LLM a menudo devuelve "matched" con precio 0 o sin precio: eso NO es cotizable.
@@ -304,18 +306,32 @@ class EconomicAgent(BaseAgent):
         return {}
 
     def _ensure_supervisor_no_cost_item(
-        self, proposal_items: List[Dict[str, Any]], alcance: List[Dict[str, str]]
+        self,
+        proposal_items: List[Dict[str, Any]],
+        alcance: List[Dict[str, str]],
+        tech_requirements: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Inyecta un renglón de supervisión sin costo cuando el alcance lo exige."""
-        joined = " ".join(str(r.get("texto_literal_fila") or r.get("puesto_funcion_o_servicio") or "") for r in (alcance or []))
-        if not re.search(r"(?i)(supervisor|coordinador|jefe de turno|vigilancia|guardia|turno)", joined):
+        joined = " ".join(
+            str(r.get("texto_literal_fila") or r.get("puesto_funcion_o_servicio") or "")
+            for r in (alcance or [])
+        )
+        req_joined = " ".join(
+            str(r.get("label") or r.get("descripcion") or r.get("texto") or "")
+            for r in (tech_requirements or [])
+            if isinstance(r, dict)
+        )
+        source = f"{joined} {req_joined}".strip()
+        needs_supervisor = re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno|vigilancia|guardia|turno)", source)
+        no_cost_signal = re.search(r"(?i)(sin\s*costo|0\.00|sin\s*cargo|costos?\s+indirectos?)", source)
+        if not needs_supervisor:
             return proposal_items
         has_item = False
         for it in proposal_items:
             text = f"{it.get('concepto','')} {it.get('descripcion','')}"
-            if re.search(r"(?i)(supervisor|coordinador|jefe de turno)", text):
+            if re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno|vigilancia|guardia)", text):
                 has_item = True
-                if re.search(r"(?i)(sin costo|0\.00|sin cargo)", text):
+                if no_cost_signal or re.search(r"(?i)(sin\s*costo|0\.00|sin\s*cargo|costos?\s+indirectos?)", text):
                     it["precio_unitario"] = 0.0
                     it["subtotal"] = 0.0
                     it["supervisor_sin_costo"] = True
@@ -323,7 +339,7 @@ class EconomicAgent(BaseAgent):
             return proposal_items
         return proposal_items + [{
             "concepto": "Supervisor General (Sin costo)",
-            "descripcion": "Supervisor General (Sin costo)",
+            "descripcion": "Supervisor General (Sin costo, incluido en costos indirectos)",
             "concepto_id": "AUTO-SUP-NC",
             "cantidad": 1,
             "precio_unitario": 0.0,
