@@ -5,7 +5,6 @@ import hashlib
 import time
 import unicodedata
 import asyncio
-from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
@@ -339,42 +338,29 @@ class ComplianceAgent(BaseAgent):
         empty_timeout_sec = float(os.getenv("COMPLIANCE_BLOCK_EMPTY_TIMEOUT_SEC", "590"))
         max_retries = int(os.getenv("COMPLIANCE_BLOCK_EXTRA_RETRIES", "2"))
         retry_delay = int(os.getenv("COMPLIANCE_BLOCK_RETRY_DELAY_SEC", "5"))
-        max_concurrency = max(1, int(os.getenv("COMPLIANCE_MAX_CONCURRENT_CHUNKS", "1")))
-        sem = asyncio.Semaphore(max_concurrency)
         total_chunks = max(len(chunks), 1)
         done_count = 0
-        done_lock = asyncio.Lock()
 
-        async def _process_block(i: int, chunk: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-            nonlocal done_count
+        for i, chunk in enumerate(chunks):
             b_start = time.time()
             print(f"        [>] Mapeando Bloque {i+1}/{len(chunks)}...", end="", flush=True)
             attempts = 0
             recovered = False
-            cache_hit = False
-            chunk_items, llm_err, empty_resp = self._chunk_cache_get(zone_name, chunk)
-            if chunk_items is not None:
-                cache_hit = True
-                llm_err = None
-                empty_resp = False
-            else:
-                chunk_items = []
-                llm_err = None
-                empty_resp = False
-                while attempts <= max_retries:
-                    async with sem:
-                        chunk_items, llm_err, empty_resp = await self._extract_zone_chunk(
-                            zone_name, chunk, correlation_id, experience_prompt_context
-                        )
-                    if not llm_err and not empty_resp:
-                        if attempts > 0:
-                            recovered = True
-                        self._chunk_cache_set(zone_name, chunk, chunk_items)
-                        break
-                    attempts += 1
-                    if attempts <= max_retries:
-                        print(f" [Fallo. Reintento {attempts}/{max_retries} en {retry_delay}s]...", end="", flush=True)
-                        await asyncio.sleep(retry_delay)
+            chunk_items: List[Dict[str, Any]] = []
+            llm_err: Optional[str] = None
+            empty_resp = False
+            while attempts <= max_retries:
+                chunk_items, llm_err, empty_resp = await self._extract_zone_chunk(
+                    zone_name, chunk, correlation_id, experience_prompt_context
+                )
+                if not llm_err and not empty_resp:
+                    if attempts > 0:
+                        recovered = True
+                    break
+                attempts += 1
+                if attempts <= max_retries:
+                    print(f" [Fallo. Reintento {attempts}/{max_retries} en {retry_delay}s]...", end="", flush=True)
+                    await asyncio.sleep(retry_delay)
 
             b_duration = time.time() - b_start
             print(f" OK ({b_duration:.1f}s, {len(chunk_items)} ítems)")
@@ -388,7 +374,6 @@ class ComplianceAgent(BaseAgent):
                 "empty_llm_response": empty_resp,
                 "llm_attempts": attempts if not recovered else attempts + 1,
                 "recovered_after_retry": recovered,
-                "cache_hit": cache_hit,
             }
             if not recovered and (llm_err or empty_resp):
                 ev["llm_attempts"] = attempts
@@ -399,9 +384,8 @@ class ComplianceAgent(BaseAgent):
             if b_duration > max_block_time:
                 print(f"        ⚠️ [AVISO] Latencia alta en bloque {i+1} ({b_duration:.1f}s)")
             if job_id:
-                async with done_lock:
-                    done_count += 1
-                    intra = int(14 * done_count / total_chunks)
+                done_count += 1
+                intra = int(14 * done_count / total_chunks)
                 _hb_pct = min(94, 30 + completed_zones * 15 + intra)
                 update_job_status(
                     job_id,
@@ -413,11 +397,7 @@ class ComplianceAgent(BaseAgent):
                         "message": f"{zone_name}: bloque {i + 1}/{len(chunks)}",
                     },
                 )
-            return chunk_items, ev
-
-        pairs = await asyncio.gather(*(_process_block(i, chunk) for i, chunk in enumerate(chunks)))
-        for items, ev in sorted(pairs, key=lambda p: p[1]["block_index"]):
-            raw_zone_items.extend(items)
+            raw_zone_items.extend(chunk_items)
             block_events.append(ev)
         return raw_zone_items, block_events
 
@@ -435,40 +415,6 @@ class ComplianceAgent(BaseAgent):
         if context_len > 60_000:
             return max(min_chunk, min(max_chunk, int(base_chunk * 0.8)))
         return max(min_chunk, min(max_chunk, base_chunk))
-
-    def _chunk_cache_get(
-        self, zone_name: str, chunk_text: str
-    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], bool]:
-        """Cache determinista de extracción por hash de zona+chunk."""
-        enabled = os.getenv("COMPLIANCE_CHUNK_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
-        if not enabled:
-            return None, None, False
-        cache_dir = Path(os.getenv("COMPLIANCE_CHUNK_CACHE_DIR", "/tmp/licitai_compliance_cache"))
-        key = hashlib.sha256(f"{zone_name}\n{chunk_text}".encode("utf-8")).hexdigest()
-        p = cache_dir / f"{key}.json"
-        if not p.is_file():
-            return None, None, False
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-            items = payload.get("items")
-            if isinstance(items, list):
-                return items, None, False
-        except Exception:
-            return None, None, False
-        return None, None, False
-
-    def _chunk_cache_set(self, zone_name: str, chunk_text: str, items: List[Dict[str, Any]]) -> None:
-        enabled = os.getenv("COMPLIANCE_CHUNK_CACHE_ENABLED", "true").lower() in ("1", "true", "yes")
-        if not enabled:
-            return
-        try:
-            cache_dir = Path(os.getenv("COMPLIANCE_CHUNK_CACHE_DIR", "/tmp/licitai_compliance_cache"))
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            key = hashlib.sha256(f"{zone_name}\n{chunk_text}".encode("utf-8")).hexdigest()
-            p = cache_dir / f"{key}.json"
-            p.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            return
 
     def _resolve_zone_status_for_block_timeouts(self, status: str, reason: str, block_events: List[Dict[str, Any]]) -> Tuple[str, str]:
         bad = [b for b in block_events if b.get("suspect_llm_timeout")]

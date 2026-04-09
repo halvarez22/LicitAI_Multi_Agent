@@ -1,4 +1,6 @@
 import logging
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from app.agents.base_agent import BaseAgent
@@ -79,6 +81,23 @@ def _notify_job_progress(job_id: Optional[str], stage: str, pct: int, message: s
 
     pct_i = max(0, min(99, int(pct)))
     update_job_status(job_id, "RUNNING", {"stage": stage, "pct": pct_i, "message": message})
+
+
+def _now_utc_iso() -> str:
+    """Retorna timestamp UTC en ISO-8601."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _finalize_stage_telemetry(telemetry: Dict[str, Any], stage_name: str, start_iso: str) -> None:
+    """Completa telemetría de etapa con fin y duración en segundos."""
+    end_iso = _now_utc_iso()
+    start_dt = datetime.fromisoformat(start_iso)
+    end_dt = datetime.fromisoformat(end_iso)
+    telemetry.setdefault("stages", {})[stage_name] = {
+        "start": start_iso,
+        "end": end_iso,
+        "duration_seconds": round((end_dt - start_dt).total_seconds(), 3),
+    }
 
 class OrchestratorAgent(BaseAgent):
     """
@@ -251,7 +270,7 @@ class OrchestratorAgent(BaseAgent):
                     from app.agents.analyst import AnalystAgent
                     if bt_iterations > 0:
                         agent_input.refinement = refinement_data
-                    _t0 = datetime.now(timezone.utc)
+                    _t0_iso = _now_utc_iso()
                     _notify_job_progress(
                         agent_input.job_id,
                         "analysis",
@@ -259,10 +278,7 @@ class OrchestratorAgent(BaseAgent):
                         "Agente analista: extrayendo requisitos de las bases…",
                     )
                     res = await AnalystAgent(self.context_manager).process(agent_input)
-                    telemetry["stages"]["analysis"] = {
-                        "start": _t0.isoformat(),
-                        "end": datetime.now(timezone.utc).isoformat(),
-                    }
+                    _finalize_stage_telemetry(telemetry, "analysis", _t0_iso)
                     execution_results["analysis"] = res
                     stages_executed.append("analysis")
                     next_steps.append(f"analysis_it_{bt_iterations}")
@@ -326,7 +342,7 @@ class OrchestratorAgent(BaseAgent):
                     from app.agents.compliance import ComplianceAgent
                     if bt_iterations > 0:
                         agent_input.refinement = refinement_data
-                    _t0 = datetime.now(timezone.utc)
+                    _t0_iso = _now_utc_iso()
                     _notify_job_progress(
                         agent_input.job_id,
                         "compliance",
@@ -335,10 +351,7 @@ class OrchestratorAgent(BaseAgent):
                     )
                     try:
                         res = await ComplianceAgent(self.context_manager).process(agent_input)
-                        telemetry["stages"]["compliance"] = {
-                            "start": _t0.isoformat(),
-                            "end": datetime.now(timezone.utc).isoformat(),
-                        }
+                        _finalize_stage_telemetry(telemetry, "compliance", _t0_iso)
                         execution_results["compliance"] = res
                         stages_executed.append("compliance")
                         input_data["compliance_master_list"] = (
@@ -391,6 +404,7 @@ class OrchestratorAgent(BaseAgent):
                     "message": "Evaluación determinista 12.1 completada.",
                 }
                 if gate_result.is_blocking:
+                    final_metadata = {"telemetry": telemetry}
                     decision = OrchestratorState(
                         stop_reason="COMPLIANCE_GATE_BLOCKING",
                         aggregate_health="failed",
@@ -398,7 +412,9 @@ class OrchestratorAgent(BaseAgent):
                         correlation_id=correlation_id,
                     ).model_dump()
                     session_state["last_orchestrator_decision"] = decision
+                    session_state["last_orchestrator_metadata"] = final_metadata
                     await self.context_manager.memory.save_session(session_id, session_state)
+                    self._persist_latest_job_metadata(session_id, "hard_disqualification", final_metadata, decision)
                     return {
                         "status": "hard_disqualification",
                         "session_id": session_id,
@@ -443,7 +459,7 @@ class OrchestratorAgent(BaseAgent):
             if self._should_execute_stage("economic", pipeline_config, stages_skipped) and "economic" not in completed_stages:
                 from app.agents.economic import EconomicAgent
                 try:
-                    _t0 = datetime.now(timezone.utc)
+                    _t0_iso = _now_utc_iso()
                     _notify_job_progress(
                         agent_input.job_id,
                         "economic",
@@ -459,10 +475,7 @@ class OrchestratorAgent(BaseAgent):
                         }
                     )
                     res = await EconomicAgent(self.context_manager).process(econ_input)
-                    telemetry["stages"]["economic"] = {
-                        "start": _t0.isoformat(),
-                        "end": datetime.now(timezone.utc).isoformat(),
-                    }
+                    _finalize_stage_telemetry(telemetry, "economic", _t0_iso)
                     execution_results["economic"] = res
                     stages_executed.append("economic")
 
@@ -698,9 +711,36 @@ class OrchestratorAgent(BaseAgent):
                 correlation_id=correlation_id,
             ).model_dump()
             session_state["last_orchestrator_decision"] = decision
+            session_state["last_orchestrator_metadata"] = final_metadata
             await self.context_manager.memory.save_session(session_id, session_state)
+            self._persist_latest_job_metadata(session_id, "success", final_metadata, decision)
 
             return {"status": "success", "session_id": session_id, "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()}, "orchestrator_decision": decision, "metadata": final_metadata}
+
+    def _persist_latest_job_metadata(
+        self,
+        session_id: str,
+        status: str,
+        metadata: Dict[str, Any],
+        decision: Dict[str, Any],
+    ) -> None:
+        """Escribe snapshot legible de telemetría para consumo externo."""
+        try:
+            out_dir = Path("out") / "metadata"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "session_id": session_id,
+                "status": status,
+                "metadata": metadata,
+                "orchestrator_decision": decision,
+                "generated_at": _now_utc_iso(),
+            }
+            (out_dir / "latest_job.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("persist_latest_job_metadata_failed", session_id=session_id, error=str(e))
 
     async def _generate_checklist(self, session_id, input_data, results):
         checklist = []

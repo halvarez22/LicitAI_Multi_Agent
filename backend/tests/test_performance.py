@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,30 +18,12 @@ def test_adaptive_chunking_reduces_chunk_for_large_context() -> None:
 
 
 @pytest.mark.regression
-@pytest.mark.asyncio
-async def test_chunk_cache_improves_second_run(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setenv("COMPLIANCE_CHUNK_CACHE_ENABLED", "true")
-    monkeypatch.setenv("COMPLIANCE_CHUNK_CACHE_DIR", str(tmp_path))
-    monkeypatch.setenv("COMPLIANCE_MAX_CONCURRENT_CHUNKS", "1")
-    monkeypatch.setenv("COMPLIANCE_BLOCK_EXTRA_RETRIES", "0")
-    monkeypatch.setenv("COMPLIANCE_BLOCK_RETRY_DELAY_SEC", "0")
-
+def test_adaptive_chunking_respects_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COMPLIANCE_ADAPTIVE_CHUNKING", "true")
+    monkeypatch.setenv("COMPLIANCE_CHUNK_MIN", "3000")
+    monkeypatch.setenv("COMPLIANCE_CHUNK_MAX", "8000")
     agent = ComplianceAgent(SimpleNamespace())
 
-    async def fake_extract(*_args, **_kwargs):
-        await asyncio.sleep(0.02)
-        return ([{"nombre": "x", "descripcion": "y", "snippet": "z", "categoria_orig": "tecnico"}], None, False)
-
-    monkeypatch.setattr(agent, "_extract_zone_chunk", fake_extract)
-
-    chunks = ["abc " * 3000, "def " * 2800]
-    t0 = time.perf_counter()
-    items_1, _events_1 = await agent._map_zone_chunks("TÉCNICO/OPERATIVO", chunks, 150)
-    t1 = time.perf_counter()
-    items_2, _events_2 = await agent._map_zone_chunks("TÉCNICO/OPERATIVO", chunks, 150)
-    t2 = time.perf_counter()
-
-    first_ms = (t1 - t0) * 1000
-    second_ms = (t2 - t1) * 1000
-    assert len(items_1) == len(items_2) == 2
-    assert second_ms < first_ms * 0.6
+    for context_len in (10_000, 60_000, 140_000, 260_000):
+        chunk = agent._adaptive_chunk_size(context_len, 8000)
+        assert 3000 <= chunk <= 8000
