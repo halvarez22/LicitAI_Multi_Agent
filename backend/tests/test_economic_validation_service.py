@@ -46,6 +46,6 @@ async def test_refresh_economic_validations_for_session():
 
     mem = Mem()
     out = await refresh_economic_validations_for_session(mem, "sx")
-    assert out.perfil_usado in ("generic", "issste_2024_like")
+    assert out.perfil_usado in ("generic", "health_sector_annex_like", "issste_2024_like")
     ep = store["sx"]["tasks_completed"][-1]["result"]
     assert "validation_result" in ep
