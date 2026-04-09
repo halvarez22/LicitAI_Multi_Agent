@@ -2,14 +2,15 @@
 
 > **Hito 9 — Industrialización Mínima**
 
+**Fuente de verdad para el stack Docker actual:** [.env.example](../.env.example) en la raíz del repo (nombres `DATABASE_URL`, `LLM_URL`, `OLLAMA_URL`, compliance, CompraNet, Redis). Este archivo amplía el detalle de comportamiento por `ENVIRONMENT`.
+
 ## Variables Requeridas
 
 | Variable | Descripción | Ejemplo |
 |---|---|---|
-| `POSTGRES_CONNECTION_STRING` | Cadena de conexión a la base de datos Postgres | `postgresql+asyncpg://user:pass@db:5432/licitai` |
-| `OLLAMA_BASE_URL` | URL del servidor Ollama (LLM local) | `http://ollama:11434` |
-| `CHROMA_HOST` | Host del servidor ChromaDB | `chromadb` |
-| `CHROMA_PORT` | Puerto del servidor ChromaDB | `8000` |
+| `DATABASE_URL` | Postgres (sync URL en settings; async en código donde aplique) | `postgresql://postgres:postgres@database:5432/licitaciones` |
+| `LLM_URL` / `OLLAMA_URL` | Ollama (host: `http://host.docker.internal:11434` desde contenedor) | `http://host.docker.internal:11434` |
+| `VECTOR_DB_URL` | Chroma en red Docker | `http://vector-db:8000` |
 
 ## Variables de Comportamiento
 
@@ -55,11 +56,10 @@ Cada request a `/api/v1/agents/process` emite dos entradas de log:
 ```yaml
 environment:
   - ENVIRONMENT=production
-  - POSTGRES_CONNECTION_STRING=postgresql+asyncpg://licitai:secret@db:5432/licitai
+  - DATABASE_URL=postgresql://licitai:secret@database:5432/licitaciones
   - ALLOWED_ORIGINS=https://app.licitai.mx,https://api.licitai.mx
-  - OLLAMA_BASE_URL=http://ollama:11434
-  - CHROMA_HOST=chromadb
-  - CHROMA_PORT=8000
+  - LLM_URL=http://ollama:11434
+  - VECTOR_DB_URL=http://vector-db:8000
 ```
 
 ## Notas de Seguridad
