@@ -214,6 +214,7 @@ class OrchestratorAgent(BaseAgent):
             tasks_completed = context.get("session_state", {}).get("tasks_completed", [])
             execution_results = {}
             next_steps = []
+            telemetry: Dict[str, Any] = {"stages": {}, "llm_calls_estimate": 0}
 
             doc_profile = self._profile_document(input_data, session_state)
             pipeline_config = PipelineConfigurator.configure(doc_profile, mode=mode)
@@ -250,6 +251,7 @@ class OrchestratorAgent(BaseAgent):
                     from app.agents.analyst import AnalystAgent
                     if bt_iterations > 0:
                         agent_input.refinement = refinement_data
+                    _t0 = datetime.now(timezone.utc)
                     _notify_job_progress(
                         agent_input.job_id,
                         "analysis",
@@ -257,6 +259,10 @@ class OrchestratorAgent(BaseAgent):
                         "Agente analista: extrayendo requisitos de las bases…",
                     )
                     res = await AnalystAgent(self.context_manager).process(agent_input)
+                    telemetry["stages"]["analysis"] = {
+                        "start": _t0.isoformat(),
+                        "end": datetime.now(timezone.utc).isoformat(),
+                    }
                     execution_results["analysis"] = res
                     stages_executed.append("analysis")
                     next_steps.append(f"analysis_it_{bt_iterations}")
@@ -320,6 +326,7 @@ class OrchestratorAgent(BaseAgent):
                     from app.agents.compliance import ComplianceAgent
                     if bt_iterations > 0:
                         agent_input.refinement = refinement_data
+                    _t0 = datetime.now(timezone.utc)
                     _notify_job_progress(
                         agent_input.job_id,
                         "compliance",
@@ -328,6 +335,10 @@ class OrchestratorAgent(BaseAgent):
                     )
                     try:
                         res = await ComplianceAgent(self.context_manager).process(agent_input)
+                        telemetry["stages"]["compliance"] = {
+                            "start": _t0.isoformat(),
+                            "end": datetime.now(timezone.utc).isoformat(),
+                        }
                         execution_results["compliance"] = res
                         stages_executed.append("compliance")
                         input_data["compliance_master_list"] = (
@@ -432,6 +443,7 @@ class OrchestratorAgent(BaseAgent):
             if self._should_execute_stage("economic", pipeline_config, stages_skipped) and "economic" not in completed_stages:
                 from app.agents.economic import EconomicAgent
                 try:
+                    _t0 = datetime.now(timezone.utc)
                     _notify_job_progress(
                         agent_input.job_id,
                         "economic",
@@ -447,6 +459,10 @@ class OrchestratorAgent(BaseAgent):
                         }
                     )
                     res = await EconomicAgent(self.context_manager).process(econ_input)
+                    telemetry["stages"]["economic"] = {
+                        "start": _t0.isoformat(),
+                        "end": datetime.now(timezone.utc).isoformat(),
+                    }
                     execution_results["economic"] = res
                     stages_executed.append("economic")
 
@@ -671,7 +687,8 @@ class OrchestratorAgent(BaseAgent):
                 },
                 "confidence_summary": confidence_summary,
                 "backtracking": {"iterations": bt_iterations, "history": bt_history} if settings.BACKTRACKING_ENABLED else None,
-                "feedback_pending": (confidence_summary and confidence_summary.get("avg_confidence", 1.0) < settings.CONFIDENCE_THRESHOLD_DEFAULT) if settings.FEEDBACK_UI_ENABLED else False
+                "feedback_pending": (confidence_summary and confidence_summary.get("avg_confidence", 1.0) < settings.CONFIDENCE_THRESHOLD_DEFAULT) if settings.FEEDBACK_UI_ENABLED else False,
+                "telemetry": telemetry,
             }
             agg_health = _aggregate_health_from_results(execution_results)
             decision = OrchestratorState(
