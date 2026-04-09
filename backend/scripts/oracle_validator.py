@@ -280,6 +280,12 @@ def eval_case(case: Dict[str, Any], payloads: Dict[str, Dict[str, Any]]) -> Case
             return CaseResult(case_id, "blocking", "Supervisor sin costo detectado con precio > 0.", crit)
         if matched_any:
             return CaseResult(case_id, "ok", "Supervisor sin costo consistente (precio 0).", crit)
+        # Compatibilidad de bases donde la supervisión se exige vía "costos indirectos".
+        compliance_blob = json.dumps(payloads.get("compliance", {}), ensure_ascii=False).lower()
+        if re.search(r"supervisor|coordinador|jefe\s*de\s*turno", compliance_blob) and re.search(
+            r"costos?\s+indirectos?", compliance_blob
+        ):
+            return CaseResult(case_id, "ok", "Supervisión exigida en costos indirectos (sin costo directo).", crit)
         return CaseResult(case_id, "warn", "No se detecto partida explicita de supervisor sin costo.", crit)
 
     if case_id == "CG01":
