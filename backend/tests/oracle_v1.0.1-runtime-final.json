@@ -57,6 +57,16 @@
       },
       "criticality": "blocking",
       "validation_rule": "Si is_blocking==true -> pipeline debe detenerse. Si false -> continuar."
+    },
+    {
+      "case_id": "PKG01",
+      "agent": "CompraNetPackager",
+      "description": "Manifiesto SHA-256 y validación determinista de empaque CompraNet",
+      "agent_contract_path": "packaging.validation_passed",
+      "expected_now": {
+        "type": "bool"
+      },
+      "criticality": "blocking"
     }
   ]
 }
