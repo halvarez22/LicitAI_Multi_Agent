@@ -573,6 +573,58 @@ class OrchestratorAgent(BaseAgent):
                                 }
 
                             next_steps.append(f"{step}_OK")
+
+                            # Empaque CompraNet determinista (post DocumentPackager, pre DeliveryAgent)
+                            if step == "packager" and hasattr(res, "status") and res.status == AgentStatus.SUCCESS:
+                                from app.agents.packager import (
+                                    CompraNetPackager,
+                                    build_pack_session_data_from_outputs,
+                                )
+
+                                pdata = res.data if hasattr(res, "data") else {}
+                                if not isinstance(pdata, dict):
+                                    pdata = {}
+                                pack_session = build_pack_session_data_from_outputs(
+                                    session_id=session_id,
+                                    packager_agent_data=pdata,
+                                    company_data=agent_input.company_data or {},
+                                )
+                                pr = CompraNetPackager().pack(pack_session)
+                                execution_results["compranet_packaging"] = pr.to_dict()
+                                if not pr.success:
+                                    logger.error(
+                                        "compranet_packaging_failed",
+                                        session_id=session_id,
+                                        errors=pr.errors,
+                                    )
+                                    decision = OrchestratorState(
+                                        stop_reason="PACKAGING_VALIDATION_FAILED",
+                                        aggregate_health="failed",
+                                        next_steps=next_steps,
+                                        correlation_id=correlation_id,
+                                    ).model_dump()
+                                    latest_session = await self.context_manager.memory.get_session(session_id) or {}
+                                    latest_session["last_orchestrator_decision"] = decision
+                                    await self.context_manager.memory.save_session(session_id, latest_session)
+                                    return {
+                                        "status": "error",
+                                        "session_id": session_id,
+                                        "message": "Validación de empaque CompraNet: " + "; ".join(pr.errors),
+                                        "results": {
+                                            k: (v if isinstance(v, dict) else v.model_dump())
+                                            for k, v in execution_results.items()
+                                        },
+                                        "orchestrator_decision": decision,
+                                    }
+                                await self.context_manager.record_task_completion(
+                                    session_id=session_id,
+                                    task_name="stage_completed:compranet_pack",
+                                    result={
+                                        "status": "success",
+                                        "data": pr.to_dict(),
+                                        "message": "Empaque CompraNet validado (manifiesto SHA-256).",
+                                    },
+                                )
                         except Exception as e:
                             logger.error("generation_step_failed", stage=step, session_id=session_id, error=str(e))
                             decision = OrchestratorState(

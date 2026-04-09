@@ -155,9 +155,46 @@ def _agent_root(agent_name: str, payloads: Dict[str, Dict[str, Any]]) -> Optiona
     return None
 
 
+def eval_pkg01(case: Dict[str, Any], payloads: Dict[str, Dict[str, Any]]) -> CaseResult:
+    """Caso Oracle PKG01: salida determinista del empaquetador CompraNet."""
+    crit = str(case.get("criticality", "blocking"))
+    raw = payloads.get("packager")
+    if raw is None:
+        return CaseResult(
+            "PKG01",
+            "ok",
+            "Sin packager.json en esta corrida Oracle (compatibilidad con exports históricos).",
+            crit,
+        )
+    data = normalize_agent_payload(raw)
+    if not isinstance(data, dict):
+        data = {}
+    passed = data.get("validation_passed")
+    files = data.get("files") or []
+    if passed is True and isinstance(files, list) and len(files) > 0:
+        return CaseResult("PKG01", "ok", "Empaque CompraNet y manifiesto SHA-256 conformes.", crit)
+    if passed is True:
+        return CaseResult(
+            "PKG01",
+            "warn",
+            "validation_passed true pero manifiesto sin archivos listados.",
+            crit,
+        )
+    if passed is False:
+        return CaseResult("PKG01", "blocking", "Validación de empaque CompraNet fallida.", crit)
+    return CaseResult(
+        "PKG01",
+        "missing",
+        "Campo validation_passed ausente o no booleano en payload packager.",
+        crit,
+    )
+
+
 def eval_case(case: Dict[str, Any], payloads: Dict[str, Dict[str, Any]]) -> CaseResult:
     """Evalua un caso oracle contra payloads runtime."""
     case_id = str(case.get("case_id", "unknown_case"))
+    if case_id == "PKG01":
+        return eval_pkg01(case, payloads)
     agent = str(case.get("agent", ""))
     crit = str(case.get("criticality", "warn"))
     path = str(case.get("agent_contract_path", ""))
@@ -330,6 +367,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--analysis", required=True, help="Path a salida analysis JSON.")
     parser.add_argument("--compliance", required=True, help="Path a salida compliance JSON.")
     parser.add_argument("--economic", required=True, help="Path a salida economic JSON.")
+    parser.add_argument("--packager", default="", help="Path opcional a packager.json (stage compranet_pack).")
     parser.add_argument("--max-fixes", type=int, default=5, help="Numero maximo de issues a reportar.")
     parser.add_argument("--save-report", action="store_true", help="Guarda reportes en out/oracle_report.*")
     parser.add_argument("--report-dir", default="out", help="Directorio de salida para reportes.")
@@ -355,11 +393,20 @@ def run_validation(args: argparse.Namespace) -> int:
     economic_path = (project_root / args.economic).resolve() if not Path(args.economic).is_absolute() else Path(args.economic)
 
     oracle = _load_json(oracle_path)
-    payloads = {
+    payloads: Dict[str, Any] = {
         "analysis": normalize_agent_payload(_load_json(analysis_path)),
         "compliance": normalize_agent_payload(_load_json(compliance_path)),
         "economic": normalize_agent_payload(_load_json(economic_path)),
     }
+    packager_arg = str(getattr(args, "packager", "") or "").strip()
+    if packager_arg:
+        pkg_path = (project_root / packager_arg).resolve() if not Path(packager_arg).is_absolute() else Path(packager_arg)
+        if pkg_path.is_file():
+            payloads["packager"] = _load_json(pkg_path)
+        else:
+            payloads["packager"] = None
+    else:
+        payloads["packager"] = None
 
     issues = evaluate_cases(oracle, payloads)
     blocking_issues = sum(1 for issue in issues if is_blocking_issue(issue))

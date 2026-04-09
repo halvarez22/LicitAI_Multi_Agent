@@ -1,0 +1,21 @@
+{
+  "status": "success",
+  "data": {
+    "validation_passed": true,
+    "success": true,
+    "errors": [],
+    "manifest_path": "C:/data/outputs/ejemplo_sesion_anonima/_compranet_validated/MANIFIESTO_SHA256.json",
+    "manifest_sha256_path": "C:/data/outputs/ejemplo_sesion_anonima/_compranet_validated/MANIFIESTO_SHA256.json",
+    "zip_path": null,
+    "staged_root": "C:/data/outputs/ejemplo_sesion_anonima/_compranet_validated",
+    "files": [
+      {
+        "path": "SobreComplementaria/RFC_ANONIMIZADO_la-51-gyn-051gyn025-n-8-2024_vigilancia_SobreComplementaria_01.docx",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 1
+      }
+    ],
+    "total_bytes": 1
+  },
+  "message": "Empaque CompraNet validado (manifiesto SHA-256)."
+}

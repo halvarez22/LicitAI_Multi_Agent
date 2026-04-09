@@ -41,6 +41,7 @@ async def export_inputs(session_id: str, database_url: str, out_dir: Path) -> in
             analysis = _extract_stage_result(tasks, "stage_completed:analysis")
             compliance = _extract_stage_result(tasks, "stage_completed:compliance")
             economic = _extract_stage_result(tasks, "stage_completed:economic")
+            compranet_pack = _extract_stage_result(tasks, "stage_completed:compranet_pack")
 
             missing = []
             if analysis is None:
@@ -57,6 +58,10 @@ async def export_inputs(session_id: str, database_url: str, out_dir: Path) -> in
             (out_dir / "analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
             (out_dir / "compliance.json").write_text(json.dumps(compliance, ensure_ascii=False, indent=2), encoding="utf-8")
             (out_dir / "economic.json").write_text(json.dumps(economic, ensure_ascii=False, indent=2), encoding="utf-8")
+            if compranet_pack is not None:
+                (out_dir / "packager.json").write_text(
+                    json.dumps(compranet_pack, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
             print(f"Exportados inputs oracle en: {out_dir}")
             return 0
     finally:

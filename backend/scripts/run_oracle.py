@@ -14,6 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis", help="Path analysis JSON.")
     parser.add_argument("--compliance", help="Path compliance JSON.")
     parser.add_argument("--economic", help="Path economic JSON.")
+    parser.add_argument("--packager", default="", help="Path opcional packager.json (PKG01).")
     parser.add_argument("--session-id", help="ID de sesion para resolver paths por convencion.")
     parser.add_argument("--out", default="out", help="Directorio de salida para reportes.")
     parser.add_argument("--max-fixes", type=int, default=5, help="Maximo de issues a reportar.")
@@ -90,6 +91,10 @@ def main() -> int:
         "--report-dir",
         str(out_dir),
     ]
+    if str(getattr(args, "packager", "") or "").strip():
+        packager_path = _resolve_input_path(str(args.packager), backend_root)
+        if packager_path.is_file():
+            command.extend(["--packager", str(packager_path)])
 
     completed = subprocess.run(command, check=False)
     return completed.returncode
