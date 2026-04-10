@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any
-from app.memory.factory import MemoryAdapterFactory
+from app.api.deps import get_connected_memory
 from app.api.schemas.responses import GenericResponse
 from app.checklist.models import MarkHitoPayload
 from app.checklist.submission_checklist_service import (
@@ -31,9 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 async def get_repository():
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
-    return memory
+    return await get_connected_memory()
 
 @router.get("", response_model=GenericResponse)
 async def list_licitaciones():

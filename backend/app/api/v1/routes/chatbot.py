@@ -3,7 +3,7 @@ from app.api.schemas.requests import ChatbotRequest
 from app.api.schemas.responses import ChatbotResponse
 from app.agents.chatbot_rag import ChatbotRAGAgent
 from app.agents.mcp_context import MCPContextManager
-from app.memory.factory import MemoryAdapterFactory
+from app.api.deps import get_connected_memory
 from app.contracts.agent_contracts import AgentInput
 
 router = APIRouter()
@@ -14,8 +14,7 @@ async def ask_chatbot(request: ChatbotRequest):
     Habla con el Asistente Experto (RAG). Busca citas en los documentos subidos
     a través de VectorDB y mantiene un historial conversacional.
     """
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     mcp_manager = MCPContextManager(memory_repository=memory)
     rag_agent = ChatbotRAGAgent(context_manager=mcp_manager)

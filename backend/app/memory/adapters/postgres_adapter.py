@@ -29,14 +29,19 @@ class PostgresMemoryAdapter(MemoryRepository):
         self._tables_created = False
 
     async def connect(self) -> bool:
+        from app.memory.factory import MemoryAdapterFactory
+
+        if not self.connection_string:
+            print("PostgresMemoryAdapter: DATABASE_URL vacía o no definida.")
+            MemoryAdapterFactory.reset_instance()
+            return False
         try:
             if not self.engine:
                 self.engine = create_async_engine(self.connection_string, echo=False)
                 self.async_session = sessionmaker(
                     self.engine, class_=AsyncSession, expire_on_commit=False
                 )
-                
-                # Crear las tablas solo una vez en el ciclo de vida del adaptador
+
                 if not self._tables_created:
                     async with self.engine.begin() as conn:
                         await conn.run_sync(Base.metadata.create_all)
@@ -44,6 +49,9 @@ class PostgresMemoryAdapter(MemoryRepository):
             return True
         except Exception as e:
             print(f"Error conectando a Postgres: {e}")
+            self.engine = None
+            self.async_session = None
+            MemoryAdapterFactory.reset_instance()
             return False
 
     async def disconnect(self) -> bool:

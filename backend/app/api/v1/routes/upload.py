@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, Depends, Form, HTTPException, Query
 from app.services.ocr_service import OCRServiceClient
 from app.services.vector_service import VectorDbServiceClient
-from app.memory.factory import MemoryAdapterFactory
+from app.api.deps import get_connected_memory
 from app.api.schemas.responses import GenericResponse
 import shutil
 import uuid
@@ -40,8 +40,7 @@ async def upload_file(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     doc_id = str(uuid.uuid4())
     try:
         # 1. Asegurar que la sesión exista sin borrar nombre ni estado (save_session reemplaza el JSON completo)
@@ -86,8 +85,7 @@ async def process_document(
     Lanza extracción + indexación de un documento.
     Con force=true permite re-ingestar tras cambios de pipeline sin borrar el archivo.
     """
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     doc_data = await memory.get_document(doc_id)
     if not doc_data:
@@ -180,8 +178,7 @@ async def process_document(
 @router.get("/list/{session_id}", response_model=GenericResponse)
 async def list_documents(session_id: str):
     """Lista todos los documentos asociados a una sesión."""
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     try:
         docs = await memory.get_documents(session_id)
@@ -208,8 +205,7 @@ async def list_session_line_items(session_id: str):
     Lista partidas económicas persistidas (Excel → session_line_items) para la sesión.
     Útil para verificar ingesta desde la API sin acceder a Postgres a mano.
     """
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     try:
         rows = await memory.get_line_items_for_session(session_id)
         return GenericResponse(
@@ -224,8 +220,7 @@ async def list_session_line_items(session_id: str):
 @router.delete("/{doc_id}", response_model=GenericResponse)
 async def delete_document(doc_id: str, session_id: str = Form(...)):
     """Elimina una fuente del sistema (Archivo, DB y Vectores)."""
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     doc_data = await memory.get_document(doc_id)
     if not doc_data:
