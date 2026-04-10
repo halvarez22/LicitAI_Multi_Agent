@@ -1,5 +1,10 @@
+import os
+import re
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
+
 
 class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
@@ -56,5 +61,33 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "extra": "ignore"
     }
+
+    @model_validator(mode="after")
+    def _normalize_docker_service_hosts_on_local_api(self) -> "Settings":
+        """
+        Si el proceso del API corre en el host (fuera de Docker) pero el .env
+        está alineado a docker-compose (hostnames ``database``, ``vector-db``,
+        ``queue-redis``), apuntar a localhost donde los puertos suelen estar publicados.
+        Dentro del contenedor ``/.dockerenv`` existe y no se altera nada.
+        """
+        if os.path.exists("/.dockerenv"):
+            return self
+
+        if self.DATABASE_URL and "@database:" in self.DATABASE_URL:
+            self.DATABASE_URL = self.DATABASE_URL.replace("@database:", "@127.0.0.1:")
+
+        if self.VECTOR_DB_URL and "vector-db" in self.VECTOR_DB_URL:
+            self.VECTOR_DB_URL = re.sub(
+                r"//vector-db([:/])",
+                r"//127.0.0.1\1",
+                self.VECTOR_DB_URL,
+                count=1,
+            )
+
+        if self.REDIS_HOST in ("queue-redis", "redis"):
+            self.REDIS_HOST = "127.0.0.1"
+
+        return self
+
 
 settings = Settings()
