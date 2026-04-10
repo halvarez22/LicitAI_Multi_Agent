@@ -21,6 +21,7 @@ def _memory_stub(session: dict | None = None):
     mem.get_session = AsyncMock(return_value=sess)
     mem.save_session = AsyncMock(return_value=True)
     mem.get_documents = AsyncMock(return_value=[])
+    mem.record_task_completion = AsyncMock(return_value=True)
     mem.disconnect = AsyncMock()
     return mem
 
@@ -51,7 +52,7 @@ class TestLegacyPipelineCompatibility:
                 status=AgentStatus.SUCCESS,
                 agent_id="compliance_mock",
                 session_id="sess-legacy-001",
-                data={"administrativo": [{"id": "AD-01"}], "tecnico": [], "formatos": []}
+                data={"administrativo": [{"id": "AD-01", "estado": "pass"}], "tecnico": [], "formatos": []}
             ))
             Me.return_value.process = AsyncMock(return_value=AgentOutput(
                 status=AgentStatus.SUCCESS,
@@ -181,6 +182,6 @@ class TestHardenedAgentContracts:
                 {"company_id": "co-1", "company_data": {"mode": "analysis_only"}}
             )
 
-        assert result["orchestrator_decision"]["stop_reason"] == "COMPLIANCE_ERROR"
+        assert result["orchestrator_decision"]["stop_reason"] == "COMPLIANCE_GATE_BLOCKING"
         assert result["orchestrator_decision"]["aggregate_health"] == "failed"
         Me.return_value.process.assert_not_awaited()

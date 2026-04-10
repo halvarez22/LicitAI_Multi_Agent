@@ -16,6 +16,7 @@ def _memory_stub():
     mem.save_session = AsyncMock(return_value=True)
     mem.get_global_context = AsyncMock(return_value={"tasks_completed": []})
     mem.get_documents = AsyncMock(return_value=[])
+    mem.record_task_completion = AsyncMock(return_value=True)
     return mem
 
 
@@ -31,9 +32,17 @@ class TestAdaptiveOrchestratorIntegration:
             ctx = MCPContextManager(_memory_stub())
             orch = OrchestratorAgent(ctx)
 
-            with patch("app.agents.analyst.AnalystAgent") as Ma:
+            with patch("app.agents.analyst.AnalystAgent") as Ma, \
+                 patch("app.agents.compliance.ComplianceAgent") as Mc, \
+                 patch("app.agents.economic.EconomicAgent") as Me:
                 Ma.return_value.process = AsyncMock(return_value=AgentOutput(
                     status=AgentStatus.SUCCESS, agent_id="a", session_id="s", data={}
+                ))
+                Mc.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="c", session_id="s", data={"administrativo": [{"id": "r1", "estado": "pass"}]}
+                ))
+                Me.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="e", session_id="s", data={}
                 ))
 
                 result = await orch.process(
@@ -54,9 +63,17 @@ class TestAdaptiveOrchestratorIntegration:
             ctx = MCPContextManager(_memory_stub())
             orch = OrchestratorAgent(ctx)
 
-            with patch("app.agents.analyst.AnalystAgent") as Ma:
+            with patch("app.agents.analyst.AnalystAgent") as Ma, \
+                 patch("app.agents.compliance.ComplianceAgent") as Mc, \
+                 patch("app.agents.economic.EconomicAgent") as Me:
                 Ma.return_value.process = AsyncMock(return_value=AgentOutput(
                     status=AgentStatus.SUCCESS, agent_id="a", session_id="s", data={}
+                ))
+                Mc.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="c", session_id="s", data={"administrativo": [{"id": "r1", "estado": "pass"}]}
+                ))
+                Me.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="e", session_id="s", data={}
                 ))
 
                 result = await orch.process(
@@ -87,7 +104,7 @@ class TestAdaptiveOrchestratorIntegration:
                     status=AgentStatus.SUCCESS, agent_id="a", session_id="s", data={}
                 ))
                 Mc.return_value.process = AsyncMock(return_value=AgentOutput(
-                    status=AgentStatus.SUCCESS, agent_id="c", session_id="s", data={}
+                    status=AgentStatus.SUCCESS, agent_id="c", session_id="s", data={"administrativo": [{"id": "AD", "estado": "pass"}]}
                 ))
                 Mg.return_value.process = AsyncMock(return_value=AgentOutput(
                     status=AgentStatus.WAITING_FOR_DATA, agent_id="dg", session_id="sx", data={"missing": ["RFC"]}

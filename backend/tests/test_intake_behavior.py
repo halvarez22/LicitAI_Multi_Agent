@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.agents.intake import IntakeAgent
 from app.agents.mcp_context import MCPContextManager
+from app.contracts.agent_contracts import AgentStatus, AgentInput
 
 # Fixture para evitar que DataGapAgent intente conectarse a ChromaDB durante su instanciación en Intake
 @pytest.fixture(autouse=True)
@@ -30,7 +31,7 @@ def mock_context():
 @pytest.fixture
 def agent(mock_context):
     a = IntakeAgent(mock_context)
-    a.llm = MagicMock()
+    a.llm = AsyncMock()
     a.llm.generate = AsyncMock()
     return a
 
@@ -79,5 +80,7 @@ async def test_intake_finalizacion(agent, mock_context):
 
 @pytest.mark.asyncio
 async def test_intake_process_interfaz(agent):
-    out = await agent.process("s", {})
-    assert out["status"] == "use_process_user_response_instead"
+    inp = AgentInput(session_id="s", company_id="c1", company_data={})
+    out = await agent.process(inp)
+    assert out.status == AgentStatus.ERROR
+    assert "Use process_user_response_instead" in out.error

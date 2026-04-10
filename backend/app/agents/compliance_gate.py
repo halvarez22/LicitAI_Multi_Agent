@@ -23,10 +23,17 @@ class ComplianceGateResult:
 def _dig(obj: Any, path: str) -> Any:
     cur = obj
     for part in path.split("."):
-        if isinstance(cur, dict) and part in cur:
-            cur = cur[part]
+        if isinstance(cur, dict):
+            if part in cur:
+                cur = cur[part]
+            else:
+                return None
         else:
-            return None
+            # Soporte para AgentOutput/modelos Pydantic (objetos)
+            if hasattr(cur, part):
+                cur = getattr(cur, part)
+            else:
+                return None
     return cur
 
 

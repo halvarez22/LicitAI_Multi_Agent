@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -506,6 +507,7 @@ class OrchestratorAgent(BaseAgent):
                         "message": "Pipeline detenido por causas deterministas de descalificación (12.1).",
                         "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
                         "orchestrator_decision": decision,
+                        "metadata": final_metadata,
                     }
 
                 # Error check (Legacy Support)
@@ -516,7 +518,13 @@ class OrchestratorAgent(BaseAgent):
                     # Si es error, guardamos sesión antes de salir
                     session_state["last_orchestrator_decision"] = decision
                     await self.context_manager.memory.save_session(session_id, session_state)
-                    return {"status": "success", "session_id": session_id, "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()}, "orchestrator_decision": decision}
+                    return {
+                        "status": "success",
+                        "session_id": session_id,
+                        "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
+                        "orchestrator_decision": decision,
+                        "metadata": {"telemetry": telemetry}
+                    }
 
                 # Validation & Reflection
                 if settings.BACKTRACKING_ENABLED and mode in ["full", "analysis_only"]:
@@ -932,8 +940,49 @@ class OrchestratorAgent(BaseAgent):
             logger.warning("persist_latest_job_metadata_failed", session_id=session_id, error=str(e))
 
     async def _generate_checklist(self, session_id, input_data, results):
-        checklist = []
-        comp = input_data.get("compliance_master_list", {})
-        for cat in ["administrativo", "tecnico", "formatos"]:
-            for r in comp.get(cat, []): checklist.append({"req_id": r.get("id"), "status": "pending"})
+        """
+        Hito 7: concilia requisitos de ``compliance_master_list`` con
+        ``documentos_generados`` (administrativa / técnica / formatos).
+        """
+        checklist: List[Dict[str, Any]] = []
+        comp = input_data.get("compliance_master_list") or {}
+        gen_docs = input_data.get("documentos_generados") or {}
+
+        cat_folder = {
+            "administrativo": "administrativa",
+            "tecnico": "tecnica",
+            "formatos": "formatos",
+        }
+
+        def _pick_file(rid: Any, nombre: str, docs: List[Dict[str, Any]]) -> Optional[str]:
+            rid_s = str(rid or "").strip()
+            for doc in docs or []:
+                fname = doc.get("nombre") or doc.get("name") or ""
+                if not fname:
+                    continue
+                if rid_s and rid_s in fname:
+                    return fname
+                words = re.findall(r"[A-Za-zÁÉÍÓÚáéíóúñÑ]{4,}", nombre or "")
+                if len(words) >= 2:
+                    hits = sum(1 for w in words if w.lower() in fname.lower())
+                    if hits >= 2:
+                        return fname
+                elif len(words) == 1 and words[0].lower() in fname.lower():
+                    return fname
+            return None
+
+        for cat in ("administrativo", "tecnico", "formatos"):
+            folder = cat_folder.get(cat, cat)
+            doc_list = gen_docs.get(folder, []) or []
+            for r in comp.get(cat, []) or []:
+                rid = r.get("id")
+                nombre = str(r.get("nombre") or "")
+                matched = _pick_file(rid, nombre, doc_list)
+                checklist.append(
+                    {
+                        "req_id": rid,
+                        "status": "fulfilled" if matched else "missing",
+                        "file": matched,
+                    }
+                )
         return checklist

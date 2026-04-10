@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.api.v1.routes.experience import get_experience_store
 from app.config.settings import settings
 from unittest.mock import patch, AsyncMock
 
@@ -8,10 +9,14 @@ client = TestClient(app)
 
 @pytest.fixture
 def mock_store():
-    with patch('app.api.v1.routes.experience.get_experience_store') as mock:
-        store = AsyncMock()
-        mock.return_value = store
+    store = AsyncMock()
+    # Mocking the dependency in FastAPI
+    async def override_get_experience_store():
         yield store
+    
+    app.dependency_overrides[get_experience_store] = override_get_experience_store
+    yield store
+    app.dependency_overrides.clear()
 
 def test_api_outcome_registration_disabled():
     with patch.multiple(settings, EXPERIENCE_API_ENABLED=False):

@@ -13,7 +13,7 @@ async def test_chatbot_meta_query_recognition_hito8():
             "stop_reason": "MISSING_PRICES"
         },
         "pending_questions": [
-            {"label": "Precio de Laptop"}
+            {"label": "Precio de Laptop", "field": "p1", "question": "¿Cuál es el precio?"}
         ]
     }
     
@@ -25,17 +25,30 @@ async def test_chatbot_meta_query_recognition_hito8():
     chatbot = ChatbotRAGAgent(ctx)
 
     # 2. Mockear clasificador para que detecte 'META'
-    with patch.object(chatbot.llm, "generate", AsyncMock(return_value={"response": "META"})):
+    from app.contracts.agent_contracts import AgentInput
+    from app.services.resilient_llm import LLMResponse
+
+    with patch.object(chatbot.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="META"))):
         # Primera llamada: Pregunta explícita
-        res = await chatbot.process("sess_meta", {"query": "¿Por qué se detuvo el proceso?", "company_id": "co1"})
+        inp1 = AgentInput(
+            session_id="sess_meta",
+            company_id="co1",
+            company_data={"query": "¿Por qué se detuvo el proceso?"}
+        )
+        res = await chatbot.process(inp1)
         
         # Validar respuesta
-        assert res["data"]["tipo"] == "meta_answer"
-        assert "conceptos sin precio" in res["data"]["respuesta"]
-        assert "Precio de Laptop" in res["data"]["respuesta"]
+        assert res.data["tipo"] == "meta_answer"
+        assert "conceptos sin precio" in res.data["respuesta"]
+        assert "Precio de Laptop" in res.data["respuesta"]
         
         # Segunda llamada: Verificar que NO intenta hacer RAG (no debe llamar al vector_db)
         with patch.object(chatbot.vector_db, "query_texts") as mock_query:
-            await chatbot.process("sess_meta", {"query": "¿Qué falta?", "company_id": "co1"})
+            inp2 = AgentInput(
+                session_id="sess_meta",
+                company_id="co1",
+                company_data={"query": "¿Qué falta?"}
+            )
+            await chatbot.process(inp2)
             # No se llega a llamar a RAG si es META
             mock_query.assert_not_called()
