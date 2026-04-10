@@ -1,5 +1,7 @@
-import sys
 import os
+import sys
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,9 +10,29 @@ _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
+from app.agents.compliance_gate import ComplianceGateResult
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.mcp_context import MCPContextManager
+from app.agents.packager import PackResult
 from app.contracts.agent_contracts import AgentOutput, AgentStatus
+
+
+@pytest.fixture(autouse=True)
+def _brakes_compliance_gate_ok():
+    """Evita descalificación 12.1 con payloads mínimos de estos tests."""
+    gate_ok = ComplianceGateResult(
+        is_blocking=False,
+        failed_rules=[],
+        warnings=[],
+        evidence={},
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    with patch("app.agents.compliance_gate.ComplianceGate") as GC, patch(
+        "app.agents.packager.CompraNetPackager"
+    ) as MCN:
+        GC.return_value.evaluate.return_value = gate_ok
+        MCN.return_value.pack.return_value = PackResult(success=True, validation_passed=True)
+        yield
 
 
 @pytest.fixture
