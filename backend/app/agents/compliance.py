@@ -15,6 +15,7 @@ from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.services.confidence_scorer import ConfidenceScorer
 from app.services.experience_store import ExperienceStore
 from app.services.job_service import update_job_status
+from app.services.compliance_map_extract import extract_compliance_data_with_retry
 from app.config.settings import settings
 
 # Logger estructurado
@@ -31,6 +32,8 @@ _C01_SEMANTIC_PATTERN = re.compile(
 # COMPLIANCE_BLOCK_EMPTY_TIMEOUT_SEC (default 590): Límite sospecha timeout silencioso.
 # COMPLIANCE_MIN_SNIPPET_MATCH_PCT (default 40): Umbral mínimo para no fallar zona.
 # COMPLIANCE_PASS_SNIPPET_MATCH_PCT (default 75): Umbral para marcar zona como 'pass'.
+# COMPLIANCE_MAP_JSON_STRICT (default true): Map JSON con Pydantic + reintento dirigido (ver compliance_map_extract).
+# OLLAMA_NUM_CTX (default 12288): Ventana de contexto en generate() (override global; antes 16384 fijo).
 # -----------------------------------------------------------
 
 class ComplianceAgent(BaseAgent):
@@ -350,7 +353,7 @@ class ComplianceAgent(BaseAgent):
             llm_err: Optional[str] = None
             empty_resp = False
             while attempts <= max_retries:
-                chunk_items, llm_err, empty_resp = await self._extract_zone_chunk(
+                chunk_items, llm_err, empty_resp, map_json_rt = await self._extract_zone_chunk(
                     zone_name, chunk, correlation_id, experience_prompt_context
                 )
                 if not llm_err and not empty_resp:
@@ -374,6 +377,7 @@ class ComplianceAgent(BaseAgent):
                 "empty_llm_response": empty_resp,
                 "llm_attempts": attempts if not recovered else attempts + 1,
                 "recovered_after_retry": recovered,
+                "map_json_result_type": map_json_rt,
             }
             if not recovered and (llm_err or empty_resp):
                 ev["llm_attempts"] = attempts
@@ -447,7 +451,7 @@ class ComplianceAgent(BaseAgent):
         chunk_text: str,
         correlation_id: str = "",
         experience_prompt_context: str = "",
-    ) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    ) -> Tuple[List[Dict[str, Any]], Optional[str], bool, Optional[str]]:
         system_prompt = (
             "Eres un Auditor Forense Senior de Licitaciones especializado en Despiece Quirúrgico.\n"
             "Tu misión es extraer requisitos con EVIDENCIA LITERAL. \n\n"
@@ -493,41 +497,94 @@ FORMATO JSON OBLIGATORIO:
 """
         if experience_prompt_context:
             prompt += f"\n{experience_prompt_context}\n"
-        llm_res = await self.llm.generate(prompt=prompt, system_prompt=system_prompt, format="json", correlation_id=correlation_id)
-        if not llm_res.success:
-            return [], llm_res.error, False
 
-        raw_str = llm_res.response
-        if raw_str is None or (isinstance(raw_str, str) and not raw_str.strip()):
-            return [], None, True
+        use_map_strict = os.getenv("COMPLIANCE_MAP_JSON_STRICT", "true").lower() in ("1", "true", "yes")
+        raw_data: Optional[Dict[str, Any]] = None
+        map_json_rt: Optional[str] = None
+        raw_str: Optional[str] = None
 
-        raw_data = self._robust_json_parse(raw_str)
+        if use_map_strict:
+            ex = await extract_compliance_data_with_retry(
+                self.llm.service_client,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=None,
+                correlation_id=correlation_id,
+            )
+            map_json_rt = ex.result_type
+            logger.info(
+                "compliance_map_chunk_telemetry",
+                zone=zone_name,
+                correlation_id=correlation_id,
+                map_json_result_type=ex.result_type,
+            )
+            if ex.result_type == "llm_error":
+                return [], ex.error, False, map_json_rt
+            if ex.result_type == "empty_response":
+                return [], None, True, map_json_rt
+            raw_data = ex.data
+            if not raw_data:
+                logger.warning(
+                    "compliance_json_parse_or_schema_fail",
+                    zone=zone_name,
+                    response_chars=0,
+                    preview=ex.raw_preview,
+                    map_json_result_type=ex.result_type,
+                )
+                return (
+                    [],
+                    ex.error or "JSON inválido o sin datos tras validación",
+                    False,
+                    map_json_rt,
+                )
+        else:
+            llm_res = await self.llm.generate(
+                prompt=prompt, system_prompt=system_prompt, format="json", correlation_id=correlation_id
+            )
+            if not llm_res.success:
+                return [], llm_res.error, False, None
+
+            raw_str = llm_res.response
+            if raw_str is None or (isinstance(raw_str, str) and not raw_str.strip()):
+                return [], None, True, None
+
+            raw_data = self._robust_json_parse(raw_str)
+            map_json_rt = None
+
         if not isinstance(raw_data, dict) or not any(raw_data.get(k) for k in ["administrativo", "tecnico", "formatos"]):
             # No marcar como "respuesta vacía": suele ser JSON truncado o esquema incorrecto.
+            _prev = raw_str if raw_str is not None else ""
+            if not _prev and raw_data is not None:
+                _prev = json.dumps(raw_data, ensure_ascii=False)[:800]
             logger.warning(
                 "compliance_json_parse_or_schema_fail",
                 zone=zone_name,
-                response_chars=len(raw_str) if isinstance(raw_str, str) else 0,
-                preview=(raw_str[:400] + "…") if isinstance(raw_str, str) and len(raw_str) > 400 else raw_str,
+                response_chars=len(_prev) if isinstance(_prev, str) else 0,
+                preview=(_prev[:400] + "…") if isinstance(_prev, str) and len(_prev) > 400 else _prev,
+                map_json_result_type=map_json_rt,
             )
             return (
                 [],
                 "JSON inválido, truncado o sin claves administrativo/tecnico/formatos",
                 False,
+                map_json_rt,
             )
 
         flat_items = []
         for cat in ["administrativo", "tecnico", "formatos"]:
             entries = raw_data.get(cat, [])
-            if isinstance(entries, dict): entries = [entries]
-            if not isinstance(entries, list): continue
+            if isinstance(entries, dict):
+                entries = [entries]
+            if not isinstance(entries, list):
+                continue
             for item in entries:
-                if not isinstance(item, dict): continue
+                if not isinstance(item, dict):
+                    continue
                 item["categoria_orig"] = cat
                 # ✅ TRAZABILIDAD: conservar la zona de map-reduce que originó este ítem
                 item["zona_origen"] = zone_name
                 flat_items.append(item)
-        return flat_items, None, False
+        return flat_items, None, False, map_json_rt
 
     def _reduce_zone_items(self, zone_name: str, items: List[Dict[str, Any]], full_context: str) -> Tuple[List[Dict], Dict]:
         seen_snippets = set()

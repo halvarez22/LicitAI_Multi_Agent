@@ -78,6 +78,103 @@ const WAITING_FOR_DATA_FALLBACK_AUDIT_ES =
 const WAITING_FOR_DATA_FALLBACK_GENERATION_ES =
     "Faltan datos para generar documentos. Revisa la lista anterior o sube la documentación indicada; cuando los tengas, responde aquí o vuelve a pulsar Generar.";
 
+/** Etiquetas legibles para etapas de la cola de generación (orchestrator / generation_state). */
+const GENERATION_STAGE_LABELS_ES = {
+    datagap: 'Verificación de datos',
+    technical: 'Propuesta técnica',
+    formats: 'Formatos administrativos',
+    economic_writer: 'Propuesta económica',
+    economic: 'Propuesta económica',
+    packager: 'Empaquetado',
+    document_packager: 'Empaquetado',
+    delivery: 'Entrega',
+};
+
+/**
+ * @param {string} stage
+ * @returns {string}
+ */
+function generationStageLabelEs(stage) {
+    return GENERATION_STAGE_LABELS_ES[stage] || String(stage).replace(/_/g, ' ');
+}
+
+/**
+ * Complementa el mensaje del backend cuando la generación queda en `waiting_for_data`
+ * (Hito 4: `results.*.data.missing`, `missing_fields`, cola bloqueada).
+ * @param {Record<string, unknown>|null|undefined} orchestrator — Cuerpo `result` del job o objeto equivalente.
+ * @returns {string} Sufijo en markdown ligero (vacío si no hay datos extra).
+ */
+function formatGenerationWaitingExtra(orchestrator) {
+    if (!orchestrator || typeof orchestrator !== 'object') return '';
+    const parts = [];
+
+    const results = orchestrator.data;
+    const stageOrder = [
+        'datagap',
+        'technical',
+        'formats',
+        'economic_writer',
+        'economic',
+        'packager',
+        'document_packager',
+        'delivery',
+    ];
+    const processedStages = new Set();
+
+    const pushMissingForStage = (stage, miss) => {
+        if (!Array.isArray(miss) || miss.length === 0) return;
+        const label = generationStageLabelEs(stage);
+        const lines = miss.slice(0, 18).map((m) => {
+            if (typeof m === 'string') return `• ${m}`;
+            if (!m || typeof m !== 'object') return null;
+            const q = m.question || m.label || m.field;
+            return q ? `• ${q}` : null;
+        }).filter(Boolean);
+        if (lines.length) {
+            parts.push(`**${label} — completar:**\n${lines.join('\n')}`);
+        }
+    };
+
+    if (results && typeof results === 'object') {
+        for (const stage of stageOrder) {
+            const r = results[stage];
+            if (!r || typeof r !== 'object') continue;
+            processedStages.add(stage);
+            const miss = r.data?.missing ?? r.missing;
+            pushMissingForStage(stage, miss);
+        }
+        for (const stage of Object.keys(results)) {
+            if (processedStages.has(stage)) continue;
+            const r = results[stage];
+            if (!r || typeof r !== 'object') continue;
+            const miss = r.data?.missing ?? r.missing;
+            pushMissingForStage(stage, miss);
+        }
+    }
+
+    if (parts.length === 0) {
+        const mf = orchestrator.missing_fields;
+        if (Array.isArray(mf) && mf.length) {
+            parts.push(
+                '**Campos pendientes:**\n' + mf.slice(0, 24).map((k) => `• ${k}`).join('\n')
+            );
+        }
+    }
+
+    const gs = orchestrator.generation_state;
+    const jobs = gs?.jobs;
+    if (Array.isArray(jobs)) {
+        const blocked = jobs
+            .filter((j) => j && j.status === 'blocked')
+            .map((j) => generationStageLabelEs(j.id));
+        if (blocked.length) {
+            parts.push(`**Cola de generación:** en pausa en — ${blocked.join(', ')}.`);
+        }
+    }
+
+    return parts.length ? '\n\n' + parts.join('\n\n') : '';
+}
+
 // --- Sub-componente para mostrar resultados de auditoría ---
 const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
     const [activeZoneTab, setActiveZoneTab] = useState('all');
@@ -788,15 +885,21 @@ const App = () => {
             if (encolado?.job_id) {
                 orchestrator = await pollAgentsJobUntilDone(encolado.job_id);
             } else if (encolado) {
-                orchestrator = { status: res.data.status, data: encolado, chatbot_message: res.data.chatbot_message };
+                orchestrator = {
+                    status: res.data.status,
+                    data: encolado,
+                    chatbot_message: res.data.chatbot_message,
+                    missing_fields: res.data.missing_fields,
+                    generation_state: res.data.generation_state,
+                    agent_decision: res.data.agent_decision,
+                };
             }
 
             const orchStatus = orchestrator?.status;
             if (orchStatus === "waiting_for_data") {
-                pushAssistantGuidance(
-                    orchestrator?.chatbot_message || WAITING_FOR_DATA_FALLBACK_GENERATION_ES,
-                    true
-                );
+                const baseMsg =
+                    orchestrator?.chatbot_message || WAITING_FOR_DATA_FALLBACK_GENERATION_ES;
+                pushAssistantGuidance(baseMsg + formatGenerationWaitingExtra(orchestrator), true);
             } else if (orchStatus === "success") {
                 setGenerationResults(orchestrator.data || orchestrator);
                 pushAssistantGuidance("✅ Documentos generados con éxito. Puedes revisarlos en el panel de expedientes.", false);

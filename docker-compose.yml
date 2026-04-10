@@ -94,7 +94,8 @@ services:
       - REDIS_URL=redis://queue-redis:6379
       - REDIS_HOST=queue-redis
       - MEMORY_BACKEND=postgres
-      - OLLAMA_MODEL=llama3.1:8b
+      - OLLAMA_MODEL=licitai-coder
+      - OLLAMA_NUM_CTX=12288
       - ENVIRONMENT=development
       - LOG_LEVEL=INFO
       - EXPERIENCE_LAYER_ENABLED=true

@@ -157,6 +157,11 @@ class ResilientLLMClient:
         self._base_delay = float(os.getenv("LLM_RETRY_BASE_DELAY_SEC", "1.0"))
         self._fallback_model = os.getenv("LLM_FALLBACK_MODEL", "").strip() or None
 
+    @property
+    def service_client(self) -> LLMServiceClient:
+        """Cliente HTTP base (sin reintentos de red). Para flujos con reintento propio p. ej. map JSON compliance."""
+        return self._base
+
     async def generate(
         self,
         prompt: str,

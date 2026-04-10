@@ -23,6 +23,7 @@
 | `LICITAI_HTTP_QUERY_LOG_MAX` | Caracteres máx. de query string en trazas HTTP | `400` | opcional |
 | `LICITAI_UVICORN_ACCESS` | Líneas clásicas de acceso uvicorn (`GET /path 200`) | desactivado | opcional |
 | `OLLAMA_NUM_PREDICT` | Máx. tokens de **salida** por llamada a `/api/generate` (JSON largo en compliance, etc.) | `4096` | subir a `8192` si listas masivas truncan |
+| `OLLAMA_NUM_CTX` | Ventana de contexto enviada en `options.num_ctx` a Ollama (`llm_service`) | `12288` | ver `infra/ollama/` Modelfiles |
 
 ## Comportamiento según ENVIRONMENT
 
