@@ -23,13 +23,20 @@ class LLMServiceClient:
             _num_predict = 4096
         _num_predict = max(256, min(_num_predict, 131072))
 
+        _ctx_raw = os.getenv("OLLAMA_NUM_CTX", "12288").strip()
+        try:
+            _num_ctx = int(_ctx_raw) if _ctx_raw else 12288
+        except ValueError:
+            _num_ctx = 12288
+        _num_ctx = max(2048, min(_num_ctx, 131072))
+
         payload = {
             "model": model or self.default_model,
             "prompt": prompt,
             "stream": False,
             "options": {
                 "temperature": 0.0,  # Temperatura 0.0 para CERO alucinación / máxima exactitud.
-                "num_ctx": 16384,  # Ventana de contexto para bases largas
+                "num_ctx": _num_ctx,  # Compromiso VRAM/contexto (override con OLLAMA_NUM_CTX)
                 "num_predict": _num_predict,
             },
         }

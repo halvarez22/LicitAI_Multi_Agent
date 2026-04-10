@@ -24,8 +24,41 @@ import requests
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = Path(__file__).resolve().parent / "e2e_orchestrator_report.json"
 
-API_BASE = os.environ.get("E2E_API_URL", "http://localhost:8001/api/v1")
-REQUEST_TIMEOUT_PROCESS = int(os.environ.get("E2E_ORCH_TIMEOUT_SEC", "1800"))  # 30 min
+API_BASE = os.environ.get("E2E_API_URL", "http://localhost:8001/api/v1").rstrip("/")
+REQUEST_TIMEOUT_PROCESS = int(os.environ.get("E2E_ORCH_TIMEOUT_SEC", "1800"))  # presupuesto total (poll)
+JOB_POLL_SEC = max(2, int(os.environ.get("E2E_POLL_SEC", "5")))
+AGENTS_POST_TIMEOUT = int(os.environ.get("E2E_AGENTS_POST_TIMEOUT_SEC", "120"))
+
+
+def _poll_job(session: requests.Session, job_id: str, deadline: float) -> dict:
+    last_prog = None
+    transient = 0
+    max_transient = 24
+    while time.time() < deadline:
+        try:
+            r = session.get(f"{API_BASE}/agents/jobs/{job_id}/status", timeout=60)
+        except requests.RequestException as e:
+            transient += 1
+            if transient > max_transient:
+                return {"ok": False, "error": "poll_network", "detail": repr(e)}
+            time.sleep(JOB_POLL_SEC)
+            continue
+        transient = 0
+        if r.status_code != 200:
+            return {"ok": False, "error": "poll_http", "code": r.status_code, "body": r.text[:800]}
+        body = r.json()
+        data = body.get("data") or {}
+        st = data.get("status")
+        prog = data.get("progress") or {}
+        if prog != last_prog:
+            last_prog = prog
+            print(f"    [job] {st} | {prog.get('message', '')}")
+        if st == "COMPLETED":
+            return {"ok": True, "job": data}
+        if st == "FAILED":
+            return {"ok": False, "job": data, "error": data.get("error")}
+        time.sleep(JOB_POLL_SEC)
+    return {"ok": False, "error": "poll_timeout", "timeout_sec": REQUEST_TIMEOUT_PROCESS}
 
 
 def _build_native_pdf() -> str:
@@ -64,8 +97,9 @@ def main() -> int:
         report["steps"].append(entry)
         print(f"[E2E] {name}: {kwargs}")
 
+    session = requests.Session()
     try:
-        r = requests.get(f"{API_BASE}/health", timeout=15)
+        r = session.get(f"{API_BASE}/health", timeout=15)
         log_step("health", status_code=r.status_code, body=r.text[:500])
         if r.status_code != 200:
             report["errors"].append("health no 200")
@@ -77,7 +111,7 @@ def main() -> int:
         log_step("pdf_created", path=pdf_path, size=os.path.getsize(pdf_path))
 
         with open(pdf_path, "rb") as f:
-            up = requests.post(
+            up = session.post(
                 f"{API_BASE}/upload/document",
                 files={"file": ("e2e_bases_dummy.pdf", f, "application/pdf")},
                 data={"session_id": session_id},
@@ -98,7 +132,7 @@ def main() -> int:
             _write_report(report)
             return 1
 
-        pr = requests.post(
+        pr = session.post(
             f"{API_BASE}/upload/process/{doc_id}",
             data={"session_id": session_id},
             timeout=600,
@@ -119,31 +153,66 @@ def main() -> int:
             },
         }
         t0 = time.time()
-        orch = requests.post(
+        orch = session.post(
             f"{API_BASE}/agents/process",
             json=body,
-            timeout=REQUEST_TIMEOUT_PROCESS,
+            timeout=AGENTS_POST_TIMEOUT,
         )
         elapsed = time.time() - t0
         log_step(
-            "agents_process",
+            "agents_process_enqueue",
             status_code=orch.status_code,
             elapsed_sec=round(elapsed, 2),
             body_preview=orch.text[:2500],
         )
 
-        if orch.status_code != 200:
+        if orch.status_code not in (200, 202):
             report["errors"].append(f"agents/process HTTP {orch.status_code}: {orch.text[:3000]}")
             report["final_status"] = "orchestrator_http_error"
             _write_report(report)
             return 3
 
-        payload = orch.json()
-        report["orchestrator_response"] = _sanitize_payload(payload)
-        report["final_status"] = payload.get("status", "unknown")
+        enqueue = orch.json()
+        job_id = (enqueue.get("data") or {}).get("job_id")
+        if not job_id:
+            report["errors"].append("sin job_id tras agents/process")
+            report["enqueue_body"] = enqueue
+            report["final_status"] = "no_job_id"
+            _write_report(report)
+            return 3
+
+        log_step("job_poll_start", job_id=job_id, budget_sec=REQUEST_TIMEOUT_PROCESS)
+        deadline = time.time() + REQUEST_TIMEOUT_PROCESS
+        poll_out = _poll_job(session, job_id, deadline)
+        log_step("job_poll_end", **{k: v for k, v in poll_out.items() if k != "job"})
+
+        if not poll_out.get("ok"):
+            report["errors"].append(f"job falló o timeout: {poll_out}")
+            report["poll"] = poll_out
+            report["final_status"] = "job_failed_or_timeout"
+            _write_report(report)
+            return 5
+
+        job = poll_out["job"]
+        result = job.get("result")
+        if not isinstance(result, dict):
+            report["errors"].append("job COMPLETED sin result dict")
+            report["final_status"] = "missing_result"
+            _write_report(report)
+            return 6
+
+        report["job_id"] = job_id
+        report["orchestrator_result"] = _sanitize_result(result)
+        orch_status = result.get("status", "unknown")
+        report["final_status"] = orch_status
+        if orch_status == "error":
+            report["errors"].append("orchestrator status=error en result")
+            _write_report(report)
+            return 7
+
         report["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         _write_report(report)
-        print(json.dumps(report["orchestrator_response"], indent=2, ensure_ascii=False)[:4000])
+        print(json.dumps(report["orchestrator_result"], indent=2, ensure_ascii=False)[:4000])
         return 0
     except requests.Timeout:
         report["errors"].append(f"timeout después de {REQUEST_TIMEOUT_PROCESS}s")
@@ -163,20 +232,22 @@ def main() -> int:
                 pass
 
 
-def _sanitize_payload(p: dict) -> dict:
-    """Recorta respuestas enormes para el JSON de reporte."""
-    out = dict(p)
-    data = out.get("data")
+def _sanitize_result(p: dict) -> dict:
+    """Resultado final del job (misma forma que ``final_data`` en agents.py)."""
+    out = {
+        "status": p.get("status"),
+        "session_id": p.get("session_id"),
+        "chatbot_preview": (p.get("chatbot_message") or "")[:500],
+    }
+    data = p.get("data")
     if isinstance(data, dict):
-        slim = {}
+        slim: dict = {}
         for k, v in data.items():
             if k == "compliance" and isinstance(v, dict):
-                slim[k] = {
-                    "status": v.get("status"),
-                    "keys": list(v.keys()),
-                }
-                if "data" in v and isinstance(v["data"], dict):
-                    slim[k]["data_keys"] = list(v["data"].keys())
+                slim[k] = {"status": v.get("status"), "keys": list(v.keys())}
+                inner = v.get("data")
+                if isinstance(inner, dict):
+                    slim[k]["data_keys"] = list(inner.keys())
             elif k == "analysis" and isinstance(v, dict):
                 slim[k] = {"status": v.get("status"), "keys": list(v.keys())}
             else:

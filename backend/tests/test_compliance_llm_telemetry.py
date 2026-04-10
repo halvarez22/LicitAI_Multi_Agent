@@ -15,34 +15,43 @@ def agent() -> ComplianceAgent:
     return ComplianceAgent(MagicMock(spec=MCPContextManager))
 
 
+@pytest.fixture(autouse=True)
+def _compliance_legacy_map_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Estas pruebas mockean ``llm.generate``; el flujo estricto usa ``service_client.generate``."""
+    monkeypatch.setenv("COMPLIANCE_MAP_JSON_STRICT", "false")
+
+
 @pytest.mark.asyncio
 async def test_extract_zone_chunk_propaga_error_llm(agent: ComplianceAgent):
     """_extract_zone_chunk propaga el error del wrapper cuando success=False."""
     agent.llm.generate = AsyncMock(
         return_value=LLMResponse(success=False, error="ReadTimeout", response="")
     )
-    items, err, empty = await agent._extract_zone_chunk("ZONA", "texto")
+    items, err, empty, map_rt = await agent._extract_zone_chunk("ZONA", "texto")
     assert items == []
     assert err is not None and "ReadTimeout" in err
     assert empty is False
+    assert map_rt is None
 
 
 @pytest.mark.asyncio
 async def test_extract_zone_chunk_respuesta_vacia(agent: ComplianceAgent):
     agent.llm.generate = AsyncMock(return_value=LLMResponse(success=True, response="   "))
-    items, err, empty = await agent._extract_zone_chunk("ZONA", "texto")
+    items, err, empty, map_rt = await agent._extract_zone_chunk("ZONA", "texto")
     assert items == []
     assert err is None
     assert empty is True
+    assert map_rt is None
 
 
 @pytest.mark.asyncio
 async def test_extract_zone_chunk_json_valido(agent: ComplianceAgent):
     payload = '{"administrativo": [{"nombre": "x", "page": 1, "descripcion": "abc12345678901234567890", "snippet": "abc12345678901234567890"}], "tecnico": [], "formatos": []}'
     agent.llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
-    items, err, empty = await agent._extract_zone_chunk("ADMIN", "ctx")
+    items, err, empty, map_rt = await agent._extract_zone_chunk("ADMIN", "ctx")
     assert err is None
     assert empty is False
+    assert map_rt is None
     assert len(items) == 1
     assert items[0]["categoria_orig"] == "administrativo"
 

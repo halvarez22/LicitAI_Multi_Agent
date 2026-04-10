@@ -1,0 +1,9 @@
+# Coder + num_ctx 12k (alineado con OLLAMA_NUM_CTX del backend).
+# Crear: ollama create licitai-coder -f infra/ollama/Modelfile.licitai-coder
+#
+# Base por defecto: tag que suele estar instalado. Para cuantización q5 (Gemini / VRAM):
+#   ollama pull qwen2.5-coder:7b-instruct-q5_K_M
+# y usar Modelfile.licitai-coder-q5
+FROM qwen2.5-coder:7b
+PARAMETER num_ctx 12288
+PARAMETER temperature 0

@@ -1,0 +1,5 @@
+# Variante si ya usas Llama 3.1 en el stack actual (mismo num_ctx que el backend por defecto).
+# Crear: ollama create licitai-llama -f infra/ollama/Modelfile.licitai-llama
+FROM llama3.1:8b
+PARAMETER num_ctx 12288
+PARAMETER temperature 0

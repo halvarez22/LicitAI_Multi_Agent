@@ -1,0 +1,4 @@
+# Variante q5_K_M (menor VRAM). Requiere: ollama pull qwen2.5-coder:7b-instruct-q5_K_M
+FROM qwen2.5-coder:7b-instruct-q5_K_M
+PARAMETER num_ctx 12288
+PARAMETER temperature 0
