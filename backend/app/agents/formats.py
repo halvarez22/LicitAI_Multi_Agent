@@ -12,6 +12,7 @@ from app.services.resilient_llm import ResilientLLMClient
 from app.core.observability import get_logger
 from app.core.template_engine import LegalTemplateEngine, TemplateIntegrityError
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
 
 logger = get_logger(__name__)
 
@@ -81,34 +82,32 @@ class FormatsAgent(BaseAgent):
         rfc = master_profile.get("rfc")
         representante = master_profile.get("representante_legal")
 
-        # --- Hito 4: PILOTO DE BLOQUEO POR DATOS CRÍTICOS ---
-        mandatory_slots = {
-            "rfc": "RFC oficial de la empresa",
-            "domicilio_fiscal": "Domicilio Fiscal completo",
-            "representante_legal": "Nombre del Representante Legal"
-        }
-        
-        missing_slots = []
-        for field, label in mandatory_slots.items():
-            if not master_profile.get(field):
-                missing_slots.append({
-                    "field": field,
-                    "label": label,
-                    "question": f"Necesito el dato **{label}** para poder generar tus formatos administrativos correctamente.",
-                    "document_hint": "Consulta tu Constancia de Situación Fiscal o Acta Constitutiva."
-                })
-        
+        # --- Hito 4: piloto bloqueo por slots (sin escribir bajo /data/outputs) ---
+        missing_slots = build_formats_pilot_missing_entries(
+            master_profile,
+            blocking_job_id=agent_input.job_id,
+        )
         if missing_slots:
-            logger.warning("missing_critical_data", agent=self.agent_id, session_id=session_id, count=len(missing_slots))
+            field_keys = [m["field"] for m in missing_slots]
+            logger.info(
+                "formats_pilot_blocked",
+                agent_id=self.agent_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                blocking_job_id=agent_input.job_id,
+                pilot="formats_administrativo",
+                missing_fields=field_keys,
+                missing_count=len(missing_slots),
+            )
             await self._save_pending_questions(session_id, missing_slots)
-            
+
             return AgentOutput(
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
                 message=f"Para generar tus documentos necesito: {', '.join([m['label'] for m in missing_slots])}",
                 data={"missing": missing_slots},
-                correlation_id=correlation_id
+                correlation_id=correlation_id,
             )
 
         # Valores seguros después de validación
@@ -145,12 +144,16 @@ class FormatsAgent(BaseAgent):
         session_state = context.get("session_state", {})
         tasks = session_state.get("tasks_completed", [])
         compliance_data: Dict[str, Any] = {}
-        for task in reversed(tasks):
-            if task.get("task") == "stage_completed:compliance":
-                res = task.get("result") or {}
-                if isinstance(res, dict) and res.get("data"):
-                    compliance_data = res["data"]
-                    break
+        injected = company_data.get("compliance_master_list")
+        if isinstance(injected, dict) and injected:
+            compliance_data = injected
+        if not compliance_data:
+            for task in reversed(tasks):
+                if task.get("task") == "stage_completed:compliance":
+                    res = task.get("result") or {}
+                    if isinstance(res, dict) and res.get("data"):
+                        compliance_data = res["data"]
+                        break
         if not compliance_data:
             for task in reversed(tasks):
                 if task.get("task") == "master_compliance_list":

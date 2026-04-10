@@ -246,13 +246,21 @@ class OrchestratorAgent(BaseAgent):
     async def process(self, session_id: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
         correlation_id = input_data.get("correlation_id") or generate_correlation_id()
         try:
+            raw_company = dict(input_data.get("company_data") or {})
+            _cm = input_data.get("compliance_master_list")
+            if _cm is not None:
+                raw_company["compliance_master_list"] = _cm
+            _mode = str(raw_company.get("mode") or "full")
+            if _mode not in ("full", "analysis_only", "generation", "generation_only"):
+                _mode = "full"
             agent_input = AgentInput(
                 session_id=session_id,
                 company_id=str(input_data.get("company_id")) if input_data.get("company_id") else None,
-                mode=(input_data.get("company_data") or {}).get("mode", "full"),
+                company_data=raw_company,
+                mode=_mode,
                 resume_generation=input_data.get("resume_generation", False),
                 correlation_id=correlation_id,
-                job_id=input_data.get("job_id")
+                job_id=input_data.get("job_id"),
             )
         except Exception as e:
             logger.error("orchestrator_failed", session_id=session_id, error=str(e))
