@@ -102,19 +102,28 @@ class TechnicalWriterAgent(BaseAgent):
         os.makedirs(tech_dir, exist_ok=True)
 
         # 2. SELECCIÓN DE REQUISITOS (Sincronización Total con Auditor)
-        # Orden de prioridad de fuentes:
-        # a) Inyección directa del orquestador via compliance_master_list
-        # b) Resultados de Fase 1 via results.compliance.data
-        # c) Tarea persistida master_compliance_list en tasks_completed
         session_state = context.get("session_state", {})
         tasks = session_state.get("tasks_completed", [])
         compliance_data: Dict[str, Any] = {}
-        for task in reversed(tasks):
-            if task.get("task") == "stage_completed:compliance":
-                res = task.get("result") or {}
-                if isinstance(res, dict) and res.get("data"):
-                    compliance_data = res["data"]
-                    break
+
+        # a) Inyección directa del orquestador via compliance_master_list
+        if agent_input.company_data and "compliance_master_list" in agent_input.company_data:
+            compliance_data = agent_input.company_data["compliance_master_list"]
+
+        # b) Resultados de Fase 1 via results.compliance.data
+        if not compliance_data and agent_input.company_data and "results" in agent_input.company_data:
+            results = agent_input.company_data["results"]
+            if isinstance(results, dict) and "compliance" in results:
+                compliance_data = results["compliance"].get("data", {})
+
+        # c) Tarea persistida master_compliance_list en tasks_completed
+        if not compliance_data:
+            for task in reversed(tasks):
+                if task.get("task") == "stage_completed:compliance":
+                    res = task.get("result") or {}
+                    if isinstance(res, dict) and res.get("data"):
+                        compliance_data = res["data"]
+                        break
         if not compliance_data:
             for task in reversed(tasks):
                 if task.get("task") == "master_compliance_list":

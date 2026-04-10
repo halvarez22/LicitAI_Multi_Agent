@@ -24,14 +24,15 @@ async def test_orchestrator_reruns_compliance_once_on_conflict():
         mock_cm_instance.memory.get_session = AsyncMock(return_value={"status": "running"})
         mock_cm_instance.get_global_context = AsyncMock(return_value={"tasks_completed": []})
         mock_cm_instance.memory.save_session = AsyncMock(return_value=True)
+        mock_cm_instance.record_task_completion = AsyncMock(return_value=True)
 
         Ma.return_value.process = AsyncMock(return_value=AgentOutput(
             status=AgentStatus.SUCCESS, agent_id="analyst", session_id="s1",
             data={"requirements": [{"id": "REQ-CONF-1"}]}
         ))
         
-        res1 = AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={"administrativo": []})
-        res2 = AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={"administrativo": [{"id": "REQ-CONF-1"}]})
+        res1 = AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={"administrativo": [{"id": "FAKE_TO_FORCE_BACKTRACK", "estado": "pass"}]})
+        res2 = AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={"administrativo": [{"id": "REQ-CONF-1", "estado": "pass"}]})
         Mc.return_value.process = AsyncMock(side_effect=[res1, res2])
         
         orch = OrchestratorAgent(mock_cm_instance)
@@ -51,9 +52,10 @@ async def test_orchestrator_skips_backtrack_if_flag_off():
         mock_cm_instance.memory.get_session = AsyncMock(return_value={"status": "running"})
         mock_cm_instance.get_global_context = AsyncMock(return_value={"tasks_completed": []})
         mock_cm_instance.memory.save_session = AsyncMock(return_value=True)
+        mock_cm_instance.record_task_completion = AsyncMock(return_value=True)
 
         Ma.return_value.process = AsyncMock(return_value=AgentOutput(status=AgentStatus.SUCCESS, agent_id="a", session_id="s1", data={"requirements": [{"id": "X"}]}))
-        Mc.return_value.process = AsyncMock(return_value=AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={}))
+        Mc.return_value.process = AsyncMock(return_value=AgentOutput(status=AgentStatus.SUCCESS, agent_id="c", session_id="s1", data={"administrativo": [{"id": "X", "estado": "pass"}]}))
         
         orch = OrchestratorAgent(mock_cm_instance)
         result = await orch.process("s1", {"company_id": "c1", "company_data": {"mode": "analysis_only"}})

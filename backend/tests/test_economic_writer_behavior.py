@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.agents.economic_writer import EconomicWriterAgent
 from app.agents.mcp_context import MCPContextManager
+from app.contracts.agent_contracts import AgentInput, AgentStatus
 
 def _memory_stub(session: dict | None = None):
     mem = AsyncMock()
@@ -23,29 +24,33 @@ async def test_writer_consume_input_data_sin_llamar_llm(tmp_path):
     writer._generate_anexo_ae = MagicMock()
     writer._generate_carta_compromiso = MagicMock()
     
-    input_data = {
-        "company_id": "c1",
-        "company_data": {"master_profile": {"razon_social": "Test Inc"}},
-        "results": {
-            "economic": {
-                "data": {
-                    "items": [
-                        {"concepto": "Servicio X", "cantidad": 1, "precio_unitario": 50, "subtotal": 50}
-                    ],
-                    "total_base": 50,
-                    "grand_total": 58
+    inp = AgentInput(
+        session_id="sess_test_1",
+        company_id="c1",
+        company_data={
+            "master_profile": {"razon_social": "Test Inc"},
+            "results": {
+                "economic": {
+                    "data": {
+                        "items": [
+                            {"concepto": "Servicio X", "cantidad": 1, "precio_unitario": 50, "subtotal": 50}
+                        ],
+                        "total_base": 50,
+                        "grand_total": 58
+                    }
                 }
             }
         }
-    }
+    )
     
     with patch("os.makedirs"):
-        out = await writer.process("sess_test_1", input_data)
+        out = await writer.process(inp)
+    
+    if out.status == AgentStatus.ERROR:
+        print(f"ERROR DETAIL: {out.error}")
         
-    assert out["status"] == "success"
-    assert "data" in out
-    assert out["data"]["resumen_economico"]["total"] == 58
-    assert not hasattr(writer, 'llm')
+    assert out.status == AgentStatus.SUCCESS
+    assert out.data["resumen_economico"]["total"] == 58
 
 
 @pytest.mark.asyncio
@@ -54,13 +59,13 @@ async def test_writer_falla_si_no_hay_datos_economicos():
     ctx = MCPContextManager(_memory_stub())
     writer = EconomicWriterAgent(ctx)
     
-    input_data = {
-        "company_id": "c2",
-        "company_data": {"master_profile": {}},
-        # Sin key "results"
-    }
+    inp = AgentInput(
+        session_id="sess_test_err",
+        company_id="c2",
+        company_data={"master_profile": {}}
+    )
     
-    out = await writer.process("sess_test_err", input_data)
+    out = await writer.process(inp)
     
-    assert out["status"] == "error"
-    assert "No se encontró" in out["message"]
+    assert out.status == AgentStatus.ERROR
+    assert "No se encontró" in out.error

@@ -15,6 +15,7 @@ def _memory_stub():
     mem.get_session = AsyncMock(return_value={"tasks_completed": []})
     mem.save_session = AsyncMock(return_value=True)
     mem.get_documents = AsyncMock(return_value=[])
+    mem.record_task_completion = AsyncMock(return_value=True)
     return mem
 
 
@@ -53,7 +54,7 @@ class TestConfidenceIntegration:
                     agent_id="compliance_mock",
                     session_id="sess-conf-001",
                     data={
-                        "administrativo": [], "tecnico": [], "formatos": [],
+                        "administrativo": [{"id": "REQ-1", "estado": "pass"}], "tecnico": [], "formatos": [],
                         "confidence": {"overall": 0.85, "recommendation": "accept", "threshold_passed": True}
                     }
                 ))
@@ -89,12 +90,20 @@ class TestConfidenceIntegration:
             ctx = MCPContextManager(_memory_stub())
             orch = OrchestratorAgent(ctx)
 
-            with patch("app.agents.analyst.AnalystAgent") as Ma:
+            with patch("app.agents.analyst.AnalystAgent") as Ma, \
+                 patch("app.agents.compliance.ComplianceAgent") as Mc, \
+                 patch("app.agents.economic.EconomicAgent") as Me:
                 Ma.return_value.process = AsyncMock(return_value=AgentOutput(
                     status=AgentStatus.SUCCESS,
                     agent_id="analyst_mock",
                     session_id="sess-legacy-conf-001",
                     data={"simple_item": 123}
+                ))
+                Mc.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="c", session_id="s", data={"administrativo": [{"id": "r1", "estado": "pass"}]}
+                ))
+                Me.return_value.process = AsyncMock(return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS, agent_id="e", session_id="s", data={}
                 ))
 
                 result = await orch.process(
@@ -129,7 +138,7 @@ class TestConfidenceIntegration:
                 
                 # Compliance real behavior mock: data con confidence
                 compliance_data = {
-                    "administrativo": [{"id": "AD-01", "nombre": "RFC"}],
+                    "administrativo": [{"id": "AD-01", "nombre": "RFC", "estado": "pass"}],
                     "tecnico": [], "formatos": [],
                     "confidence": {
                         "overall": 0.82,

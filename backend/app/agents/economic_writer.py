@@ -42,11 +42,18 @@ class EconomicWriterAgent(BaseAgent):
         master_profile = company_data.get("master_profile", {})
         
         # 2. Obtener propuesta de Fase 1
-        # Primero intentamos de la data directa del input (si el orquestador la inyectó)
+        # a) Inyección directa del orquestador via economic_data
         economic_data = agent_input.company_data.get("economic_data")
         
+        # b) Estructura estándar results.economic.data
+        if not economic_data and "results" in agent_input.company_data:
+            res = agent_input.company_data["results"]
+            if isinstance(res, dict) and "economic" in res:
+                econ = res["economic"]
+                economic_data = econ.get("data", econ) if isinstance(econ, dict) else None
+
+        # c) Buscar en el estado de la sesión si venimos en modo generation_only
         if not economic_data:
-            # Buscar en el estado de la sesión si venimos en modo generation_only
             tasks = context.get("session_state", {}).get("tasks_completed", [])
             for task in reversed(tasks):
                 if task.get("task") == "economic_proposal":
