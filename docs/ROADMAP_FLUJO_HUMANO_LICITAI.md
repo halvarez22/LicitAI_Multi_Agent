@@ -101,6 +101,8 @@
 
 ## Hito 4 — Bloqueo por datos: un documento piloto
 
+**Estado: OK** (cerrado con validación Qwen). Implementado en `7d8e239`: bloqueo por slots en `FormatsAgent` (`app/core/formats_pilot_slots.py`), `waiting_for_data` con `missing` enriquecido (`type: profile_field`, `blocking_job_id`), `pending_questions` persistido, log estructurado `formats_pilot_blocked`, **omisión limpia** del output piloto (sin sufijo `_INCOMPLETO`); tests unitarios + integración + E2E mínimo in-process (`test_hito4_formats_e2e_minimal.py`); script `backend/scripts/e2e_hito4_formats_minimal.py`. **Fix de producción:** `AgentInput` recibe `company_data` completo y `compliance_master_list` mergeada desde el orquestador.
+
 **Instrucciones**
 
 1. Elegir **un** output (ej. primer formato administrativo generado por `FormatsAgent` o un solo archivo si es más simple).
