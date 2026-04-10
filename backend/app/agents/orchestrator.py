@@ -251,8 +251,18 @@ class OrchestratorAgent(BaseAgent):
             if _cm is not None:
                 raw_company["compliance_master_list"] = _cm
             _mode = str(raw_company.get("mode") or "full")
-            if _mode not in ("full", "analysis_only", "generation", "generation_only"):
-                _mode = "full"
+            _allowed_modes = ("full", "analysis_only", "generation", "generation_only")
+            if _mode not in _allowed_modes:
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "message": f"Modo inválido o no soportado: {_mode}",
+                    "orchestrator_decision": {
+                        "stop_reason": "INVALID_MODE",
+                        "aggregate_health": "failed",
+                    },
+                    "results": {},
+                }
             agent_input = AgentInput(
                 session_id=session_id,
                 company_id=str(input_data.get("company_id")) if input_data.get("company_id") else None,
