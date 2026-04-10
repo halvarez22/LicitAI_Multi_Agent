@@ -130,7 +130,11 @@ class EconomicAgent(BaseAgent):
             
             # Consultamos la base vectorial por este concepto
             rag_results = self.vector_db.query_texts(session_id, f"precio unitario de {label}", n_results=3)
-            docs = rag_results.get("documents", [])
+            docs = (
+                rag_results.get("documents", [])
+                if isinstance(rag_results, dict)
+                else []
+            )
             if docs:
                 # Añadimos un ítem "virtual" al catálogo basado en lo hallado en RAG
                 context_str = " ".join(docs)

@@ -99,6 +99,73 @@ def _finalize_stage_telemetry(telemetry: Dict[str, Any], stage_name: str, start_
         "duration_seconds": round((end_dt - start_dt).total_seconds(), 3),
     }
 
+
+def _default_generation_jobs() -> List[Dict[str, Any]]:
+    """Cola MVP de generación (Hito 3 / ROADMAP)."""
+    return [
+        {"id": "datagap", "type": "checkpoint", "status": "pending"},
+        {"id": "technical", "type": "agent", "status": "pending"},
+        {"id": "formats", "type": "agent", "status": "pending"},
+        {"id": "economic_writer", "type": "agent", "status": "pending"},
+        {"id": "packager", "type": "agent", "status": "pending"},
+        {"id": "delivery", "type": "agent", "status": "pending"},
+    ]
+
+
+def _prepare_generation_queue(
+    session_state: Dict[str, Any], resume_generation: bool, mode: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Estado de cola de generación. Solo aplica a ``generation`` / ``generation_only``.
+    Sin ``resume_generation``: reinicia siempre. Con resume: conserva cola activa.
+    """
+    if mode not in ("generation_only", "generation"):
+        return None
+    existing = session_state.get("generation_state")
+    if not resume_generation:
+        g = {"status": "running", "jobs": _default_generation_jobs()}
+        session_state["generation_state"] = g
+        return g
+    if (
+        existing
+        and isinstance(existing.get("jobs"), list)
+        and len(existing["jobs"]) > 0
+        and existing.get("status") != "completed"
+    ):
+        return existing
+    g = {"status": "running", "jobs": _default_generation_jobs()}
+    session_state["generation_state"] = g
+    return g
+
+
+def _gen_job_status(gen_state: Optional[Dict[str, Any]], job_id: str) -> Optional[str]:
+    if not gen_state:
+        return None
+    for j in gen_state.get("jobs") or []:
+        if j.get("id") == job_id:
+            return str(j.get("status", "pending"))
+    return None
+
+
+def _set_gen_job_status(gen_state: Optional[Dict[str, Any]], job_id: str, status: str) -> None:
+    if not gen_state:
+        return
+    for j in gen_state.get("jobs") or []:
+        if j.get("id") == job_id:
+            j["status"] = status
+            break
+
+
+def _response_with_generation_state(
+    base: Dict[str, Any], session_state: Dict[str, Any], mode: str
+) -> Dict[str, Any]:
+    if mode in ("generation_only", "generation") and session_state.get("generation_state") is not None:
+        out = dict(base)
+        out["generation_state"] = session_state["generation_state"]
+        return out
+    return base
+
+
 class OrchestratorAgent(BaseAgent):
     """
     Agente 0: Orquestador (Supervisor).
@@ -535,71 +602,139 @@ class OrchestratorAgent(BaseAgent):
             # Generation
             if mode in ["full", "generation", "generation_only"]:
                 from app.agents.data_gap import DataGapAgent
+                gen_state = _prepare_generation_queue(
+                    session_state, agent_input.resume_generation, mode
+                )
                 if self._should_execute_stage("datagap", pipeline_config, stages_skipped):
-                    res = await DataGapAgent(self.context_manager).process(agent_input)
-                    execution_results["datagap"] = res
-                    stages_executed.append("datagap")
-                    if _result_status_value(res) == AgentStatus.WAITING_FOR_DATA.value:
-                        decision = OrchestratorState(stop_reason="INCOMPLETE_DATA", aggregate_health="partial", next_steps=next_steps, correlation_id=correlation_id).model_dump()
-                        # REFRESH para no borrar pending_questions que DataGap acaba de guardar
-                        latest_session = await self.context_manager.memory.get_session(session_id) or {}
-                        latest_session["last_orchestrator_decision"] = decision
-                        await self.context_manager.memory.save_session(session_id, latest_session)
-                        return {
-                            "status": "waiting_for_data",
-                            "session_id": session_id,
-                            "chatbot_message": _result_message(res) or "",
-                            "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
-                            "orchestrator_decision": decision,
-                        }
-                
-                for step, a_cls in [("technical", "TechnicalWriterAgent"), ("formats", "FormatsAgent"), ("economic_writer", "EconomicWriterAgent"), ("packager", "DocumentPackagerAgent"), ("delivery", "DeliveryAgent")]:
+                    skip_dg = bool(gen_state and _gen_job_status(gen_state, "datagap") == "done")
+                    if skip_dg:
+                        execution_results["datagap"] = {"status": "resumed"}
+                    else:
+                        res = await DataGapAgent(self.context_manager).process(agent_input)
+                        execution_results["datagap"] = res
+                        stages_executed.append("datagap")
+                        if _result_status_value(res) == AgentStatus.WAITING_FOR_DATA.value:
+                            decision = OrchestratorState(
+                                stop_reason="INCOMPLETE_DATA",
+                                aggregate_health="partial",
+                                next_steps=next_steps,
+                                correlation_id=correlation_id,
+                            ).model_dump()
+                            if gen_state:
+                                _set_gen_job_status(gen_state, "datagap", "blocked")
+                            session_state["last_orchestrator_decision"] = decision
+                            if gen_state:
+                                session_state["generation_state"] = gen_state
+                            await self.context_manager.memory.save_session(session_id, session_state)
+                            return _response_with_generation_state(
+                                {
+                                    "status": "waiting_for_data",
+                                    "session_id": session_id,
+                                    "chatbot_message": _result_message(res) or "",
+                                    "results": {
+                                        k: (v if isinstance(v, dict) else v.model_dump())
+                                        for k, v in execution_results.items()
+                                    },
+                                    "orchestrator_decision": decision,
+                                },
+                                session_state,
+                                mode,
+                            )
+                        if gen_state:
+                            _set_gen_job_status(gen_state, "datagap", "done")
+
+                for step, a_cls in [
+                    ("technical", "TechnicalWriterAgent"),
+                    ("formats", "FormatsAgent"),
+                    ("economic_writer", "EconomicWriterAgent"),
+                    ("packager", "DocumentPackagerAgent"),
+                    ("delivery", "DeliveryAgent"),
+                ]:
                     if self._should_execute_stage(step, pipeline_config, stages_skipped):
                         try:
-                            if step == "technical": from app.agents.technical_writer import TechnicalWriterAgent as C
-                            elif step == "formats": from app.agents.formats import FormatsAgent as C
-                            elif step == "economic_writer": from app.agents.economic_writer import EconomicWriterAgent as C
-                            elif step == "packager": from app.agents.document_packager import DocumentPackagerAgent as C
-                            else: from app.agents.delivery import DeliveryAgent as C
-                            
+                            skip_step = bool(
+                                gen_state and _gen_job_status(gen_state, step) == "done"
+                            )
+                            if skip_step:
+                                execution_results[step] = {"status": "resumed"}
+                                continue
+                            if step == "technical":
+                                from app.agents.technical_writer import TechnicalWriterAgent as C
+                            elif step == "formats":
+                                from app.agents.formats import FormatsAgent as C
+                            elif step == "economic_writer":
+                                from app.agents.economic_writer import EconomicWriterAgent as C
+                            elif step == "packager":
+                                from app.agents.document_packager import DocumentPackagerAgent as C
+                            else:
+                                from app.agents.delivery import DeliveryAgent as C
+
                             res = await C(self.context_manager).process(agent_input)
                             execution_results[step] = res
-                            
+
                             # CORTAR SI UN AGENTE REQUIERE DATOS (EVITA GENERACIÓN PARCIAL)
-                            if hasattr(res, 'status') and res.status == AgentStatus.WAITING_FOR_DATA:
-                                logger.info("generation_paused_waiting_data", stage=step, session_id=session_id)
+                            if hasattr(res, "status") and res.status == AgentStatus.WAITING_FOR_DATA:
+                                logger.info(
+                                    "generation_paused_waiting_data",
+                                    stage=step,
+                                    session_id=session_id,
+                                )
                                 decision = OrchestratorState(
                                     stop_reason=f"INCOMPLETE_{step.upper()}_DATA",
                                     aggregate_health="partial",
                                     next_steps=next_steps,
-                                    correlation_id=correlation_id
+                                    correlation_id=correlation_id,
                                 ).model_dump()
-                                # REFRESH para no borrar pending_questions/metadata persistidos por redactores/formatos
-                                latest_session = await self.context_manager.memory.get_session(session_id) or {}
-                                latest_session["last_orchestrator_decision"] = decision
-                                await self.context_manager.memory.save_session(session_id, latest_session)
-                                return {
-                                    "status": "waiting_for_data",
-                                    "session_id": session_id,
-                                    "chatbot_message": res.message,
-                                    "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
-                                    "orchestrator_decision": decision,
-                                }
-                            
+                                if gen_state:
+                                    _set_gen_job_status(gen_state, step, "blocked")
+                                session_state["last_orchestrator_decision"] = decision
+                                if gen_state:
+                                    session_state["generation_state"] = gen_state
+                                await self.context_manager.memory.save_session(session_id, session_state)
+                                return _response_with_generation_state(
+                                    {
+                                        "status": "waiting_for_data",
+                                        "session_id": session_id,
+                                        "chatbot_message": res.message,
+                                        "results": {
+                                            k: (v if isinstance(v, dict) else v.model_dump())
+                                            for k, v in execution_results.items()
+                                        },
+                                        "orchestrator_decision": decision,
+                                    },
+                                    session_state,
+                                    mode,
+                                )
+
                             # CORTAR SI UN AGENTE REPORTA ERROR (EVITA GENERACIÓN CORRUPTA)
-                            if hasattr(res, 'status') and res.status == AgentStatus.ERROR:
-                                logger.error("generation_step_reported_error", stage=step, session_id=session_id, message=getattr(res, 'message', 'Error desconocido'))
+                            if hasattr(res, "status") and res.status == AgentStatus.ERROR:
+                                logger.error(
+                                    "generation_step_reported_error",
+                                    stage=step,
+                                    session_id=session_id,
+                                    message=getattr(res, "message", "Error desconocido"),
+                                )
                                 decision = OrchestratorState(
                                     stop_reason=f"ERROR_REPORTED_IN_{step.upper()}",
                                     aggregate_health="failed",
-                                    correlation_id=correlation_id
+                                    correlation_id=correlation_id,
                                 ).model_dump()
-                                return {
-                                    "status": "error",
-                                    "session_id": session_id,
-                                    "message": f"El agente de {step} reportó un error crítico: {getattr(res, 'message', 'Sin detalle')}",
-                                    "orchestrator_decision": decision
-                                }
+                                if gen_state:
+                                    session_state["generation_state"] = gen_state
+                                await self.context_manager.memory.save_session(session_id, session_state)
+                                return _response_with_generation_state(
+                                    {
+                                        "status": "error",
+                                        "session_id": session_id,
+                                        "message": f"El agente de {step} reportó un error crítico: {getattr(res, 'message', 'Sin detalle')}",
+                                        "orchestrator_decision": decision,
+                                    },
+                                    session_state,
+                                    mode,
+                                )
+
+                            if gen_state:
+                                _set_gen_job_status(gen_state, step, "done")
 
                             next_steps.append(f"{step}_OK")
 
@@ -632,19 +767,25 @@ class OrchestratorAgent(BaseAgent):
                                         next_steps=next_steps,
                                         correlation_id=correlation_id,
                                     ).model_dump()
-                                    latest_session = await self.context_manager.memory.get_session(session_id) or {}
-                                    latest_session["last_orchestrator_decision"] = decision
-                                    await self.context_manager.memory.save_session(session_id, latest_session)
-                                    return {
-                                        "status": "error",
-                                        "session_id": session_id,
-                                        "message": "Validación de empaque CompraNet: " + "; ".join(pr.errors),
-                                        "results": {
-                                            k: (v if isinstance(v, dict) else v.model_dump())
-                                            for k, v in execution_results.items()
+                                    session_state["last_orchestrator_decision"] = decision
+                                    if gen_state:
+                                        session_state["generation_state"] = gen_state
+                                    await self.context_manager.memory.save_session(session_id, session_state)
+                                    return _response_with_generation_state(
+                                        {
+                                            "status": "error",
+                                            "session_id": session_id,
+                                            "message": "Validación de empaque CompraNet: "
+                                            + "; ".join(pr.errors),
+                                            "results": {
+                                                k: (v if isinstance(v, dict) else v.model_dump())
+                                                for k, v in execution_results.items()
+                                            },
+                                            "orchestrator_decision": decision,
                                         },
-                                        "orchestrator_decision": decision,
-                                    }
+                                        session_state,
+                                        mode,
+                                    )
                                 await self.context_manager.record_task_completion(
                                     session_id=session_id,
                                     task_name="stage_completed:compranet_pack",
@@ -655,18 +796,35 @@ class OrchestratorAgent(BaseAgent):
                                     },
                                 )
                         except Exception as e:
-                            logger.error("generation_step_failed", stage=step, session_id=session_id, error=str(e))
+                            logger.error(
+                                "generation_step_failed",
+                                stage=step,
+                                session_id=session_id,
+                                error=str(e),
+                            )
                             decision = OrchestratorState(
                                 stop_reason=f"ERROR_IN_{step.upper()}",
                                 aggregate_health="failed",
-                                correlation_id=correlation_id
+                                correlation_id=correlation_id,
                             ).model_dump()
-                            return {
-                                "status": "error",
-                                "session_id": session_id,
-                                "message": f"Falló el paso crítico de generación: {step}. Error: {str(e)}",
-                                "orchestrator_decision": decision
-                            }
+                            if gen_state:
+                                session_state["generation_state"] = gen_state
+                            await self.context_manager.memory.save_session(session_id, session_state)
+                            return _response_with_generation_state(
+                                {
+                                    "status": "error",
+                                    "session_id": session_id,
+                                    "message": f"Falló el paso crítico de generación: {step}. Error: {str(e)}",
+                                    "orchestrator_decision": decision,
+                                },
+                                session_state,
+                                mode,
+                            )
+
+                if gen_state:
+                    gen_state["status"] = "completed"
+                    session_state["generation_state"] = gen_state
+                    await self.context_manager.memory.save_session(session_id, session_state)
 
                 checklist = await self._generate_checklist(session_id, input_data, execution_results)
                 session_state["checklist"] = checklist
@@ -715,7 +873,20 @@ class OrchestratorAgent(BaseAgent):
             await self.context_manager.memory.save_session(session_id, session_state)
             self._persist_latest_job_metadata(session_id, "success", final_metadata, decision)
 
-            return {"status": "success", "session_id": session_id, "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()}, "orchestrator_decision": decision, "metadata": final_metadata}
+            return _response_with_generation_state(
+                {
+                    "status": "success",
+                    "session_id": session_id,
+                    "results": {
+                        k: (v if isinstance(v, dict) else v.model_dump())
+                        for k, v in execution_results.items()
+                    },
+                    "orchestrator_decision": decision,
+                    "metadata": final_metadata,
+                },
+                session_state,
+                mode,
+            )
 
     def _persist_latest_job_metadata(
         self,

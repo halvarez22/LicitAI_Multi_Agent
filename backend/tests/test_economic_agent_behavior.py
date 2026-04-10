@@ -8,6 +8,7 @@ import pytest
 from app.agents.economic import EconomicAgent
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentStatus
+from app.economic_validation.models import EconomicValidationResult
 from app.services.resilient_llm import LLMResponse
 
 
@@ -277,27 +278,32 @@ async def test_prompt_incluye_reglas_y_alcance_del_analista():
     }
     mem = _memory_stub(session=sess)
     ctx = MCPContextManager(mem)
-    agent = EconomicAgent(ctx)
 
     payload = '{"items": [{"concepto": "Vigilante", "cantidad": 3, "precio_unitario": 50, "subtotal": 150, "status": "matched"}], "alertas": []}'
 
+    mock_vec = MagicMock()
+    mock_vec.query_texts = MagicMock(return_value={"documents": []})
     with (
-        patch.object(agent, "llm") as mock_llm,
-        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.VectorDbServiceClient", return_value=mock_vec),
+        patch(
+            "app.agents.economic.validate_economic_proposal",
+            return_value=EconomicValidationResult(perfil_usado="generic"),
+        ),
     ):
-        mock_llm.generate = AsyncMock(
-            return_value=LLMResponse(success=True, response=payload)
-        )
-        mock_vec.query_texts = MagicMock(return_value={"documents": []})
-        out = await agent.process(
-            _agent_input(
-                "s-alcance",
-                company_id="co_x",
-                compliance_master_list={
-                    "tecnico": [{"descripcion": "Vigilante", "id": "t1"}]
-                },
+        agent = EconomicAgent(ctx)
+        with patch.object(agent, "llm") as mock_llm:
+            mock_llm.generate = AsyncMock(
+                return_value=LLMResponse(success=True, response=payload)
             )
-        )
+            out = await agent.process(
+                _agent_input(
+                    "s-alcance",
+                    company_id="co_x",
+                    compliance_master_list={
+                        "tecnico": [{"descripcion": "Vigilante", "id": "t1"}]
+                    },
+                )
+            )
 
     assert out.status == AgentStatus.SUCCESS
     prompt = mock_llm.generate.call_args[1]["prompt"]
