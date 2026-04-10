@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any
 from app.api.deps import get_connected_memory
+from app.config.settings import settings
 from app.api.schemas.responses import GenericResponse
 from app.checklist.models import MarkHitoPayload
 from app.checklist.submission_checklist_service import (
@@ -45,8 +46,9 @@ async def list_licitaciones():
             data={"licitaciones": sessions}
         )
     except Exception as e:
-        logger.error(f"Error listando sesiones: {e}")
-        raise HTTPException(status_code=500, detail="Error al recuperar licitaciones")
+        logger.exception("Error listando sesiones")
+        msg = str(e) if settings.ENVIRONMENT == "development" else "Error al recuperar licitaciones"
+        raise HTTPException(status_code=500, detail=msg)
     finally:
         await repo.disconnect()
 
