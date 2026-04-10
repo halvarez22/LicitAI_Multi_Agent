@@ -150,9 +150,12 @@ async def test_orchestrator_compliance_excepcion_no_invoca_economic_politica_b()
             {"company_id": None, "company_data": {"mode": "analysis_only"}},
         )
 
-    assert out["orchestrator_decision"]["stop_reason"] == "COMPLIANCE_ERROR"
+    # Tras compliance en error, el gate 12.1 ve data vacía y bloquea antes del chequeo legacy COMPLIANCE_ERROR.
+    assert out["orchestrator_decision"]["stop_reason"] == "COMPLIANCE_GATE_BLOCKING"
     assert out["orchestrator_decision"]["aggregate_health"] == "failed"
+    assert out["status"] == "hard_disqualification"
     assert out["results"]["compliance"]["status"] == "error"
+    assert "compliance_gate" in out["results"]
     assert "economic" not in out["results"]
     Mc.return_value.process.assert_awaited_once()
     Me.return_value.process.assert_not_awaited()
@@ -200,8 +203,14 @@ async def test_orchestrator_compliance_fail_aun_invoca_economic():
         "app.agents.compliance.ComplianceAgent"
     ) as Mc, patch("app.agents.economic.EconomicAgent") as Me:
         Ma.return_value.process = AsyncMock(return_value={"status": "success"})
+        # Data no vacía: el gate 12.1.A/P no bloquea por “cero requisitos”; el fail sigue siendo de negocio.
         Mc.return_value.process = AsyncMock(
-            return_value={"status": "fail", "data": {"administrativo": []}}
+            return_value={
+                "status": "fail",
+                "data": {
+                    "administrativo": [{"id": "r1", "estado": "fail", "detalle": "x"}],
+                },
+            }
         )
         Me.return_value.process = AsyncMock(
             return_value={"status": "complete", "message": "econ_ok"}
