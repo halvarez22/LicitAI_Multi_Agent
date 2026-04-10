@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import List, Optional
 
-from app.memory.factory import MemoryAdapterFactory
+from app.api.deps import get_connected_memory
 
 router = APIRouter()
 
@@ -73,8 +73,7 @@ async def resolve_outputs_root(session_id: str) -> Optional[str]:
     sid = _nfc(raw)
     state_name: Optional[str] = None
 
-    repo = MemoryAdapterFactory.create_adapter()
-    await repo.connect()
+    repo = await get_connected_memory()
     try:
         for key in (raw, sid):
             if not key:

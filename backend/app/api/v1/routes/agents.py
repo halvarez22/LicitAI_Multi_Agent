@@ -3,7 +3,7 @@ from app.api.schemas.requests import ProcessBasesRequest
 from app.api.schemas.responses import GenericResponse, AgentExecutionResponse
 from app.agents.orchestrator import OrchestratorAgent
 from app.agents.mcp_context import MCPContextManager
-from app.memory.factory import MemoryAdapterFactory
+from app.api.deps import get_connected_memory
 from app.core.logging_config import get_logger
 import logging
 
@@ -35,8 +35,7 @@ async def process_licitation_bases(request: ProcessBasesRequest, background_task
     Desencadena el análisis multi-agente de forma ASÍNCRONA.
     Retorna un job_id para seguimiento.
     """
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     try:
         # Validar existencia de documentos
@@ -75,8 +74,7 @@ async def process_licitation_bases(request: ProcessBasesRequest, background_task
 
 async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
     """Tarea de fondo que ejecuta el pipeline real."""
-    memory = MemoryAdapterFactory.create_adapter()
-    await memory.connect()
+    memory = await get_connected_memory()
     
     try:
         update_job_status(job_id, "RUNNING", {"stage": "ingestion", "pct": 10, "message": "Iniciando ingesta de documentos"})
