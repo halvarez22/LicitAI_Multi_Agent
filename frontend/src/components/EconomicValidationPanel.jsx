@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { API_BASE } from '../apiBase.js';
 import { AlertTriangle, CheckCircle2, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import EconomicDataIngestionPanel from './EconomicDataIngestionPanel';
 
 function colorByState(st) {
     if (st === 'ok') return '#4ade80';
@@ -18,7 +19,7 @@ function labelByState(st) {
 /**
  * Sprint 3 UI: estado de validaciones económicas determinísticas.
  */
-export default function EconomicValidationPanel({ sessionId, syncKey, onAskAboutValidation }) {
+export default function EconomicValidationPanel({ sessionId, companyId, syncKey, onAskAboutValidation }) {
     const [expanded, setExpanded] = useState(false);
     const [loading, setLoading] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
@@ -194,6 +195,15 @@ export default function EconomicValidationPanel({ sessionId, syncKey, onAskAbout
                     <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
                 </button>
             </div>
+
+            {/* Panel de Ingesta Excel Drag and Drop */}
+            {expanded && (
+                <EconomicDataIngestionPanel 
+                    sessionId={sessionId} 
+                    companyId={companyId} 
+                    onIngestionSuccess={refreshValidations} 
+                />
+            )}
 
             {expanded && (
                 <div id={bodyId}>

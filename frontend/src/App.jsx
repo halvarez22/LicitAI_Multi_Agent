@@ -2134,6 +2134,7 @@ const App = () => {
                                 >
                                     <EconomicValidationPanel
                                         sessionId={sessionId}
+                                        companyId={selectedCompanyId}
                                         syncKey={auditResults?.fechaAuditoria || ''}
                                         onAskAboutValidation={(val) => {
                                             const q = `Revisemos las validaciones económicas. Perfil: ${val?.perfil_usado || 'N/D'}. Bloqueos: ${(val?.blocking_issues || []).length}. ¿Qué debo corregir primero?`;
@@ -2745,10 +2746,25 @@ const App = () => {
                     </div>
 
                     <form onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px' }}>
-                        <input
-                            type="text"
-                            value={chatInput}
-                            onChange={(e) => setChatInput(e.target.value)}
+                        {(() => {
+                            const lastBotMsg = [...chatMessages].reverse().find(m => m.sender === 'bot');
+                            const isNumericStep = lastBotMsg?.text?.includes('Paso 1 de 4') || lastBotMsg?.text?.includes('Paso 3 de 4') || lastBotMsg?.text?.includes('Paso 4 de 4');
+                            
+                            return (
+                                <input
+                                    type="text"
+                                    value={chatInput}
+                                    onChange={(e) => {
+                                        let val = e.target.value;
+                                        if (isNumericStep) {
+                                            val = val.replace(/[^0-9.]/g, '');
+                                            if (val.split('.').length > 2) {
+                                                const parts = val.split('.');
+                                                val = parts[0] + '.' + parts.slice(1).join('');
+                                            }
+                                        }
+                                        setChatInput(val);
+                                    }}
                             placeholder={
                                 economicBlockingSessionLatch
                                     ? 'Pregunta al asistente (bases, totales, IVA…) — el desbloqueo es en Excel y Revalidar arriba'
@@ -2761,9 +2777,11 @@ const App = () => {
                                 padding: '12px 15px',
                                 borderRadius: '10px',
                                 color: '#fff',
-                                outline: 'none',
-                            }}
-                        />
+                                    outline: 'none',
+                                }}
+                            />
+                            );
+                        })()}
                         <button type="submit" style={{ background: 'var(--primary)', border: 'none', color: '#fff', padding: '10px 15px', borderRadius: '10px', cursor: 'pointer' }}><Send size={18} /></button>
                     </form>
                 </aside>
