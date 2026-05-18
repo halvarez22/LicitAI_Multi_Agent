@@ -78,6 +78,7 @@ def configure_logging():
     logging.getLogger("uvicorn.access").setLevel(access_level)
 
     # Telemetría Chroma/PostHog: ruido en logs; no afecta al cliente HTTP
+    logging.getLogger("chromadb").setLevel(logging.WARNING)
     logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
     logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
