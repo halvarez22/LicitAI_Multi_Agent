@@ -9,6 +9,15 @@ from app.contracts.agent_contracts import (
 )
 from app.contracts.orchestrator_contracts import OrchestratorState
 from app.contracts.session_contracts import SessionStateV1
+from app.contracts.document_inventory import (
+    DocumentEnvelope,
+    DocumentInventory,
+    InventoryItem,
+    InventoryItemStatus,
+    InventoryStats,
+    InventoryTier,
+    ItemAnchor,
+)
 
 __all__ = [
     "AgentInput",
@@ -16,4 +25,11 @@ __all__ = [
     "AgentStatus",
     "OrchestratorState",
     "SessionStateV1",
+    "DocumentEnvelope",
+    "DocumentInventory",
+    "InventoryItem",
+    "InventoryItemStatus",
+    "InventoryStats",
+    "InventoryTier",
+    "ItemAnchor",
 ]

@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 _C01_SEMANTIC_PATTERN = re.compile(
     r"(?i)(motivo de descalif|causa de desech|se desech|exclusi[oó]n|causa de rechazo|12\.1\.|inhabilit|descalif)"
 )
+_VALID_ACTION_TYPES = {"generar", "presentar_fisico", "informativo"}
 
 # --- DOCUMENTACIÓN DE VARIABLES DE OPERACIÓN (PRODUCCIÓN) ---
 # COMPLIANCE_CHUNK_CHARS (default 8000): Tamaño de ventana RAG por bloque Map.
@@ -61,7 +62,12 @@ class ComplianceAgent(BaseAgent):
         correlation_id = agent_input.correlation_id or "no-id"
         
         async with agent_span(logger, self.agent_id, session_id, correlation_id):
-            print(f"🛡️ [Compliance] Iniciando Auditoría Map-Reduce: {session_id}")
+            # MASTER SWITCH: si TRIAGE_ENABLED=False, el agente opera sin contexto normativo
+            if not getattr(settings, "TRIAGE_ENABLED", True):
+                logger.info("triage_disabled_by_flag", session_id=session_id)
+                agent_input.triage_context = None
+
+            print(f"🛡️ [Compliance] Iniciando Auditoria Map-Reduce: {session_id}")
             start_global = time.time()
             
             # --- ESTRATEGIA DE BARRIDO MACRO-ZONAS ---
@@ -147,10 +153,16 @@ class ComplianceAgent(BaseAgent):
                     session_id=session_id,
                     job_id=(agent_input.job_id or ""),
                     completed_zones=len(zone_reports),
+                    triage_context=agent_input.triage_context
                 )
 
                 # --- FASE B: REDUCE ---
-                reduced_items, zone_metrics = self._reduce_zone_items(zone['name'], raw_zone_items, context_zone)
+                reduced_items, zone_metrics = await self._reduce_zone_items(
+                    zone['name'], 
+                    raw_zone_items, 
+                    context_zone, 
+                    triage_context=agent_input.triage_context
+                )
                 
                 # --- RESOLUCIÓN DE ESTADO (Prioridad: Métricas -> Timeouts -> Errores LLM) ---
                 total_raw = sum(b.get("items_count", 0) for b in block_events)
@@ -291,10 +303,35 @@ class ComplianceAgent(BaseAgent):
                 data=full_master_list,
                 message=err_msg,
                 correlation_id=correlation_id,
-                processing_time_sec=round(duration_total, 2)
+                processing_time_sec=round(duration_total, 2),
             )
 
             return output
+
+    async def _match_must_have_policy(
+        self, item: Dict[str, Any], triage_context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Comprueba si el ítem corresponde a alguna etiqueta Must-Have.
+        Delega en TenderRouterService (compuestos SAT/estatal + aliases).
+
+        Returns:
+            Dict con {label, matched_on, expected_action} si hay match, None si no.
+        """
+        from app.services.tender_router_service import TenderRouterService
+
+        law = triage_context.get("law", "LAASSP")
+        category = triage_context.get("tender_category", "BIENES")
+        text_to_check = TenderRouterService.normalize_text_for_policy_match(
+            (item.get("nombre") or "")
+            + " "
+            + (item.get("descripcion") or "")
+            + " "
+            + (item.get("snippet") or "")
+        )
+        return await TenderRouterService.match_must_have_from_normalized_text(
+            text_to_check, law, category
+        )
 
     def _split_context(self, context: str, chunk_size: int, overlap: int) -> List[str]:
         """
@@ -329,6 +366,7 @@ class ComplianceAgent(BaseAgent):
         session_id: str = "no-id",
         job_id: str = "",
         completed_zones: int = 0,
+        triage_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Mapea cada chunk de una zona vía LLM.
 
@@ -354,7 +392,7 @@ class ComplianceAgent(BaseAgent):
             empty_resp = False
             while attempts <= max_retries:
                 chunk_items, llm_err, empty_resp, map_json_rt = await self._extract_zone_chunk(
-                    zone_name, chunk, correlation_id, experience_prompt_context
+                    zone_name, chunk, correlation_id, experience_prompt_context, triage_context
                 )
                 if not llm_err and not empty_resp:
                     if attempts > 0:
@@ -451,6 +489,7 @@ class ComplianceAgent(BaseAgent):
         chunk_text: str,
         correlation_id: str = "",
         experience_prompt_context: str = "",
+        triage_context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Dict[str, Any]], Optional[str], bool, Optional[str]]:
         system_prompt = (
             "Eres un Auditor Forense Senior de Licitaciones especializado en Despiece Quirúrgico.\n"
@@ -465,8 +504,24 @@ class ComplianceAgent(BaseAgent):
             "REGLAS ANTI-DUPLICACIÓN (OBLIGATORIAS):\n"
             "6. No repitas el mismo requisito ni la misma cláusula legal en más de un objeto JSON dentro del mismo bloque.\n"
             "7. Si un párrafo ya fue extraído en otra categoría del mismo JSON, genera UNA SOLA entrada en la categoría más adecuada.\n"
-            "8. No generes variaciones casi idénticas del mismo párrafo (p.ej. desechamiento, penalizaciones) como ítems distintos; unifica en un solo ítem con el snippet literal más representativo."
+            "8. No generes variaciones casi idénticas del mismo párrafo (p.ej. desechamiento, penalizaciones) como ítems distintos; unifica en un solo ítem con el snippet literal más representativo.\n"
+            "9. Salida de Emergencia (Informativo): Si el texto es una regla, fecha o descripción que NO requiere una acción o entrega del licitante, DEBES clasificarlo estrictamente como 'informativo'. NUNCA omitas el campo tipo_accion.\n"
+            "10. RASTREO DE FUENTE (OBLIGATORIO): Identifica el nombre del archivo (ej: bases.pdf, anexo1.pdf) de donde proviene el requisito y colócalo en 'archivo_fuente'.\n"
         )
+        
+        # --- INYECCIÓN DE TRIAGE (versionada) ---
+        if triage_context and getattr(settings, "TRIAGE_ENABLED", True):
+            from app.services.router_prompts import build_audit_triage_instructions
+            prompt_version = getattr(settings, "ROUTER_PROMPT_VERSION", "v2")
+            # Los flags granulares viajan dentro del triage_context para que
+            # build_audit_triage_instructions los use al construir la v2.
+            triage_context["_flags"] = {
+                "signals_enabled":        getattr(settings, "TRIAGE_SIGNALS_ENABLED", True),
+                "dual_obligation":        getattr(settings, "AUDIT_DUAL_OBLIGATION_ENABLED", True),
+                "justification_enabled":  getattr(settings, "AUDIT_JUSTIFICATION_ENABLED", True),
+            }
+            system_prompt += build_audit_triage_instructions(triage_context, version=prompt_version)
+
         # Adaptación de Prompt por Zona (P1 Few-Shots)
         few_shot = ""
         if "FORMATOS" in zone_name.upper():
@@ -488,11 +543,42 @@ class ComplianceAgent(BaseAgent):
 TEXTO FUENTE: {chunk_text}
 {few_shot}
 TAREA: Extrae los requisitos requeridos en este fragmento.
+REGLA DE ZONA CRÍTICA: Este bloque pertenece a la zona [{zone_name}].
+- Si el texto habla de GARANTÍAS, FIANZAS o SEGUROS → usa "formatos" o "administrativo", NO "tecnico".
+- Si el texto habla de ESPECIFICACIONES TÉCNICAS, EQUIPOS o CAPACIDADES → usa "tecnico".
+- Si el texto habla de DOCUMENTOS LEGALES, RFC, ACTAS o REPRESENTACIÓN → usa "administrativo".
+- Si el texto habla de FORMATOS, ANEXOS o CARTAS → usa "formatos".
+- Clasifica cada ítem en la categoría que corresponde a SU CONTENIDO, no a la zona del bloque.
+
+CLASIFICACIÓN tipo_accion (OBLIGATORIO en cada ítem):
+- "generar": el licitante DEBE redactar y entregar este documento (propuesta técnica, carta, manifiesto, declaración, anexo con contenido propio).
+- "presentar_fisico": el licitante debe presentar un documento físico existente (INE, acta constitutiva, fianza de institución, constancia IMSS).
+- "informativo": es una regla, fecha, procedimiento o descripción de las bases — NO es un documento a entregar. Si tienes duda sobre si es un requisito o solo información, usa "informativo".
+- "requiere_datos_licitante": documento tabular o cuantitativo que requiere datos propios del licitante (cantidades, precios, plazos, programas de obra). El sistema NO puede generarlo automáticamente porque los números son privados del licitante — si se inventan, el licitante puede ser descalificado. Úsalo para programas calendarizados, catálogos de conceptos, explosivos de insumos, análisis de precios unitarios y cualquier tabla que el licitante debe llenar con su propia propuesta económica.
+
+EJEMPLOS:
+- "Propuesta Técnica describiendo especificaciones" → tipo_accion: "generar"
+- "Carta bajo protesta de decir verdad" → tipo_accion: "generar"
+- "Identificación oficial vigente del representante" → tipo_accion: "presentar_fisico"
+- "Acta constitutiva de la empresa" → tipo_accion: "presentar_fisico"
+- "Fianza de cumplimiento expedida por institución autorizada" → tipo_accion: "presentar_fisico"
+- "Fecha y hora del acto de presentación" → tipo_accion: "informativo"
+- "Visita al sitio el día X" → tipo_accion: "informativo"
+- "Junta de aclaraciones" → tipo_accion: "informativo"
+- "AT-13 Programa calendarizado de materiales" → tipo_accion: "requiere_datos_licitante"
+- "Programa calendarizado de suministro de materiales y equipo" → tipo_accion: "requiere_datos_licitante"
+- "Catálogo de conceptos con cantidades y precios unitarios" → tipo_accion: "requiere_datos_licitante"
+- "Explosivo de insumos" → tipo_accion: "requiere_datos_licitante"
+- "Análisis de precios unitarios" → tipo_accion: "requiere_datos_licitante"
+- "Programa de ejecución de obra" → tipo_accion: "requiere_datos_licitante"
+- "Programa de utilización de maquinaria y equipo de construcción" → tipo_accion: "requiere_datos_licitante"
+- "Tabulador de salarios" → tipo_accion: "requiere_datos_licitante"
+
 FORMATO JSON OBLIGATORIO:
 {{
-    "administrativo": [{{ "nombre": "...", "page": 5, "descripcion": "...", "snippet": "...", "quality_flags": [] }}],
-    "tecnico": [{{ "nombre": "...", "page": 5, "descripcion": "...", "snippet": "...", "quality_flags": [] }}],
-    "formatos": [{{ "nombre": "...", "page": 5, "descripcion": "...", "snippet": "...", "quality_flags": [] }}]
+    "administrativo": [{{ "nombre": "...", "page": 5, "archivo_fuente": "bases.pdf", "descripcion": "...", "snippet": "...", "tipo_accion": "generar", "quality_flags": [] }}],
+    "tecnico": [{{ "nombre": "...", "page": 5, "archivo_fuente": "anexo.pdf", "descripcion": "...", "snippet": "...", "tipo_accion": "generar", "quality_flags": [] }}],
+    "formatos": [{{ "nombre": "...", "page": 5, "archivo_fuente": "bases.pdf", "descripcion": "...", "snippet": "...", "tipo_accion": "generar", "quality_flags": [] }}]
 }}
 """
         if experience_prompt_context:
@@ -505,7 +591,7 @@ FORMATO JSON OBLIGATORIO:
 
         if use_map_strict:
             ex = await extract_compliance_data_with_retry(
-                self.llm.service_client,
+                self.llm,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 model=None,
@@ -586,7 +672,7 @@ FORMATO JSON OBLIGATORIO:
                 flat_items.append(item)
         return flat_items, None, False, map_json_rt
 
-    def _reduce_zone_items(self, zone_name: str, items: List[Dict[str, Any]], full_context: str) -> Tuple[List[Dict], Dict]:
+    async def _reduce_zone_items(self, zone_name: str, items: List[Dict[str, Any]], full_context: str, triage_context: Optional[Dict] = None) -> Tuple[List[Dict], Dict]:
         seen_snippets = set()
         final_items = []
         valid_snippets = 0
@@ -622,16 +708,102 @@ FORMATO JSON OBLIGATORIO:
                     category=mismatch_case["categoria"],
                     snippet_preview=mismatch_case["snippet"]
                 )
+                # En zona FORMATOS/ANEXOS descartar ítems sin evidencia literal:
+                # son casi siempre paráfrasis del LLM, no requisitos reales del documento.
+                if "FORMATOS" in zone_name.upper():
+                    continue
             
             if item["evidence_match"]: valid_snippets += 1
             if item["page"] > 0: valid_pages += 1
             cat_raw = raw.get("categoria_orig", self._infer_category(item, zone_name))
             item["categoria"] = cat_raw.strip() if isinstance(cat_raw, str) else self._infer_category(item, zone_name)
+
+            # --- ANCLAJE DE TAXONOMÍA (matrícula canónica LEG_/FIS_/…) ---
+            if getattr(settings, "COMPLIANCE_TAXONOMY_ANCHOR_ENABLED", True) and triage_context:
+                from app.services.tender_router_service import TenderRouterService
+
+                law_anch = triage_context.get("law", "LAASSP")
+                cat_anch = triage_context.get("tender_category", "BIENES")
+                allow = triage_context.get("taxonomy_allowlist") or await TenderRouterService.get_taxonomy_allowlist(
+                    law_anch, cat_anch
+                )
+                lbl_cur = (item.get("label_taxonomica") or "").strip()
+                if lbl_cur.upper() == "OTRO":
+                    lbl_cur = ""
+                if lbl_cur and lbl_cur not in allow:
+                    lbl_cur = ""
+                    item["label_taxonomica"] = None
+                if not lbl_cur:
+                    text_to_check = TenderRouterService.normalize_text_for_policy_match(
+                        (item.get("nombre") or "")
+                        + " "
+                        + (item.get("descripcion") or "")
+                        + " "
+                        + (item.get("snippet") or "")
+                    )
+                    m = await TenderRouterService.match_must_have_from_normalized_text(
+                        text_to_check, law_anch, cat_anch
+                    )
+                    if m:
+                        item["label_taxonomica"] = m["label"]
+                        item["taxonomy_anchor_meta"] = {
+                            "matched_on": m["matched_on"],
+                            "source": "tender_router.policy_match",
+                        }
+                        if "taxonomy_anchor_applied" not in item["quality_flags"]:
+                            item["quality_flags"].append("taxonomy_anchor_applied")
+            
+            # --- ENFORCEMENT DETERMINISTA (MUST-HAVE) ---
+            # Si el item coincide con un Must-Have y el LLM lo dejó como informativo o unknown,
+            # se fuerza a la acción esperada y se conserva procedencia auditable.
+            _tipo_raw = str(item.get("tipo_accion") or "").strip().lower()
+            _enforce_must_have = _tipo_raw in ("informativo", "unknown", "") and triage_context
+            if _enforce_must_have:
+                must_have_match = await self._match_must_have_policy(item, triage_context)
+                if must_have_match is not None:
+                    enforced_action = str(must_have_match.get("expected_action") or "generar")
+                    if enforced_action not in ("generar", "presentar_fisico"):
+                        enforced_action = "generar"
+                    item["tipo_accion"] = enforced_action
+                    if "forced_by_must_have_matrix" not in item["quality_flags"]:
+                        item["quality_flags"].append("forced_by_must_have_matrix")
+                    item["forced_by_must_have"] = {
+                        "label": must_have_match.get("label"),
+                        "matched_on": must_have_match.get("matched_on"),
+                        "expected_action": enforced_action,
+                        "source": "triage_context.must_have_policy",
+                    }
+                    logger.info(
+                        "compliance_forced_must_have",
+                        item=item["nombre"],
+                        label=must_have_match.get("label"),
+                        expected_action=enforced_action,
+                        matched_on=must_have_match.get("matched_on"),
+                    )
+
             # ✅ TRAZABILIDAD: estampar zona_origen (propagada desde _extract_zone_chunk)
             item["zona_origen"] = raw.get("zona_origen", zone_name)
+
+            # --- FALLBACK DE SEGURIDAD ( unknown -> informativo ) ---
+            # Si el ítem no fue clasificado por el LLM y NO fue forzado por la matriz Must-Have,
+            # lo tratamos como informativo para evitar ruidos en el Quality Gate.
+            _safe_action = str(item.get("tipo_accion") or "").strip().lower()
+            _qflags = item.get("quality_flags") or []
+            if _safe_action in ("unknown", "", "null", "none") and "forced_by_must_have_matrix" not in _qflags:
+                item["tipo_accion"] = "informativo"
+                if "fallback_to_informative" not in _qflags:
+                    _qflags.append("fallback_to_informative")
+                item["quality_flags"] = _qflags
+
             final_items.append(item)
             seen_snippets.add(dedup_key)
         final_items = [x for x in final_items if isinstance(x, dict)]
+        action_type_stats: Dict[str, int] = {"generar": 0, "presentar_fisico": 0, "informativo": 0, "unknown": 0}
+        for it in final_items:
+            a = str(it.get("tipo_accion", "unknown")).lower()
+            if a not in action_type_stats:
+                a = "unknown"
+            action_type_stats[a] = action_type_stats.get(a, 0) + 1
         for i, it in enumerate(final_items):
             cat = it.get("categoria", self._infer_category(it, zone_name))
             prefix = (cat[:2] if len(cat) >= 2 else (cat + "XX")[:2]).upper()
@@ -641,6 +813,7 @@ FORMATO JSON OBLIGATORIO:
             "snip_match_pct": round((valid_snippets/len(final_items)*100), 1) if final_items else 0,
             "page_match_pct": round((valid_pages/len(final_items)*100), 1) if final_items else 0,
             "forensic_mismatches": forensic_mismatches,
+            "action_type_stats": action_type_stats,
         }
         return final_items, metrics
 
@@ -663,7 +836,46 @@ FORMATO JSON OBLIGATORIO:
             qf = list(qf)
         if pg <= 0 and "missing_page" not in qf:
             qf.append("missing_page")
-        return {"id": "", "nombre": name, "seccion": sec, "descripcion": desc, "page": pg, "snippet": snip, "quality_flags": qf}
+        action_type = str(raw.get("tipo_accion") or "unknown").strip().lower()
+        if action_type not in _VALID_ACTION_TYPES:
+            action_type = "unknown"
+        try:
+            action_confidence = float(raw.get("action_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            action_confidence = 0.0
+        action_confidence = max(0.0, min(1.0, action_confidence))
+        categoria_sugerida = str(raw.get("categoria_sugerida") or raw.get("categoria_orig") or "").strip().lower()
+
+        _rl = raw.get("label_taxonomica")
+        label_taxonomica = str(_rl).strip() if _rl not in (None, "") else None
+
+        def _opt_bool(key: str) -> Optional[bool]:
+            v = raw.get(key)
+            if v is None:
+                return None
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                return v.strip().lower() in ("true", "1", "si", "sí", "yes")
+            return bool(v)
+
+        return {
+            "id": "",
+            "nombre": name,
+            "seccion": sec,
+            "descripcion": desc,
+            "page": pg,
+            "archivo_fuente": str(raw.get("archivo_fuente") or "").strip(),
+            "snippet": snip,
+            "quality_flags": qf,
+            "tipo_accion": action_type,
+            "action_confidence": action_confidence,
+            "categoria_sugerida": categoria_sugerida,
+            "label_taxonomica": label_taxonomica,
+            "obligatorio_por_bases": _opt_bool("obligatorio_por_bases"),
+            "obligatorio_por_marco_normativo": _opt_bool("obligatorio_por_marco_normativo"),
+            "justificacion_clasificacion": raw.get("justificacion_clasificacion"),
+        }
 
     def _normalize_text(self, text: str, remove_accents: bool = False) -> str:
         """Normalización profunda de texto para matching industrial."""

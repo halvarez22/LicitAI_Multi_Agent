@@ -48,11 +48,12 @@ async def test_data_gap_identifies_missing_fields():
 
     assert result.status == AgentStatus.WAITING_FOR_DATA
     missing_keys = [m["field"] for m in result.data["missing"]]
-    assert len(missing_keys) == 8
+    # Sin compliance: solo se evalúan bloqueantes; cédula/email/teléfono no entran al conjunto activo.
     assert "rfc" in missing_keys
     assert "domicilio_fiscal" in missing_keys
-    assert "cedula_representante" in missing_keys
-    assert "email" in missing_keys
+    assert "cedula_representante" not in missing_keys
+    assert "email" not in missing_keys
+    assert set(result.data["missing_blocking"]) == {"rfc", "domicilio_fiscal"}
 
 @pytest.mark.asyncio
 async def test_data_gap_auto_fills_from_rag():
@@ -61,22 +62,35 @@ async def test_data_gap_auto_fills_from_rag():
         "master_profile": {
             "razon_social": "Test Company SA",
             "representante_legal": "Juan Perez",
+            "rfc": "TES123456ABC",
+            "domicilio_fiscal": "Calle 1, CDMX",
             "cedula_representante": "1234567890",
             "telefono": "5512345678",
-            "email": "", # Faltante
+            "email": "",  # Faltante pero solo se evalúa si compliance infiere email
             "web": "https://test.com",
             "anos_experiencia": "10",
-            "numero_empleados": "50"
+            "numero_empleados": "50",
         }
     }
 
-    ctx = MCPContextManager(_memory_stub(mock_company))
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    ctx = MCPContextManager(mem)
     agent = DataGapAgent(ctx)
 
-    with patch.object(agent.vector_db, "query_texts", return_value={"documents": ["Contacto: info@test.com"]}), \
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [
+                {"id": "REQ_MAIL", "nombre": "Correo", "descripcion": "correo electrónico de contacto"}
+            ]
+        }
+    }
+
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["email"])), \
+         patch.object(agent.vector_db, "query_texts", return_value={"documents": ["Contacto: info@test.com"]}), \
          patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="info@test.com"))):
 
-        result = await agent.process(_inp("sess-1", "co_123"))
+        result = await agent.process(_inp("sess-1", "co_123", company_data))
 
     assert "email" in result.data["auto_filled"]
     assert result.status == AgentStatus.SUCCESS
@@ -90,6 +104,8 @@ async def test_data_gap_auto_fills_from_session_expediente_pdf():
         "master_profile": {
             "razon_social": "Test Company SA",
             "representante_legal": "Juan Perez",
+            "rfc": "TES123456ABC",
+            "domicilio_fiscal": "Calle 1, CDMX",
             "cedula_representante": "1234567890",
             "telefono": "5512345678",
             "email": "",
@@ -99,8 +115,18 @@ async def test_data_gap_auto_fills_from_session_expediente_pdf():
         },
     }
 
-    ctx = MCPContextManager(_memory_stub(mock_company))
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    ctx = MCPContextManager(mem)
     agent = DataGapAgent(ctx)
+
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [
+                {"id": "REQ_MAIL2", "nombre": "Correo", "descripcion": "correo electrónico"}
+            ]
+        }
+    }
 
     def fake_query_texts(coll: str, query: str, n_results: int = 5):
         return {"documents": []}
@@ -110,12 +136,13 @@ async def test_data_gap_auto_fills_from_session_expediente_pdf():
             return {"documents": ["Correo de contacto: ventas@mitest.com"]}
         return {"documents": []}
 
-    with patch.object(agent.vector_db, "query_texts", side_effect=fake_query_texts), \
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["email"])), \
+         patch.object(agent.vector_db, "query_texts", side_effect=fake_query_texts), \
          patch.object(agent.vector_db, "query_texts_filtered", side_effect=fake_filtered), \
          patch.object(agent.vector_db, "get_sources", return_value=["CONVOCATORIA_2024.pdf", "CIF_EMPRESA.pdf"]), \
          patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="ventas@mitest.com"))):
 
-        result = await agent.process(_inp("sess-1", "co_123"))
+        result = await agent.process(_inp("sess-1", "co_123", company_data))
 
     assert "email" in result.data["auto_filled"]
     assert result.status == AgentStatus.SUCCESS
@@ -190,3 +217,191 @@ async def test_datagap_identifica_slots_desde_compliance_sin_duplicar():
     assert "tax_id" not in missing_keys
 
     assert "domicilio_fiscal" in missing_keys
+
+
+@pytest.mark.asyncio
+async def test_data_gap_informational_fields_enqueued_without_blocking():
+    """Sin requisitos que infieran slots informativos, no se encolan cédula/web/teléfono/etc."""
+    mock_company = {
+        "id": "co_inf",
+        "master_profile": {
+            "razon_social": "SA de CV",
+            "rfc": "ABC123456XYZ",
+            "domicilio_fiscal": "Calle 1, CDMX",
+            "representante_legal": "Ana López",
+            "cedula_representante": "",
+            "web": "",
+            "telefono": "",
+            "email": "",
+        },
+    }
+    ctx = MCPContextManager(_memory_stub(mock_company))
+    agent = DataGapAgent(ctx)
+    with patch.object(agent.vector_db, "query_texts", return_value={"documents": []}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="NO_ENCONTRADO"))):
+        result = await agent.process(_inp("sess-inf", "co_inf"))
+    assert result.status == AgentStatus.SUCCESS
+    missing_keys = [m["field"] for m in result.data["missing"]]
+    assert missing_keys == []
+    assert result.data["missing_blocking"] == []
+
+
+@pytest.mark.asyncio
+async def test_data_gap_blocking_fields_enqueued():
+    """RFC, razón social, domicilio y representante sí encolan HITL si faltan tras RAG."""
+    mock_company = {
+        "id": "co_blk",
+        "master_profile": {},
+    }
+    ctx = MCPContextManager(_memory_stub(mock_company))
+    agent = DataGapAgent(ctx)
+    with patch.object(agent.vector_db, "query_texts", return_value={"documents": []}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="NO_ENCONTRADO"))):
+        result = await agent.process(_inp("sess-blk", "co_blk"))
+    missing_keys = [m["field"] for m in result.data["missing"]]
+    assert set(result.data["missing_blocking"]) == {"rfc", "razon_social", "domicilio_fiscal", "representante_legal"}
+    assert set(result.data["missing_blocking"]).issubset(set(missing_keys))
+
+
+@pytest.mark.asyncio
+async def test_datagap_no_encola_numero_empleados_sin_inferencia_de_plantilla():
+    """Bases que solo exigen RFC (tax_id) no deben abrir brecha de plantilla laboral."""
+    mock_company = {
+        "id": "co_ne",
+        "master_profile": {
+            "razon_social": "X SA de CV",
+            "rfc": "ABC123456XYZ",
+            "domicilio_fiscal": "Calle 2, CDMX",
+            "representante_legal": "Pepe Pérez",
+        },
+    }
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    ctx = MCPContextManager(mem)
+    agent = DataGapAgent(ctx)
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [
+                {"id": "R1", "nombre": "CIF", "descripcion": "RFC vigente del oferente"},
+            ]
+        },
+    }
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["tax_id"])), \
+         patch.object(agent.vector_db, "query_texts", return_value={"documents": []}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="NO_ENCONTRADO"))):
+        result = await agent.process(_inp("sess-ne", "co_ne", company_data))
+    missing_keys = [m["field"] for m in result.data["missing"]]
+    assert "numero_empleados" not in missing_keys
+    assert result.status == AgentStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_data_gap_marks_is_blocking_flag():
+    mock_company = {
+        "id": "co_mix",
+        "master_profile": {
+            "razon_social": "Empresa Demo SA de CV",
+            "rfc": "",
+            "domicilio_fiscal": "Av Siempre Viva 123",
+            "representante_legal": "Ana Ruiz",
+            "email": "",
+        },
+    }
+    ctx = MCPContextManager(_memory_stub(mock_company))
+    agent = DataGapAgent(ctx)
+    with patch.object(agent.vector_db, "query_texts", return_value={"documents": []}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="NO_ENCONTRADO"))):
+        result = await agent.process(_inp("sess-mix", "co_mix"))
+
+    by_field = {m["field"]: m for m in result.data["missing"]}
+    assert by_field["rfc"]["is_blocking"] is True
+    assert "email" not in by_field
+
+
+@pytest.mark.asyncio
+async def test_data_gap_invariants_no_overlap_auto_filled_and_missing():
+    """Un campo auto-extraído no debe aparecer en missing."""
+    # Perfil con email vacío que se auto-extrae desde RAG
+    mock_company = {
+        "id": "co_inv",
+        "master_profile": {
+            "razon_social": "Empresa Inv SA",
+            "rfc": "INV123456ABC",
+            "domicilio_fiscal": "Calle Inv 1",
+            "representante_legal": "Inv Rep",
+            "email": "",  # Faltante, pero se auto-extraerá
+        },
+    }
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    ctx = MCPContextManager(mem)
+    agent = DataGapAgent(ctx)
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [{"id": "R_EMAIL", "nombre": "Correo", "descripcion": "email de contacto"}]
+        }
+    }
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["email"])), \
+         patch.object(agent.vector_db, "query_texts", return_value={"documents": ["Contacto: inv@empresa.com"]}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="inv@empresa.com"))):
+        result = await agent.process(_inp("sess-inv", "co_inv", company_data))
+
+    # Invariante: email no puede estar en ambos
+    auto_filled_set = set(result.data["auto_filled"])
+    missing_keys = {m["field"] for m in result.data["missing"]}
+    assert auto_filled_set.isdisjoint(missing_keys), f"Overlap: {auto_filled_set & missing_keys}"
+
+    # Invariante: missing_blocking es subconjunto de missing
+    assert set(result.data["missing_blocking"]).issubset(missing_keys)
+
+
+@pytest.mark.asyncio
+async def test_data_gap_informational_field_enqueued_with_is_blocking_false():
+    """
+    Caso requerido: faltante informativo se encola con is_blocking=False.
+
+    Cuando un campo informativo (email) se infiere desde compliance y no tiene
+    valor válido ni puede auto-extraerse desde RAG, debe aparecer en `missing`
+    con is_blocking=False y NO aparecer en missing_blocking.
+    """
+    mock_company = {
+        "id": "co_info_blk",
+        "master_profile": {
+            "razon_social": "Empresa Info SA",
+            "rfc": "INF123456ABC",
+            "domicilio_fiscal": "Calle Info 1, CDMX",
+            "representante_legal": "Info Rep",
+            "email": "",  # Faltante informativo
+        },
+    }
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    ctx = MCPContextManager(mem)
+    agent = DataGapAgent(ctx)
+
+    # Compliance que infiere el slot "email" (campo informativo)
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [
+                {"id": "R_EMAIL2", "nombre": "Correo electrónico", "descripcion": "email de contacto del oferente"}
+            ]
+        }
+    }
+
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["email"])), \
+         patch.object(agent.vector_db, "query_texts", return_value={"documents": []}), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="NO_ENCONTRADO"))):
+        result = await agent.process(_inp("sess-info-blk", "co_info_blk", company_data))
+
+    by_field = {m["field"]: m for m in result.data["missing"]}
+
+    # El campo informativo debe estar en missing con is_blocking=False
+    assert "email" in by_field, "El campo informativo 'email' debe aparecer en missing"
+    assert by_field["email"]["is_blocking"] is False, "El campo informativo debe tener is_blocking=False"
+
+    # No debe aparecer en missing_blocking
+    assert "email" not in result.data["missing_blocking"], "El campo informativo no debe estar en missing_blocking"
+
+    # El status no debe ser WAITING_FOR_DATA (solo bloqueantes lo activan)
+    from app.contracts.agent_contracts import AgentStatus
+    assert result.status == AgentStatus.SUCCESS, "Faltantes informativos no deben bloquear generación"

@@ -44,16 +44,17 @@ const LicitacionCard = ({ licitacion, onSelect, onDelete }) => {
                     {licitacion.name[0].toUpperCase()}
                 </div>
                 <button 
-                   className="icon-btn" 
-                   onClick={(e) => { e.stopPropagation(); onDelete(licitacion.id); }}
+                   className="icon-btn icon-btn-danger" 
+                   onClick={(e) => { 
+                       e.stopPropagation(); 
+                       onDelete(licitacion.id); 
+                   }}
+                   title="Eliminar Licitación"
                    style={{ 
-                       color: 'var(--text-muted)',
                        padding: '8px',
                        borderRadius: '8px',
                        transition: 'all 0.2s'
                    }}
-                   onMouseOver={(e) => e.currentTarget.style.color = 'var(--error)'}
-                   onMouseOut={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
                 >
                     <Trash2 size={18} />
                 </button>

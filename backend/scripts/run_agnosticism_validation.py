@@ -81,10 +81,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         [
             "",
             "## INFO",
-            "- Perfil económico: `health_sector_annex_like` sustituye la detección única por "
-            "'issste' en seed; `issste_2024_like` permanece como alias retrocompatible.",
-            "- `template_name` interno puede conservar prefijo histórico en archivos de plantilla; "
-            "no implica convocante fijo en runtime.",
+            "- Perfil económico: `perfil_con_salario_real_v1` se detecta vía `profiles_config.json`.",
+            "- Marcadores externos: Permiten añadir verticales (ej. salud, obra) sin tocar código.",
+            "- `template_name` interno puede conservar prefijo histórico en archivos de plantilla.",
             "",
         ]
     )

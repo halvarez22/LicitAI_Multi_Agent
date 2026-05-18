@@ -7,6 +7,9 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.services.document_fill_quality_gate import validate_generated_documents_fill
+from app.services.validation_service import validation_mapping_service
+from app.services.excel_filling_service import ExcelFillingService
 
 class EconomicWriterAgent(BaseAgent):
     """
@@ -29,6 +32,7 @@ class EconomicWriterAgent(BaseAgent):
             description="Generador automatizado de propuestas económicas y catálogos de precios.",
             context_manager=context_manager
         )
+        self.excel_filler = ExcelFillingService()
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
@@ -61,14 +65,42 @@ class EconomicWriterAgent(BaseAgent):
                     # extraemos .data del dict o lo asumimos directo
                     economic_data = result_data.get("data", result_data)
                     break
-                    
-        if not economic_data or not economic_data.get("items"):
+
+        if not economic_data:
             return AgentOutput(
                 status=AgentStatus.ERROR,
                 agent_id=self.agent_id,
                 session_id=session_id,
                 error="No se encontró una propuesta económica calculada en Fase 1.",
-                correlation_id=correlation_id
+                correlation_id=correlation_id,
+            )
+
+        items = economic_data.get("items") if isinstance(economic_data.get("items"), list) else []
+        if not items:
+            st_payload = str(economic_data.get("status") or "").strip().lower()
+            vres = economic_data.get("validation_result")
+            vres = vres if isinstance(vres, dict) else {}
+            blocking = bool(vres.get("blocking_issues"))
+            missing = economic_data.get("missing")
+            has_missing = isinstance(missing, list) and len(missing) > 0
+            if st_payload == "waiting_for_data" and (blocking or has_missing):
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=(
+                        "La propuesta económica aún no está lista para generar documentos: "
+                        "hay validaciones pendientes o datos incompletos. "
+                        "Atiende el asistente o ajusta Excel/cotización y vuelve a ejecutar generar o continuar."
+                    ),
+                    correlation_id=correlation_id,
+                )
+            return AgentOutput(
+                status=AgentStatus.ERROR,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                error="No se encontró una propuesta económica calculada en Fase 1.",
+                correlation_id=correlation_id,
             )
             
         # 3. Normalizar items para el renderizado Excel/Word
@@ -86,9 +118,33 @@ class EconomicWriterAgent(BaseAgent):
                 "importe": importe
             })
             
-        subtotal = sum(i["importe"] for i in mapeo_items)
-        iva = round(subtotal * 0.16, 2)
-        total = round(subtotal + iva, 2)
+        # Fallback de sumatoria si el motor no proporcionó totales
+        calc_subtotal = sum(i["importe"] for i in mapeo_items)
+        
+        # 1. Obtener totales maestros desde el motor económico (Prioridad absoluta)
+        subtotal = float(economic_data.get("total_base") or calc_subtotal)
+        total = float(economic_data.get("grand_total") or (subtotal * 1.16))
+        
+        # 2. Re-calcular IVA como la diferencia si no viene explícito (Maneja IVA 0%, 8%, 16%, etc.)
+        iva = round(total - subtotal, 2)
+        
+        subtotal = round(subtotal, 2)
+        total = round(total, 2)
+        
+        allow_zero = bool(economic_data.get("allow_zero_total_base_ack"))
+        if subtotal < 0.01 and not allow_zero:
+            return AgentOutput(
+                status=AgentStatus.WAITING_FOR_DATA,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message=(
+                    "La propuesta económica no tiene importe cotizable antes de IVA (subtotal ~0). "
+                    "Captura precios unitarios en la fase económica.\n\n"
+                    "Si esta licitación no requiere importe base, escribe en el chat: "
+                    "**'Esta licitación no requiere importe base'** para confirmar y continuar."
+                ),
+                correlation_id=correlation_id,
+            )
         validation_result = (
             economic_data.get("validation_result")
             if isinstance(economic_data.get("validation_result"), dict)
@@ -108,9 +164,39 @@ class EconomicWriterAgent(BaseAgent):
         output_base_dir = os.path.join("/data", "outputs", session_id, "2.propuesta_economica")
         os.makedirs(output_base_dir, exist_ok=True)
         
-        # 4.1 Generar Excel de Precios
+        # 4.1 Generar Excel de Precios (Modo Espejo vs Genérico)
         excel_path = os.path.join(output_base_dir, "TABLA_PRECIOS_UNITARIOS.xlsx")
-        self._generate_price_excel(excel_path, mapeo_items, master_profile, resumen)
+        
+        # Verificar si podemos usar el protocolo de llenado sobre el original
+        # Tomamos el primer item que tenga coordenadas de Excel
+        first_excel_item = next((i for i in items if i.get("extra") and i["extra"].get("price_column_index") is not None), None)
+        
+        if first_excel_item:
+            source_file = first_excel_item["extra"].get("source_filename")
+            items_to_fill = []
+            for it in items:
+                ext = it.get("extra") or {}
+                if ext.get("price_column_index") is not None:
+                    items_to_fill.append({
+                        "sheet_name": it.get("sheet_name"),
+                        "row_index": it.get("row_index"),
+                        "price_column_index": ext.get("price_column_index"),
+                        "final_price": it.get("precio_unitario")
+                    })
+            
+            try:
+                print(f"[{self.name}] 🧪 Activando Protocolo de Llenado Espejo para Excel: {source_file}")
+                excel_path = self.excel_filler.fill_proposal_excel(
+                    session_id=session_id,
+                    source_filename=source_file,
+                    items_to_fill=items_to_fill,
+                    output_filename="CATALOGO_LLENADO_OFICIAL.xlsx"
+                )
+            except Exception as e:
+                print(f"[{self.name}] ⚠️ Falló el llenado espejo, usando generador genérico: {e}")
+                self._generate_price_excel(excel_path, mapeo_items, master_profile, resumen)
+        else:
+            self._generate_price_excel(excel_path, mapeo_items, master_profile, resumen)
         
         # 4.2 Generar Anexo AE (Word)
         word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
@@ -122,18 +208,81 @@ class EconomicWriterAgent(BaseAgent):
 
         print(f"[{self.name}] ✅ Propuesta económica generada con éxito.", flush=True)
 
+        generated_documents = [
+            {
+                "nombre": "Tabla de Precios Unitarios",
+                "ruta": excel_path,
+                "tipo": "tabla_precios",
+                "template_id": "tabla_precios",
+            },
+            {
+                "nombre": "Anexo AE - Propuesta Económica",
+                "ruta": word_path,
+                "tipo": "anexo_economico",
+                "template_id": "anexo_economico",
+            },
+            {
+                "nombre": "Carta Compromiso de Precios",
+                "ruta": carta_path,
+                "tipo": "carta_compromiso",
+                "template_id": "carta_compromiso",
+            },
+        ]
+        fill_gate = validate_generated_documents_fill(
+            stage="economic",
+            generated_documents=generated_documents,
+            master_profile=master_profile,
+            provenance_context={"source": "economic_writer", "confidence": 0.95},
+        )
+        validation_events = [
+            validation_mapping_service.build_event(
+                error_type=it.get("error_type"),
+                context={
+                    "document_id": it.get("document_id"),
+                    "field_key": it.get("field_key"),
+                    "detected_value": it.get("detected_value"),
+                    "expected_rule": it.get("expected_rule"),
+                },
+                raw_message=f"Validación en {it.get('document_id')}: {it.get('field_key')}"
+            )
+            for it in (fill_gate.get("issues") or [])
+        ]
+        if not bool(fill_gate.get("validation_passed", True)):
+            return AgentOutput(
+                status=AgentStatus.WAITING_FOR_DATA,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message=(
+                    "Pausa por calidad de llenado documental económico: se detectaron "
+                    "campos obligatorios faltantes o inconsistentes en los archivos generados."
+                ),
+                data={
+                    "documentos": generated_documents,
+                    "resumen_economico": resumen,
+                    "document_fill_quality_gate": fill_gate,
+                    "validation_events": validation_events,
+                    "missing": [
+                        {
+                            "field": "document_fill_quality_gate",
+                            "label": "Corregir llenado documental económico",
+                            "type": "document_fill_quality_gate_blocking",
+                            "blocking_items": fill_gate.get("issues") or [],
+                        }
+                    ],
+                },
+                correlation_id=correlation_id,
+            )
+
         return AgentOutput(
             status=AgentStatus.SUCCESS,
             agent_id=self.agent_id,
             session_id=session_id,
             data={
                 "folder": output_base_dir,
-                "documentos": [
-                    {"nombre": "Tabla de Precios Unitarios", "ruta": excel_path, "tipo": "tabla_precios"},
-                    {"nombre": "Anexo AE - Propuesta Económica", "ruta": word_path, "tipo": "anexo_economico"},
-                    {"nombre": "Carta Compromiso de Precios", "ruta": carta_path, "tipo": "carta_compromiso"}
-                ],
-                "resumen_economico": resumen
+                "documentos": generated_documents,
+                "resumen_economico": resumen,
+                "document_fill_quality_gate": fill_gate,
+                "validation_events": validation_events,
             },
             correlation_id=correlation_id
         )
@@ -181,7 +330,8 @@ class EconomicWriterAgent(BaseAgent):
         # Totales desde resumen (calculados en Fase 1, no se recalculan)
         ws.cell(row=current_row + 1, column=5, value="SUBTOTAL:").font = Font(bold=True)
         ws.cell(row=current_row + 1, column=6, value=resumen["subtotal"]).font = Font(bold=True)
-        ws.cell(row=current_row + 2, column=5, value="IVA (16%):").font = Font(bold=True)
+        iva_pct = (resumen['iva'] / resumen['subtotal'] * 100) if resumen['subtotal'] > 0 else 16.0
+        ws.cell(row=current_row + 2, column=5, value=f"IVA ({iva_pct:g}%):").font = Font(bold=True)
         ws.cell(row=current_row + 2, column=6, value=resumen["iva"]).font = Font(bold=True)
         ws.cell(row=current_row + 3, column=5, value="TOTAL:").font = Font(bold=True)
         ws.cell(row=current_row + 3, column=6, value=resumen["total"]).font = Font(bold=True)
@@ -225,7 +375,9 @@ class EconomicWriterAgent(BaseAgent):
             row_cells[3].text = f"${item.get('importe'):,.2f}"
 
         doc.add_paragraph(f"\nSUBTOTAL: ${resumen['subtotal']:,.2f}")
-        doc.add_paragraph(f"IVA (16%): ${resumen['iva']:,.2f}")
+        # Calculamos el porcentaje real para mostrarlo en el documento
+        iva_pct = (resumen['iva'] / resumen['subtotal'] * 100) if resumen['subtotal'] > 0 else 16.0
+        doc.add_paragraph(f"I.V.A. ({iva_pct:g}%): ${resumen['iva']:,.2f}")
         para_total = doc.add_paragraph(f"TOTAL DE LA PROPUESTA: ${resumen['total']:,.2f}")
         para_total.runs[0].bold = True
 

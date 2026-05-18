@@ -13,7 +13,16 @@ import EconomicValidationPanel from './components/EconomicValidationPanel';
 import Dashboard from './components/Dashboard';
 import ExportPDF from './components/ExportPDF';
 import LicitacionesGrid from './components/LicitacionesGrid';
+import GoNoGoPanel from './components/GoNoGoPanel';
 import ForensicCard from './components/ForensicCard';
+import ValidationAlert from './components/ValidationAlert';
+import JustificationModal from './components/JustificationModal';
+import ValidationPolicyAdmin from './components/ValidationPolicyAdmin';
+import BlockResolutionPanel from './components/BlockResolutionPanel';
+import DocumentQualityDiagnosticPanel from './components/DocumentQualityDiagnosticPanel';
+import IntakeProgressCard from './components/IntakeProgressCard';
+import DocumentCandidatePanel from './components/DocumentCandidatePanel';
+import { useValidationManager } from './hooks/useValidationManager';
 import {
     processAuditResults,
     ZONA_TAB_ORDER,
@@ -23,6 +32,16 @@ import {
 } from './utils/auditSummary';
 import { LICITAI_APP_VERSION } from './appVersion.js';
 import { API_BASE } from './apiBase.js';
+// Interceptor global para atrapar caídas de servidor y evitar UI rota/ERR_EMPTY_RESPONSE
+axios.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (error.isAxiosError && (error.message === 'Network Error' || error.code === 'ERR_NETWORK')) {
+            window.dispatchEvent(new CustomEvent('server-connection-error'));
+        }
+        return Promise.reject(error);
+    }
+);
 
 /**
  * Claves `${sessionId}::${companyKey}` ya usadas para el bootstrap del chat (POST /chatbot/ask vacío).
@@ -31,7 +50,7 @@ import { API_BASE } from './apiBase.js';
 const chatProactiveBootstrapDoneKeys = new Set();
 
 const AGENTS_JOB_POLL_MS = 2500;
-const AGENTS_JOB_TIMEOUT_MS = 40 * 60 * 1000;
+const AGENTS_JOB_TIMEOUT_MS = 90 * 60 * 1000;
 
 /**
  * El backend responde 202 a POST /agents/process con job_id; el resultado real llega vía GET .../jobs/{id}/status.
@@ -47,7 +66,7 @@ const AGENTS_JOB_TIMEOUT_MS = 40 * 60 * 1000;
 async function pollAgentsJobUntilDone(jobId, onProgress) {
     const t0 = Date.now();
     while (Date.now() - t0 < AGENTS_JOB_TIMEOUT_MS) {
-        const st = await axios.get(`${API_BASE}/agents/jobs/${jobId}/status`, { timeout: 120000 });
+        const st = await axios.get(`${API_BASE}/agents/jobs/${jobId}/status`);
         if (!st.data?.success) {
             throw new Error(st.data?.message || 'No se pudo leer el estado del análisis.');
         }
@@ -99,14 +118,101 @@ function generationStageLabelEs(stage) {
 }
 
 /**
+ * True si hay pendientes `economic_validation_blocking` (corregir plantilla/Excel; no intake numérico).
+ * @param {Record<string, unknown>|null|undefined} data — `orchestrator.data`
+ */
+function orchestratorDataHasEconomicValidationBlocking(data) {
+    if (!data || typeof data !== 'object') return false;
+    for (const stage of Object.keys(data)) {
+        const r = data[stage];
+        if (!r || typeof r !== 'object') continue;
+        const miss = r.data?.missing ?? r.missing;
+        if (!Array.isArray(miss)) continue;
+        if (miss.some((m) => m && typeof m === 'object' && m.type === 'economic_validation_blocking')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function orchestratorDataHasDocumentQualityGateBlocking(data) {
+    if (!data || typeof data !== 'object') return false;
+    for (const stage of Object.keys(data)) {
+        const r = data[stage];
+        if (!r || typeof r !== 'object') continue;
+        const miss = r.data?.missing ?? r.missing;
+        if (!Array.isArray(miss)) continue;
+        if (miss.some((m) => m && typeof m === 'object' && m.type === 'document_quality_gate_blocking')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function buildDocumentQualityValidationEvents(results) {
+    const out = [];
+    if (!results || typeof results !== 'object') return out;
+    Object.keys(results).forEach((stage) => {
+        const r = results[stage];
+        const miss = r?.data?.missing ?? r?.missing;
+        if (!Array.isArray(miss)) return;
+        miss.forEach((m) => {
+            if (!m || typeof m !== 'object' || m.type !== 'document_quality_gate_blocking') return;
+            out.push({
+                error_type: 'document_quality_gate',
+                severity: 'block',
+                context: { stage, reason: m?.document_hint || '' },
+                ux: {
+                    title: m.label || 'Calidad documental insuficiente',
+                    user_message: m.question || m.document_hint || 'Revisa clasificación y evidencia antes de generar.',
+                    primary_action: { label: 'Revalidar', type: 'navigate', target: 'chat_pricing' },
+                    secondary_action: { label: 'Revisar detalle', type: 'navigate', target: 'validation_policy' },
+                    impact: 'Evita sobre-generación y documentos no exigibles por bases.',
+                },
+                _stage: stage,
+            });
+        });
+    });
+    return out;
+}
+
+function extractDocumentQualityGateSnapshot(orchestrator) {
+    const hintA = orchestrator?.agent_decision?.waiting_hints;
+    const hintB = orchestrator?.orchestrator_decision?.waiting_hints;
+    const hint = hintA && typeof hintA === 'object' ? hintA : hintB;
+    if (hint && typeof hint === 'object') {
+        return {
+            reason: String(hint.reason || ''),
+            metrics: hint.metrics && typeof hint.metrics === 'object' ? hint.metrics : {},
+        };
+    }
+
+    const data = orchestrator?.data;
+    if (data && typeof data === 'object') {
+        for (const stage of Object.keys(data)) {
+            const r = data[stage];
+            const gate = r?.data?.document_quality_gate || r?.document_quality_gate;
+            if (gate && typeof gate === 'object') {
+                return {
+                    reason: String(gate.reason || ''),
+                    metrics: gate.metrics && typeof gate.metrics === 'object' ? gate.metrics : {},
+                };
+            }
+        }
+    }
+    return null;
+}
+
+/**
  * Complementa el mensaje del backend cuando la generación queda en `waiting_for_data`
  * (Hito 4: `results.*.data.missing`, `missing_fields`, cola bloqueada).
  * @param {Record<string, unknown>|null|undefined} orchestrator — Cuerpo `result` del job o objeto equivalente.
- * @returns {string} Sufijo en markdown ligero (vacío si no hay datos extra).
+ * @returns {string} Sufijo en texto plano (vacío si no hay datos extra).
  */
 function formatGenerationWaitingExtra(orchestrator) {
     if (!orchestrator || typeof orchestrator !== 'object') return '';
     const parts = [];
+    const blockEconomicValidationUi = orchestratorDataHasEconomicValidationBlocking(orchestrator.data);
 
     const results = orchestrator.data;
     const stageOrder = [
@@ -123,15 +229,60 @@ function formatGenerationWaitingExtra(orchestrator) {
 
     const pushMissingForStage = (stage, miss) => {
         if (!Array.isArray(miss) || miss.length === 0) return;
+        const allEconomicPrice =
+            miss.length > 0 &&
+            miss.every((m) => m && typeof m === 'object' && m.type === 'economic_price');
+        if (allEconomicPrice) {
+            // Solo precios: el mensaje del backend + el chat bastan. Listar la cola aquí dispara ansiedad (madrugada / cierre).
+            return;
+        }
         const label = generationStageLabelEs(stage);
         const lines = miss.slice(0, 18).map((m) => {
             if (typeof m === 'string') return `• ${m}`;
             if (!m || typeof m !== 'object') return null;
+            // Las validaciones económicas ya se listan en `validation_events` con texto UX;
+            // repetir aquí el `question` duplica jerga (p. ej. "precios_positivos: …").
+            if (m.type === 'economic_validation_blocking') return null;
             const q = m.question || m.label || m.field;
             return q ? `• ${q}` : null;
         }).filter(Boolean);
         if (lines.length) {
-            parts.push(`**${label} — completar:**\n${lines.join('\n')}`);
+            parts.push(`${label} — completar:\n${lines.join('\n')}`);
+        }
+    };
+    const pushValidationEventsForStage = (stage, events) => {
+        if (!Array.isArray(events) || events.length === 0) return;
+        // Coherencia visual: con bloqueo de validación económica las tarjetas [REVISAR] bastan;
+        // no duplicar "Propuesta económica: • Precios…" en el cuerpo del chat (evita disonancia con intake).
+        if (
+            blockEconomicValidationUi &&
+            (stage === 'economic' || stage === 'economic_writer')
+        ) {
+            return;
+        }
+        const label = generationStageLabelEs(stage);
+        const lines = events
+            .slice(0, 10)
+            .map((ev) => {
+                if (!ev || typeof ev !== 'object') return null;
+                const ux = ev.ux && typeof ev.ux === 'object' ? ev.ux : {};
+                const title = ux.title || ev.error_type || 'Validación';
+                const sev = ev.severity || 'warn';
+                // La tarjeta [REVISAR] ya muestra el texto largo; no repetir el mismo muro en el chat.
+                if (sev === 'block') {
+                    if (ev.error_type === 'precios_positivos') {
+                        return '• Precios: revisa tu cotización o Excel (importes en cero o no válidos). Ajusta las partidas y pulsa Continuar para revalidar; el asistente puede orientarte en el chat.';
+                    }
+                    return `• ${title}: mira la tarjeta de arriba y sigue las instrucciones.`;
+                }
+                const msg = ux.user_message || ev.meta?.raw_message || '';
+                const impact = ux.impact ? ` (${ux.impact})` : '';
+                const short = msg.length > 200 ? `${msg.slice(0, 197).trim()}…` : msg;
+                return `• ${title}: ${short}${impact}`.trim();
+            })
+            .filter(Boolean);
+        if (lines.length) {
+            parts.push(`${label}:\n${lines.join('\n')}`);
         }
     };
 
@@ -142,6 +293,8 @@ function formatGenerationWaitingExtra(orchestrator) {
             processedStages.add(stage);
             const miss = r.data?.missing ?? r.missing;
             pushMissingForStage(stage, miss);
+            const events = r.data?.validation_events ?? r.validation_events;
+            pushValidationEventsForStage(stage, events);
         }
         for (const stage of Object.keys(results)) {
             if (processedStages.has(stage)) continue;
@@ -149,6 +302,8 @@ function formatGenerationWaitingExtra(orchestrator) {
             if (!r || typeof r !== 'object') continue;
             const miss = r.data?.missing ?? r.missing;
             pushMissingForStage(stage, miss);
+            const events = r.data?.validation_events ?? r.validation_events;
+            pushValidationEventsForStage(stage, events);
         }
     }
 
@@ -156,7 +311,7 @@ function formatGenerationWaitingExtra(orchestrator) {
         const mf = orchestrator.missing_fields;
         if (Array.isArray(mf) && mf.length) {
             parts.push(
-                '**Campos pendientes:**\n' + mf.slice(0, 24).map((k) => `• ${k}`).join('\n')
+                'Campos pendientes:\n' + mf.slice(0, 24).map((k) => `• ${k}`).join('\n')
             );
         }
     }
@@ -168,7 +323,7 @@ function formatGenerationWaitingExtra(orchestrator) {
             .filter((j) => j && j.status === 'blocked')
             .map((j) => generationStageLabelEs(j.id));
         if (blocked.length) {
-            parts.push(`**Cola de generación:** en pausa en — ${blocked.join(', ')}.`);
+            parts.push(`Cola de generación: en pausa en — ${blocked.join(', ')}.`);
         }
     }
 
@@ -349,6 +504,15 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
 };
 
 const App = () => {
+    // ESTADO GLOBAL: Conexión caída
+    const [isServerDisconnected, setIsServerDisconnected] = useState(false);
+
+    useEffect(() => {
+        const handleDisconnect = () => setIsServerDisconnected(true);
+        window.addEventListener('server-connection-error', handleDisconnect);
+        return () => window.removeEventListener('server-connection-error', handleDisconnect);
+    }, []);
+
     // 1. ESTADOS DE SESIÓN Y COMPAÑÍA (Carga inicial desde persistencia)
     const [sessionId, setSessionId] = useState(() => {
         const saved = localStorage.getItem('licit_session_id');
@@ -364,6 +528,8 @@ const App = () => {
     // 2. ESTADOS DE UI
     const [sources, setSources] = useState([]);
     const [auditResults, setAuditResults] = useState(null);
+    const [goNoGoResult, setGoNoGoResult] = useState(null);
+    const [showGoNoGoPanel, setShowGoNoGoPanel] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [isGenerating, setIsGenerating] = useState(false);
     const [reprocessingDocId, setReprocessingDocId] = useState(null);
@@ -374,6 +540,25 @@ const App = () => {
     const [generationResults, setGenerationResults] = useState(null);
     const [dragOffset, setDragOffset] = useState({ x: 30, y: 30 });
     const [isDragging, setIsDragging] = useState(false);
+    const [validationEvents, setValidationEvents] = useState([]);
+    const [validationBlockingCount, setValidationBlockingCount] = useState(0);
+    /** UI: bloqueo por validación económica (Excel/cotización), no intake numérico en chat. */
+    const [economicBlockingSessionLatch, setEconomicBlockingSessionLatch] = useState(false);
+    const [documentQualityBlockingSessionLatch, setDocumentQualityBlockingSessionLatch] = useState(false);
+    const [documentQualityGateSnapshot, setDocumentQualityGateSnapshot] = useState(null);
+    const [intakeUiSnapshot, setIntakeUiSnapshot] = useState(null);
+    const [validationBusy, setValidationBusy] = useState(false);
+    const [validationStartTs, setValidationStartTs] = useState(null);
+    const [validationClicks, setValidationClicks] = useState(0);
+    const [pendingJustificationEvent, setPendingJustificationEvent] = useState(null);
+    const [latestPriceProvenance, setLatestPriceProvenance] = useState(null);
+    const [showPriceProvenanceModal, setShowPriceProvenanceModal] = useState(false);
+    const [chatProvBadgeHover, setChatProvBadgeHover] = useState(null);
+    const [provenanceCardPulse, setProvenanceCardPulse] = useState(false);
+    const [provenanceModalAnimIn, setProvenanceModalAnimIn] = useState(false);
+    const [provenanceModalPrePulse, setProvenanceModalPrePulse] = useState(false);
+    const { acknowledgeWarning, submitJustification, trackValidationEvent } = useValidationManager(sessionId);
+    const [generationProgress, setGenerationProgress] = useState({ percent: 0, message: "" });
 
     // --- RESIZE STATES: Para anchos de páneles ajustables ---
     const [leftWidth, setLeftWidth] = useState(300);
@@ -383,7 +568,28 @@ const App = () => {
     const [isHoverLeft, setIsHoverLeft] = useState(false);
     const [isHoverRight, setIsHoverRight] = useState(false);
 
+    /**
+     * Fase C (cinturón A1): herramientas de sesión bajo el Dashboard, sin ocultar dictamen en columna izquierda.
+     * @type {'calendario' | 'post_junta' | 'economico' | 'calidad_docs' | 'avanzado'}
+     */
+    const [sessionToolsTab, setSessionToolsTab] = useState('calendario');
+
+    useEffect(() => {
+        setSessionToolsTab('calendario');
+        setIntakeUiSnapshot(null);
+    }, [sessionId]);
+
+    useEffect(() => {
+        if (
+            sessionToolsTab === 'avanzado' &&
+            import.meta.env.VITE_SHOW_VALIDATION_POLICY === 'false'
+        ) {
+            setSessionToolsTab('calendario');
+        }
+    }, [sessionToolsTab]);
+
     const fileInputRef = useRef(null);
+    const uploadAbortControllerRef = useRef(null);
     const chatEndRef = useRef(null);
     /** Solo para limpiar claves del Set de módulo al cambiar de sesión. */
     const prevSessionIdForChatBootstrapRef = useRef(null);
@@ -391,10 +597,20 @@ const App = () => {
     // --- HELPER: Inyectar guía del asistente en el chat ---
     const pushAssistantGuidance = (text, isGlow = false) => {
         const body = text || "⚠️ No se recibió mensaje del asistente.";
-        const botMsg = { sender: 'bot', text: body, isGlow: isGlow };
+        // Dedupe robusto: algunos flujos re-emiten el mismo mensaje con diferencias mínimas de whitespace.
+        const dedupeKey = String(body)
+            .replace(/\r\n/g, "\n")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .replace(/[ \t]{2,}/g, " ")
+            .trim();
+        const botMsg = { sender: 'bot', text: body, isGlow: isGlow, _dedupeKey: dedupeKey };
         setChatMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.sender === 'bot' && last?.text === body) return prev;
+            // Evitar duplicados inmediatos y duplicados repetidos en ráfaga (últimos 5).
+            const tail = prev.slice(Math.max(0, prev.length - 5));
+            if (tail.some((m) => m?.sender === 'bot' && (m?._dedupeKey || "").trim() === dedupeKey)) {
+                return prev;
+            }
             return [...prev, botMsg];
         });
         
@@ -404,10 +620,63 @@ const App = () => {
         }, 100);
     };
 
+    const updateIntakeUiSnapshotFromBotData = useCallback((botData) => {
+        if (!botData || typeof botData !== 'object') return;
+        if (!botData.intake_active) {
+            setIntakeUiSnapshot(null);
+            return;
+        }
+        const total = Number(botData.progress_total || 0);
+        if (!Number.isFinite(total) || total <= 0) {
+            setIntakeUiSnapshot(null);
+            return;
+        }
+        const current = Number(botData.progress_current || 0);
+        const safeCurrent = Number.isFinite(current) ? current : 0;
+        const summary = botData.intake_summary && typeof botData.intake_summary === 'object' ? botData.intake_summary : {};
+        const blockingCount = Number(summary.blocking_count ?? botData.blocking_count ?? 0) || 0;
+        setIntakeUiSnapshot({
+            progressCurrent: safeCurrent,
+            progressTotal: total,
+            progressLabel: String(botData.progress_label || `Pregunta ${safeCurrent} de ${total}`),
+            blockingCount,
+            remainingCount: Math.max(total - safeCurrent, 0),
+            isResumed: String(botData.tipo || '').includes('resume'),
+            auditMode: String(import.meta.env.VITE_DOCUMENT_FILL_GATE_MODE || 'audit').toLowerCase() === 'audit',
+        });
+    }, []);
+
     const clearExpertChat = () => {
         setChatMessages([]);
         setIsThinking(false);
+        setLatestPriceProvenance(null);
+        setChatProvBadgeHover(null);
     };
+
+    useEffect(() => {
+        if (!latestPriceProvenance) return;
+        setProvenanceCardPulse(true);
+        const t = setTimeout(() => setProvenanceCardPulse(false), 900);
+        return () => clearTimeout(t);
+    }, [latestPriceProvenance?.capturedAt]);
+
+    useEffect(() => {
+        if (!showPriceProvenanceModal) {
+            setProvenanceModalAnimIn(false);
+            setProvenanceModalPrePulse(false);
+            return;
+        }
+        setProvenanceModalAnimIn(false);
+        const id = requestAnimationFrame(() => {
+            setProvenanceModalAnimIn(true);
+        });
+        setProvenanceModalPrePulse(true);
+        const pulseT = setTimeout(() => setProvenanceModalPrePulse(false), 700);
+        return () => {
+            cancelAnimationFrame(id);
+            clearTimeout(pulseT);
+        };
+    }, [showPriceProvenanceModal]);
 
     // RESIZE & PERSISTENCIA
     useEffect(() => {
@@ -447,51 +716,42 @@ const App = () => {
         prevSessionIdForChatBootstrapRef.current = sessionId;
     }, [sessionId]);
 
-    // Tras elegir empresa: primera llamada al chat con query vacía (API ya lo permite) para mostrar pending_questions o mensaje guía.
-    useEffect(() => {
+    // Tras elegir empresa: llamada al chat con query vacía para mostrar pending_questions o mensaje guía.
+    const triggerChatbotBootstrap = useCallback(async (force = false) => {
         if (!sessionId) return;
-
-        // El bloqueo vive en el Set de módulo (fuera del componente).
-        // Se borra en F5 (permitiendo un nuevo saludo) pero persiste entre montajes de Strict Mode.
-        const key = `bootstrap::${sessionId}`;
-        if (chatProactiveBootstrapDoneKeys.has(key)) return;
+        const key = `bootstrap::${sessionId}::${selectedCompanyId || 'no-company'}`;
+        if (!force && chatProactiveBootstrapDoneKeys.has(key)) return;
         chatProactiveBootstrapDoneKeys.add(key);
 
-        console.log(`[LicitAI] Chat Bootstrap iniciado para: ${sessionId}`);
+        console.log(`[LicitAI] Chat Bootstrap iniciado para: ${sessionId} (force=${force})`);
 
-        let cancelled = false;
-        (async () => {
-            try {
-                const res = await axios.post(`${API_BASE}/chatbot/ask`, {
-                    query: '',
-                    session_id: sessionId,
-                    company_id: selectedCompanyId || null,
-                });
-                if (cancelled) return;
-                const text = (res.data?.reply || '').trim();
-                if (!text) return;
-                
-                setChatMessages((prev) => {
-                    // Evitar duplicidad visual total mediante chequeo de contenido en todo el historial reciente.
-                    if (prev.some(m => m.text === text)) return prev;
-                    
-                    const glow = text.includes('📋') || text.includes('**') || text.includes('✨');
-                    const updated = [...prev, { sender: 'bot', text, isGlow: glow }];
-                    
-                    setTimeout(() => {
-                        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-                    }, 100);
-                    
-                    return updated;
-                });
-            } catch (err) {
-                console.warn('[LicitAI] Error en bootstrap del chat:', err);
-            }
-        })();
-        return () => {
-            cancelled = true;
-        };
-    }, [sessionId]);
+        try {
+            const res = await axios.post(`${API_BASE}/chatbot/ask`, {
+                query: '',
+                session_id: sessionId,
+                company_id: selectedCompanyId || null,
+            });
+            updateIntakeUiSnapshotFromBotData(res.data?.data || {});
+            const text = (res.data?.reply || '').trim();
+            if (!text) return;
+            
+            setChatMessages((prev) => {
+                if (prev.some(m => m.text === text)) return prev;
+                const glow = text.includes('📋') || text.includes('**') || text.includes('✨') || text.includes('|');
+                const updated = [...prev, { sender: 'bot', text, isGlow: glow }];
+                setTimeout(() => {
+                    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                }, 100);
+                return updated;
+            });
+        } catch (err) {
+            console.warn('[LicitAI] Error en bootstrap del chat:', err);
+        }
+    }, [sessionId, selectedCompanyId, updateIntakeUiSnapshotFromBotData]);
+
+    useEffect(() => {
+        triggerChatbotBootstrap();
+    }, [sessionId, selectedCompanyId, triggerChatbotBootstrap]);
 
 
 
@@ -520,7 +780,19 @@ const App = () => {
     // CARGA INICIAL (Solo si hay sesión)
     useEffect(() => {
         if (sessionId) {
-            // NO limpiamos sources aquí para evitar el flash de lista vacía.
+            // Limpiar estados de la sesión anterior para evitar fugas visuales (Data Leak / Hallucination UX)
+            setAuditResults(null);
+            setGenerationResults(null);
+            setGoNoGoResult(null);
+            setShowGoNoGoPanel(false);
+            setChatMessages([]);
+            setValidationEvents([]);
+            setIntakeUiSnapshot(null);
+            setDocumentQualityGateSnapshot(null);
+            setDocumentQualityBlockingSessionLatch(false);
+            setLatestPriceProvenance(null);
+
+            // Carga real de la nueva sesión
             fetchCompanies();
             fetchSources();
             fetchSessionName();
@@ -574,6 +846,36 @@ const App = () => {
                     enriched = { ...enriched, pipelineTelemetry: inferredTelem };
                 }
                 setAuditResults(applyInfrastructureUxOverrides(enriched));
+
+                const persistedQualityHints = res.data.data.last_document_quality_waiting_hints;
+                if (persistedQualityHints && typeof persistedQualityHints === "object") {
+                    setDocumentQualityGateSnapshot({
+                        reason: String(persistedQualityHints.reason || ""),
+                        metrics:
+                            persistedQualityHints.metrics &&
+                            typeof persistedQualityHints.metrics === "object"
+                                ? persistedQualityHints.metrics
+                                : {},
+                    });
+                    setDocumentQualityBlockingSessionLatch(true);
+                } else {
+                    setDocumentQualityGateSnapshot(null);
+                    setDocumentQualityBlockingSessionLatch(false);
+                }
+            } else {
+                setAuditResults(null);
+                setDocumentQualityGateSnapshot(null);
+                setDocumentQualityBlockingSessionLatch(false);
+            }
+
+            // Cargar go_no_go_result si el pipeline está en GO_NO_GO_PENDING
+            if (res.data.success && res.data.data.go_no_go_result) {
+                const gng = res.data.data.go_no_go_result;
+                const stopReason = res.data.data.stop_reason;
+                if (gng && stopReason === 'GO_NO_GO_PENDING') {
+                    setGoNoGoResult(gng);
+                    setShowGoNoGoPanel(true);
+                }
             }
         } catch (err) {
             console.error("Error fetching dictamen from Postgres:", err);
@@ -594,7 +896,22 @@ const App = () => {
     const fetchCompanies = async () => {
         try {
             const res = await axios.get(`${API_BASE}/companies/`);
-            setCompanies(res.data.data || []);
+            const companiesList = res.data.data || [];
+            setCompanies(companiesList);
+            
+            // Validar que selectedCompanyId exista en el catálogo
+            if (selectedCompanyId && companiesList.length > 0) {
+                const exists = companiesList.some(c => c.id === selectedCompanyId);
+                if (!exists) {
+                    console.warn(`[LicitAI] Empresa "${selectedCompanyId}" no existe en catálogo; limpiando selección.`);
+                    setSelectedCompanyId('');
+                    localStorage.removeItem('licitai_selected_company');
+                    pushAssistantGuidance(
+                        '⚠️ La empresa previamente seleccionada ya no está disponible. Por favor, selecciona una empresa válida en el menú superior o créala en la vista de Empresas.',
+                        true
+                    );
+                }
+            }
         } catch (err) {
             console.error("Error fetching companies:", err);
         }
@@ -605,17 +922,38 @@ const App = () => {
         if (files.length === 0) return;
 
         setIsAnalyzing(true);
+        uploadAbortControllerRef.current = new AbortController();
+        const signal = uploadAbortControllerRef.current.signal;
 
         for (const file of files) {
+            // Verificar si el usuario canceló manualmente antes de procesar el siguiente archivo
+            if (signal.aborted) break;
+
             const formData = new FormData();
             formData.append('file', file);
             formData.append('session_id', sessionId);
             
             try {
-                // PASO 1: Subir archivo al servidor
-                setAuditProgress({ percent: 10, currentFile: `📤 Subiendo ${file.name}...` });
-                const uploadRes = await axios.post(`${API_BASE}/upload/upload`, formData);
-                
+                // PASO 1: Subir archivo
+                setAuditProgress({ percent: 0, currentFile: `📤 Subiendo ${file.name}… 0%` });
+                const uploadRes = await axios.post(`${API_BASE}/upload/upload`, formData, {
+                    signal,
+                    onUploadProgress: (ev) => {
+                        const total = ev.total;
+                        const loaded = ev.loaded;
+                        let pct = 0;
+                        if (total && total > 0) {
+                            pct = Math.min(99, Math.round((loaded * 100) / total));
+                        } else if (file.size > 0) {
+                            pct = Math.min(99, Math.round((loaded * 100) / file.size));
+                        }
+                        setAuditProgress({
+                            percent: pct,
+                            currentFile: `📤 Subiendo ${file.name}… ${pct}%`,
+                        });
+                    },
+                });
+
                 if (!uploadRes.data.success) {
                     console.error("Error en upload:", uploadRes.data.message);
                     continue;
@@ -627,15 +965,23 @@ const App = () => {
                     continue;
                 }
 
-                // PASO 2: Disparar extracción OCR + indexación vectorial
-                setAuditProgress({ percent: 40, currentFile: `🔍 Extrayendo texto de ${file.name}...` });
+                setAuditProgress({
+                    percent: 100,
+                    currentFile: `📤 Subida completa: ${file.name}. Extrayendo texto…`,
+                });
+
+                // PASO 2: Disparar extracción OCR + indexación vectorial (sin progreso fino en navegador)
+                setAuditProgress({ percent: 45, currentFile: `🔍 Extrayendo texto de ${file.name}…` });
                 const formDataProcess = new FormData();
                 formDataProcess.append('session_id', sessionId);
                 
                 const processRes = await axios.post(
                     `${API_BASE}/upload/process/${doc_id}`,
                     formDataProcess,
-                    { timeout: 600000 }
+                    { 
+                        signal,
+                        timeout: 600000 
+                    }
                 );
 
                 if (processRes.data.success) {
@@ -653,7 +999,26 @@ const App = () => {
         
         await fetchSources();
         setIsAnalyzing(false);
+        uploadAbortControllerRef.current = null;
         setAuditProgress({ percent: 0, currentFile: "" });
+        if (e?.target) {
+            e.target.value = "";
+        }
+    };
+
+    const handleCancelUpload = async () => {
+        if (uploadAbortControllerRef.current) {
+            uploadAbortControllerRef.current.abort();
+        }
+        try {
+            // Avisar al backend para que detenga el procesamiento interno
+            await axios.post(`${API_BASE}/upload/cancel/${sessionId}`);
+        } catch (err) {
+            console.warn("Error al notificar cancelación al backend:", err);
+        }
+        setIsAnalyzing(false);
+        setAuditProgress({ percent: 0, currentFile: "Carga cancelada por el usuario." });
+        setTimeout(() => setAuditProgress({ percent: 0, currentFile: "" }), 2000);
     };
 
 
@@ -705,7 +1070,10 @@ const App = () => {
         try {
             const formData = new FormData();
             formData.append('session_id', sessionId);
-            await axios.post(
+            if (selectedCompanyId) {
+                formData.append('company_id', selectedCompanyId);
+            }
+            const resp = await axios.post(
                 `${API_BASE}/upload/process/${docId}?force=true`,
                 formData,
                 { timeout: 600000 }
@@ -713,8 +1081,11 @@ const App = () => {
             setAuditProgress({ percent: 100, currentFile: `✅ ${docName || 'Documento'} reindexado` });
             await fetchSources();
             setTimeout(() => setAuditProgress({ percent: 0, currentFile: '' }), 1600);
+            const backendMsg = resp?.data?.message;
             pushAssistantGuidance(
-                `Listo: «${docName || docId}» se reprocesó (vectores y, si es Excel, partidas económicas). Pulsa «Actualizar análisis» cuando quieras refrescar el dictamen.`,
+                typeof backendMsg === 'string' && backendMsg.trim()
+                    ? backendMsg
+                    : `Listo: «${docName || docId}» se reprocesó (vectores y, si es Excel, partidas económicas). Pulsa «Actualizar análisis» cuando quieras refrescar el dictamen.`,
                 false
             );
         } catch (err) {
@@ -732,6 +1103,10 @@ const App = () => {
     };
 
     const triggerFullAudit = async () => {
+        // Limpiar bloqueo de bootstrap para que el asistente vuelva a hablar tras el nuevo análisis
+        const bootstrapKey = `bootstrap::${sessionId}::${selectedCompanyId || 'no-company'}`;
+        chatProactiveBootstrapDoneKeys.delete(bootstrapKey);
+
         setIsAnalyzing(true);
         setAuditProgress({ percent: 10, currentFile: "Iniciando Auditoría..." });
 
@@ -748,8 +1123,6 @@ const App = () => {
                 company_id: selectedCompanyId || null,
                 company_data: { "mode": "analysis_only" }
             });
-
-            clearInterval(pulseInterval);
 
             const encolado = res.data?.data;
             let orchestrator = null;
@@ -781,6 +1154,24 @@ const App = () => {
             }
 
             if (orchestrator?.data) {
+                // Detectar GO_NO_GO_PENDING antes de procesar como dictamen normal
+                const stopReason = orchestrator?.agent_decision?.stop_reason;
+                if (stopReason === 'GO_NO_GO_PENDING' || orchestrator?.status === 'go_no_go_pending') {
+                    const gngResult = orchestrator?.go_no_go_result 
+                        || orchestrator?.data?.go_no_go_result
+                        || orchestrator?.data?.go_no_go;
+                    if (gngResult) {
+                        setGoNoGoResult(gngResult);
+                        setShowGoNoGoPanel(true);
+                        setAuditProgress({ percent: 0, currentFile: '' });
+                        pushAssistantGuidance(
+                            `⚠️ Se detectaron brechas críticas entre tu perfil de empresa y los requisitos de las bases. Revisa el Semáforo Go/No-Go y decide si continuar o detener el proceso.`,
+                            true
+                        );
+                        return;
+                    }
+                }
+
                 const auditPayload = {
                     ...orchestrator.data,
                     ...(orchestrator.agent_decision && typeof orchestrator.agent_decision === 'object'
@@ -822,7 +1213,7 @@ const App = () => {
                     : [];
                 if (gapAlerts.length) {
                     waitMsg +=
-                        '\n\n**Avisos de bases y partidas (revisar antes de cotizar):**\n' +
+                        '\n\nAvisos de bases y partidas (revisar antes de cotizar):\n' +
                         gapAlerts.slice(0, 8).map((x) => `• ${x}`).join('\n');
                 }
                 pushAssistantGuidance(waitMsg, true);
@@ -845,9 +1236,12 @@ const App = () => {
             await new Promise((r) => setTimeout(r, 700));
 
             await fetchSources();
+            // Disparar bootstrap del chatbot tras completar el análisis
+            if (sessionId && selectedCompanyId) {
+                setTimeout(() => triggerChatbotBootstrap(true), 1200);
+            }
 
         } catch (err) {
-            clearInterval(pulseInterval);
             console.error("Audit error:", err);
             setAuditProgress((prev) => ({
                 ...prev,
@@ -857,33 +1251,58 @@ const App = () => {
             await new Promise((r) => setTimeout(r, 450));
             alert(err?.message || "Error durante la auditoría. Revisa el backend.");
         } finally {
+            clearInterval(pulseInterval);
             setIsAnalyzing(false);
             setAuditProgress({ percent: 0, currentFile: "" });
         }
     };
 
     const triggerGeneration = async () => {
+        if (isAnalyzing) {
+            pushAssistantGuidance(
+                "⏳ El análisis sigue en curso. Espera a que termine para generar propuesta y evitar inconsistencias.",
+                true
+            );
+            return;
+        }
         if (!selectedCompanyId) {
-            alert("Selecciona una empresa en la barra superior para guardar tus datos.");
+            pushAssistantGuidance(
+                "⚠️ Para generar la propuesta necesito que selecciones una empresa en el menú superior. Si aún no tienes empresas registradas, ve a la vista 'Empresas' desde la pantalla principal.",
+                true
+            );
             return;
         }
 
-        setGenerationResults(null); 
+        setGenerationResults(null);
+        setEconomicBlockingSessionLatch(false);
+        setDocumentQualityGateSnapshot(null);
         pushAssistantGuidance("🚀 Validando expediente y preparando documentos...", false);
         setIsGenerating(true);
+        setGenerationProgress({ percent: 0, message: "Encolando trabajo de generación..." });
 
         try {
             const res = await axios.post(`${API_BASE}/agents/process`, {
                 session_id: sessionId,
                 company_id: selectedCompanyId,
-                company_data: { "mode": "generation_only" }
+                resume_generation: true,
+                company_data: { ...(companies.find(c => c.id === selectedCompanyId) || {}), "mode": "generation_only" }
             });
 
             const encolado = res.data?.data;
             let orchestrator = null;
 
             if (encolado?.job_id) {
-                orchestrator = await pollAgentsJobUntilDone(encolado.job_id);
+                orchestrator = await pollAgentsJobUntilDone(encolado.job_id, (u) => {
+                    setGenerationProgress((prev) => {
+                        const msg = u.message || prev.message || "Procesando propuesta…";
+                        let pct = prev.percent;
+                        if (typeof u.pct === "number" && !Number.isNaN(u.pct)) {
+                            const p = Math.max(0, Math.min(100, u.pct));
+                            pct = Math.max(prev.percent, p);
+                        }
+                        return { percent: pct, message: msg };
+                    });
+                });
             } else if (encolado) {
                 orchestrator = {
                     status: res.data.status,
@@ -896,25 +1315,222 @@ const App = () => {
             }
 
             const orchStatus = orchestrator?.status;
-            if (orchStatus === "waiting_for_data") {
+            const stopReason = orchestrator?.agent_decision?.stop_reason;
+            if (stopReason === "GO_NO_GO_PENDING" || orchStatus === "go_no_go_pending") {
+                const gngResult = orchestrator?.go_no_go_result
+                    || orchestrator?.data?.go_no_go_result
+                    || orchestrator?.data?.go_no_go;
+                if (gngResult) {
+                    setGoNoGoResult(gngResult);
+                    setShowGoNoGoPanel(true);
+                    pushAssistantGuidance(
+                        "⚠️ La generación quedó en pausa por Go/No-Go. Revisa el semáforo y autoriza continuar para que se materialice el expediente descargable.",
+                        true
+                    );
+                } else {
+                    pushAssistantGuidance(
+                        "La generación quedó en pausa por Go/No-Go, pero no se recibió el detalle del semáforo. Reintenta y revisa logs del backend.",
+                        true
+                    );
+                }
+                setGenerationProgress({ percent: 0, message: "Pausado: pendiente autorización Go/No-Go" });
+                setValidationEvents([]);
+                setValidationBlockingCount(0);
+                setEconomicBlockingSessionLatch(false);
+                setDocumentQualityBlockingSessionLatch(false);
+                return;
+            } else if (orchStatus === "waiting_for_data") {
                 const baseMsg =
                     orchestrator?.chatbot_message || WAITING_FOR_DATA_FALLBACK_GENERATION_ES;
+                const latchOn = orchestratorDataHasEconomicValidationBlocking(orchestrator?.data);
+                const qualityLatchOn = orchestratorDataHasDocumentQualityGateBlocking(orchestrator?.data);
+                const qualitySnapshot = extractDocumentQualityGateSnapshot(orchestrator);
+                setEconomicBlockingSessionLatch(!!latchOn);
+                setDocumentQualityBlockingSessionLatch(!!qualityLatchOn);
+                setDocumentQualityGateSnapshot(qualitySnapshot);
                 pushAssistantGuidance(baseMsg + formatGenerationWaitingExtra(orchestrator), true);
+                const events = [];
+                const results = orchestrator?.data;
+                if (results && typeof results === "object") {
+                    Object.keys(results).forEach((stage) => {
+                        const r = results[stage];
+                        const stageEvents = r?.data?.validation_events || r?.validation_events;
+                        if (Array.isArray(stageEvents)) {
+                            stageEvents.forEach((ev) => events.push({ ...ev, _stage: stage }));
+                        }
+                    });
+                }
+                buildDocumentQualityValidationEvents(results).forEach((ev) => events.push(ev));
+                setValidationEvents(events);
+                setValidationBlockingCount(events.filter((ev) => ev?.severity === "block").length);
+                setValidationStartTs(Date.now());
+                setValidationClicks(0);
+                for (const ev of events) {
+                    trackValidationEvent({
+                        event: "validation_triggered",
+                        session_id: sessionId,
+                        error_type: ev.error_type,
+                        severity: ev.severity,
+                        item_id: ev?.context?.item_id,
+                    }).catch(() => {});
+                }
             } else if (orchStatus === "success") {
                 setGenerationResults(orchestrator.data || orchestrator);
-                pushAssistantGuidance("✅ Documentos generados con éxito. Puedes revisarlos en el panel de expedientes.", false);
+                // Req 6.3: No mostrar mensaje de éxito ambiguo si aún hay pending_questions activas.
+                // El intakeUiSnapshot refleja si el flujo de preguntas sigue activo.
+                const hasPendingIntake = intakeUiSnapshot && intakeUiSnapshot.progressTotal > 0 && intakeUiSnapshot.remainingCount > 0;
+                if (hasPendingIntake) {
+                    pushAssistantGuidance(
+                        "✅ Documentos generados. Aún quedan datos pendientes del expediente — el asistente continuará solicitándolos para completar el perfil.",
+                        false
+                    );
+                } else {
+                    pushAssistantGuidance("✅ Documentos generados con éxito. Revisa la sección 'Logística y Expedientes' (panel derecho) para descargar los archivos.", false);
+                }
+                setEconomicBlockingSessionLatch(false);
+                setDocumentQualityBlockingSessionLatch(false);
+                setDocumentQualityGateSnapshot(null);
+                setValidationEvents([]);
+                setValidationBlockingCount(0);
+                setGenerationProgress({ percent: 100, message: "Generación completada" });
             } else if (orchStatus === "error") {
                 pushAssistantGuidance(
                     orchestrator?.chatbot_message || "No se pudo completar la generación. Revisa el backend o vuelve a intentar.",
                     true
                 );
+                setEconomicBlockingSessionLatch(false);
+                setDocumentQualityBlockingSessionLatch(false);
+                setDocumentQualityGateSnapshot(null);
+                setValidationEvents([]);
+                setValidationBlockingCount(0);
+                setGenerationProgress({ percent: 0, message: "Error durante la generación" });
             }
 
         } catch (err) {
             console.error("Generation error:", err);
-            alert(err?.message || "Error en la generación.");
+            setEconomicBlockingSessionLatch(false);
+            setDocumentQualityBlockingSessionLatch(false);
+            setDocumentQualityGateSnapshot(null);
+            pushAssistantGuidance(
+                err?.message?.includes("timeout")
+                    ? "La generación está tardando más de lo esperado, pero el servidor puede seguir trabajando. Revisa el panel central y vuelve a intentar si no ves cambios en unos minutos."
+                    : (err?.message || "Error en la generación. Revisa el backend o vuelve a intentar."),
+                true
+            );
         } finally {
             setIsGenerating(false);
+            setTimeout(() => {
+                setGenerationProgress((prev) => ({ ...prev, percent: 0 }));
+            }, 2000);
+        }
+    };
+
+    const handleValidationPrimaryAction = async (event) => {
+        setValidationClicks((n) => n + 1);
+        const action = event?.ux?.primary_action || {};
+        const target = action?.target;
+        if (target) {
+            pushAssistantGuidance(`Abre la seccion objetivo para corregir: ${target}`, false);
+        } else {
+            pushAssistantGuidance("Revisa y corrige el dato indicado para continuar.", false);
+        }
+    };
+
+    const refreshValidationState = async () => {
+        if (!sessionId) return;
+        try {
+            const prevBlockingCount = validationBlockingCount;
+            const res = await axios.post(
+                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/validation-events/revalidate`
+            );
+            const data = res?.data?.data || {};
+            const events = Array.isArray(data.validation_events) ? data.validation_events : [];
+            const nextBlockingCount = Number(data.blocking_count || 0);
+            setValidationEvents(events);
+            setValidationBlockingCount(nextBlockingCount);
+            if (prevBlockingCount > 0 && nextBlockingCount === 0) {
+                await trackValidationEvent({
+                    event: "block_resolved",
+                    session_id: sessionId,
+                    error_type: "validation_blocks",
+                    severity: "block",
+                    resolution_time_ms: validationStartTs ? Date.now() - validationStartTs : undefined,
+                    clicks_to_fix: validationClicks,
+                }).catch(() => {});
+            }
+            if (nextBlockingCount === 0) {
+                setEconomicBlockingSessionLatch(false);
+                setDocumentQualityBlockingSessionLatch(false);
+                if (events.length === 0) {
+                    pushAssistantGuidance("Validaciones bloqueantes resueltas en backend. Puedes continuar.", false);
+                }
+            }
+        } catch (err) {
+            console.warn("No se pudo refrescar estado de validaciones:", err);
+        }
+    };
+
+    const handleValidationSecondaryAction = async (event) => {
+        if (!event) return;
+        const action = event?.ux?.secondary_action || {};
+        setValidationClicks((n) => n + 1);
+        setValidationBusy(true);
+        try {
+            if (action?.requires_justification) {
+                setPendingJustificationEvent(event);
+                return;
+            } else {
+                await acknowledgeWarning({
+                    errorType: event.error_type,
+                    itemId: event?.context?.item_id,
+                });
+                await trackValidationEvent({
+                    event: "warning_acknowledged",
+                    session_id: sessionId,
+                    error_type: event.error_type,
+                    severity: event.severity,
+                    resolution_time_ms: validationStartTs ? Date.now() - validationStartTs : undefined,
+                    item_id: event?.context?.item_id,
+                });
+                pushAssistantGuidance("Advertencia reconocida en sesion.", false);
+                await refreshValidationState();
+            }
+        } catch (err) {
+            console.error("Error gestionando accion de validacion:", err);
+            pushAssistantGuidance("No se pudo guardar la accion de validacion. Intenta de nuevo.", true);
+        } finally {
+            setValidationBusy(false);
+        }
+    };
+
+    const handleJustificationConfirm = async (reason) => {
+        const event = pendingJustificationEvent;
+        if (!event) return;
+        setValidationBusy(true);
+        try {
+            const action = event?.ux?.secondary_action || {};
+            await submitJustification({
+                actionId: action.type || action.label || "secondary_action",
+                reason,
+                itemId: event?.context?.item_id,
+                errorType: event?.error_type,
+            });
+            await trackValidationEvent({
+                event: "justification_submitted",
+                session_id: sessionId,
+                error_type: event.error_type,
+                severity: event.severity,
+                justification_length: reason.length,
+                item_id: event?.context?.item_id,
+            });
+            pushAssistantGuidance("Justificacion guardada. Revalidando estado...", false);
+            await refreshValidationState();
+        } catch (err) {
+            console.error("Error guardando justificacion:", err);
+            pushAssistantGuidance("No se pudo guardar la justificacion.", true);
+        } finally {
+            setValidationBusy(false);
+            setPendingJustificationEvent(null);
         }
     };
 
@@ -930,37 +1546,117 @@ const App = () => {
 
         const userMsg = { sender: 'user', text: chatInput };
         setChatMessages(prev => [...prev, userMsg]);
+        const queryText = chatInput;
         setChatInput("");
         setIsThinking(true);
 
+        const pollChatbot = async (query, isRetry = false) => {
+            try {
+                const res = await axios.post(`${API_BASE}/chatbot/ask`, {
+                    query: query,
+                    session_id: sessionId,
+                    company_id: selectedCompanyId
+                });
+                
+                // Si el backend dice 'pending', esperamos y reintentamos (Compliance Gate)
+                if (res.data?.status === 'pending') {
+                    const botData = res.data?.data || {};
+                    const msg = res.data?.message || "Analizando bases de licitación...";
+                    // Opcional: mostrar un mensaje temporal de "procesando" si es la primera vez
+                    if (!isRetry) {
+                        setChatMessages(prev => [...prev, { sender: 'bot', text: msg, isPending: true }]);
+                    }
+                    setTimeout(() => pollChatbot(query, true), 3000);
+                    return;
+                }
+
+                // Si veníamos de un retry, removemos el mensaje de "pending" previo
+                if (isRetry) {
+                    setChatMessages(prev => prev.filter(m => !m.isPending));
+                }
+
+                const botData = res.data?.data || {};
+                updateIntakeUiSnapshotFromBotData(botData);
+                const botMsg = { 
+                    sender: 'bot', 
+                    text: botData.respuesta || res.data.reply,
+                    citations: botData.citas || res.data.citations || [],
+                    confidence: botData.confianza || res.data.confidence,
+                    tipo: botData.tipo,
+                    suggestedActions: res.data.suggested_actions || [],
+                    isGlow: botData.tipo === 'data_saved' || botData.tipo === 'pending_question' || botData.tipo === 'economic_price_provenance'
+                };
+                setChatMessages(prev => [...prev, botMsg]);
+                if (botData.tipo === 'economic_price_provenance') {
+                    setLatestPriceProvenance({
+                        text: botData.respuesta || res.data.reply || '',
+                        confidence: botData.confianza || res.data.confidence || 'Media',
+                        capturedAt: new Date().toLocaleString('es-MX'),
+                    });
+                }
+
+                const updatedGng = botData.go_no_go_result || res.data?.data?.go_no_go_result;
+                if (updatedGng) {
+                    setGoNoGoResult(updatedGng);
+                    if (!showGoNoGoPanel) setShowGoNoGoPanel(true);
+                }
+                
+                setTimeout(() => {
+                    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                }, 100);
+
+            } catch (err) {
+                console.error("Chat error:", err);
+                setChatMessages(prev => prev.filter(m => !m.isPending));
+                pushAssistantGuidance("Lo siento, hubo un error al procesar tu mensaje. Por favor intenta de nuevo.", true);
+            } finally {
+                if (!isRetry) setIsThinking(false);
+            }
+        };
+
+        await pollChatbot(queryText);
+    };
+
+    /** Tras guardar un bloque económico: sincroniza cola de pendientes y semáforo con el mismo bootstrap que el chat. */
+    const handleBlockResolutionSaved = useCallback(async () => {
+        if (!sessionId) return;
         try {
             const res = await axios.post(`${API_BASE}/chatbot/ask`, {
-                query: chatInput,
+                query: '',
                 session_id: sessionId,
-                company_id: selectedCompanyId
+                company_id: selectedCompanyId || null,
             });
-            
+            const text = (res.data?.reply || '').trim();
+            if (text) {
+                setChatMessages((prev) => {
+                    const t = text.replace(/\s+/g, ' ').trim();
+                    if (prev.some((m) => m.sender === 'bot' && (m.text || '').replace(/\s+/g, ' ').trim() === t)) {
+                        return prev;
+                    }
+                    const glow = text.includes('📋') || text.includes('**') || text.includes('✨');
+                    return [...prev, { sender: 'bot', text, isGlow: glow }];
+                });
+            }
             const botData = res.data?.data || {};
-            const botMsg = { 
-                sender: 'bot', 
-                text: botData.respuesta || res.data.reply,
-                citations: botData.citas || res.data.citations || [],
-                confidence: botData.confianza || res.data.confidence,
-                isGlow: botData.tipo === 'data_saved' || botData.tipo === 'pending_question'
-            };
-            setChatMessages(prev => [...prev, botMsg]);
-            
-            // Auto-scroll
-            setTimeout(() => {
-                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-            }, 100);
-
-        } catch (err) {
-            console.error("Chat error:", err);
-        } finally {
-            setIsThinking(false);
+            updateIntakeUiSnapshotFromBotData(botData);
+            const updatedGng = botData.go_no_go_result || res.data?.data?.go_no_go_result;
+            if (updatedGng) {
+                setGoNoGoResult(updatedGng);
+                setShowGoNoGoPanel(true);
+            }
+        } catch (e) {
+            console.error('refresh after block save', e);
+            setChatMessages((prev) => [
+                ...prev,
+                {
+                    sender: 'bot',
+                    text: 'Precios del bloque guardados. Si no ves la cola actualizada, escribe un mensaje al asistente.',
+                    isGlow: false,
+                },
+            ]);
         }
-    };
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
+    }, [sessionId, selectedCompanyId, updateIntakeUiSnapshotFromBotData]);
 
     // --- VISTA DE SELECCIÓN ---
     if (!sessionId) {
@@ -978,7 +1674,9 @@ const App = () => {
                     onClick={() => setSessionId(null)}
                     style={{ cursor: 'pointer', minWidth: 0, flex: '0 1 auto' }}
                 >
-                    <div className="brand-logo"><Shield size={20} color="white" /></div>
+                    <div className="brand-logo" style={{ background: 'none', boxShadow: 'none', width: 'auto', height: 'auto' }}>
+                        <img src="/images/logo_licitAI.png" alt="Logo" style={{ height: '28px', objectFit: 'contain' }} />
+                    </div>
                     <span className="brand-name">LicitAI</span>
                     <span
                         className="brand-session-meta"
@@ -1030,6 +1728,29 @@ const App = () => {
                     </button>
                 </div>
             </header>
+
+            {/* BANNER: Aviso cuando no hay empresa seleccionada */}
+            {!selectedCompanyId && companies.length > 0 && (
+                <div style={{
+                    background: 'rgba(249, 212, 35, 0.1)',
+                    borderBottom: '1px solid rgba(249, 212, 35, 0.3)',
+                    padding: '12px 20px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    fontSize: '13px',
+                    color: 'var(--warning)'
+                }}>
+                    <Info size={18} />
+                    <span>
+                        <strong>Selecciona una empresa</strong> en el menú superior para continuar. 
+                        Si aún no tienes empresas, <span 
+                            style={{ textDecoration: 'underline', cursor: 'pointer' }}
+                            onClick={() => setSessionId(null)}
+                        >regresa al menú principal</span> y ve a la vista "Empresas".
+                    </span>
+                </div>
+            )}
 
             <main style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
                 
@@ -1166,34 +1887,6 @@ const App = () => {
                         ))}
                     </div>
 
-                    <SubmissionChecklistPanel
-                        sessionId={sessionId}
-                        syncKey={auditResults?.fechaAuditoria || ''}
-                        onAskAboutHito={(h) => {
-                            const q = `Según las bases de esta licitación, ¿qué debo cumplir respecto al hito «${h.nombre}»? Contexto: ${h.fecha_texto_raw || 'sin fecha textual'}.`;
-                            setChatInput(q);
-                        }}
-                    />
-
-                    <PostClarificationPanel
-                        sessionId={sessionId}
-                        sources={sources}
-                        syncKey={auditResults?.fechaAuditoria || ''}
-                        onAskAboutActa={(ctx) => {
-                            const q = `Ayúdame a revisar el borrador de carta 33 Bis y las preguntas Anexo 10. Estado: ${ctx?.estado || 'N/D'}, confianza de extracción: ${ctx?.confianza_extraccion ?? 'N/D'}.`;
-                            setChatInput(q);
-                        }}
-                    />
-
-                    <EconomicValidationPanel
-                        sessionId={sessionId}
-                        syncKey={auditResults?.fechaAuditoria || ''}
-                        onAskAboutValidation={(val) => {
-                            const q = `Revisemos las validaciones económicas. Perfil: ${val?.perfil_usado || 'N/D'}. Bloqueos: ${(val?.blocking_issues || []).length}. ¿Qué debo corregir primero?`;
-                            setChatInput(q);
-                        }}
-                    />
-
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                         <button 
                             disabled={isAnalyzing} 
@@ -1214,22 +1907,92 @@ const App = () => {
                         )}
 
                         <button 
-                            disabled={isGenerating} 
+                            disabled={isGenerating || isAnalyzing || !selectedCompanyId} 
                             onClick={triggerGeneration} 
-                            style={{ width: '100%', padding: '12px', borderRadius: '12px', background: 'linear-gradient(135deg, var(--primary), var(--secondary))', border: 'none', color: '#fff', fontWeight: 800, fontSize: '12px', cursor: isGenerating ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', boxShadow: '0 4px 15px var(--primary-glow)' }}
+                            title={
+                                isAnalyzing
+                                    ? 'Espera a que termine el análisis para generar la propuesta'
+                                    : !selectedCompanyId
+                                        ? 'Selecciona una empresa en el menú superior para continuar'
+                                        : 'Generar documentos de la propuesta'
+                            }
+                            style={{ 
+                                width: '100%', 
+                                padding: '12px', 
+                                borderRadius: '12px', 
+                                background: (!selectedCompanyId || isAnalyzing) ? 'rgba(139, 92, 246, 0.3)' : 'linear-gradient(135deg, var(--primary), var(--secondary))', 
+                                border: 'none', 
+                                color: (!selectedCompanyId || isAnalyzing) ? 'rgba(255,255,255,0.4)' : '#fff', 
+                                fontWeight: 800, 
+                                fontSize: '12px', 
+                                cursor: (isGenerating || isAnalyzing || !selectedCompanyId) ? 'not-allowed' : 'pointer', 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                justifyContent: 'center', 
+                                gap: '10px', 
+                                boxShadow: (!selectedCompanyId || isAnalyzing) ? 'none' : '0 4px 15px var(--primary-glow)' 
+                            }}
                         >
                             {isGenerating ? <Loader2 className="animate-spin" size={16} /> : <DownloadCloud size={16} />}
                             GENERAR PROPUESTA
                         </button>
+                        {(isAnalyzing || !selectedCompanyId) && (
+                            <p style={{ margin: 0, fontSize: '10px', color: 'var(--warning)', lineHeight: 1.45, textAlign: 'center' }}>
+                                {isAnalyzing
+                                    ? '⚠️ Generación temporalmente bloqueada mientras termina el análisis'
+                                    : '⚠️ Selecciona una empresa en el menú superior o créala en la vista Empresas'}
+                            </p>
+                        )}
                     </div>
                     
                     <div style={{ marginTop: '10px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '15px' }}>
-                         <AnalysisResults 
-                             results={auditResults} 
-                             onAskExpert={(q) => { setChatInput(q); }}
-                             sessionId={sessionId}
-                             companyId={selectedCompanyId} 
-                         />
+                        {showGoNoGoPanel && goNoGoResult ? (
+                            <GoNoGoPanel
+                                goNoGoResult={goNoGoResult}
+                                onAskExpert={(q) => { setChatInput(q); }}
+                                sessionId={sessionId}
+                                companyId={selectedCompanyId}
+                                companyData={companies.find(c => c.id === selectedCompanyId) || {}}
+                                overrideTimestamp={auditResults?.go_no_go?.override_timestamp || null}
+                                onDecision={(jobId) => {
+                                    setShowGoNoGoPanel(false);
+                                    setGoNoGoResult(null);
+                                    if (jobId) {
+                                        setIsAnalyzing(true);
+                                        setAuditProgress({ percent: 0, currentFile: 'Reanudando pipeline tras autorización…' });
+                                        pollAgentsJobUntilDone(jobId, (u) => {
+                                            setAuditProgress((prev) => ({
+                                                percent: u.pct ?? prev.percent,
+                                                currentFile: u.message || prev.currentFile,
+                                            }));
+                                        }).then((result) => {
+                                            const auditPayload = { ...result?.data, orchestrator_decision: result?.agent_decision };
+                                            const dictamen = processAuditResults(auditPayload);
+                                            if (dictamen) {
+                                                dictamen.dictamen_schema_version = 2;
+                                                dictamen.fechaAuditoria = new Date().toLocaleString('es-MX');
+                                                setAuditResults(dictamen);
+                                                saveDictamenToPostgres(dictamen);
+                                            }
+                                        }).catch((err) => {
+                                            pushAssistantGuidance(`Error al reanudar: ${err.message}`, true);
+                                        }).finally(() => {
+                                            setIsAnalyzing(false);
+                                            setAuditProgress({ percent: 0, currentFile: '' });
+                                        });
+                                    } else {
+                                        pushAssistantGuidance('Pipeline detenido. Puedes revisar las brechas y volver a intentarlo cuando estés listo.', false);
+                                    }
+                                }}
+                            />
+                        ) : (
+                            <AnalysisResults
+                                results={auditResults}
+                                onAskExpert={(q) => { setChatInput(q); }}
+                                sessionId={sessionId}
+                                companyId={selectedCompanyId}
+                            />
+                        )}
                     </div>
                 </aside>
 
@@ -1255,6 +2018,157 @@ const App = () => {
                         isAnalyzing={isAnalyzing}
                         auditProgress={auditProgress}
                     />
+
+                    {sessionId && (
+                        <div
+                            style={{
+                                marginTop: '-12px',
+                                padding: '14px 16px',
+                                borderRadius: '16px',
+                                border: '1px solid rgba(255,255,255,0.08)',
+                                background: 'rgba(15,23,42,0.45)',
+                            }}
+                        >
+                            <div
+                                role="tablist"
+                                aria-label="Herramientas de sesión"
+                                style={{
+                                    display: 'flex',
+                                    flexWrap: 'wrap',
+                                    gap: '8px',
+                                    marginBottom: '14px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.06)',
+                                    paddingBottom: '12px',
+                                }}
+                            >
+                                {[
+                                    { id: 'calendario', label: 'Hitos / calendario' },
+                                    { id: 'documentos_candidatos', label: 'Documentos detectados' },
+                                    { id: 'post_junta', label: 'Actas y aclaraciones' },
+                                    { id: 'economico', label: 'Validaciones económicas' },
+                                    { id: 'calidad_docs', label: 'Calidad documental' },
+                                    ...(import.meta.env.VITE_SHOW_VALIDATION_POLICY !== 'false'
+                                        ? [{ id: 'avanzado', label: 'Política (admin)' }]
+                                        : []),
+                                ].map((t) => {
+                                    const active = sessionToolsTab === t.id;
+                                    return (
+                                        <button
+                                            key={t.id}
+                                            type="button"
+                                            role="tab"
+                                            aria-selected={active}
+                                            id={`session-tool-tab-${t.id}`}
+                                            aria-controls={`session-tool-panel-${t.id}`}
+                                            onClick={() => setSessionToolsTab(t.id)}
+                                            style={{
+                                                padding: '8px 12px',
+                                                borderRadius: '10px',
+                                                border: active ? '1px solid var(--primary)' : '1px solid rgba(255,255,255,0.1)',
+                                                background: active ? 'rgba(0,212,255,0.12)' : 'rgba(0,0,0,0.25)',
+                                                color: active ? '#f1f5f9' : 'rgba(226,232,240,0.75)',
+                                                fontSize: '11px',
+                                                fontWeight: 800,
+                                                cursor: 'pointer',
+                                                whiteSpace: 'nowrap',
+                                            }}
+                                        >
+                                            {t.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            {sessionToolsTab === 'calendario' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-calendario"
+                                    aria-labelledby="session-tool-tab-calendario"
+                                >
+                                    <SubmissionChecklistPanel
+                                        sessionId={sessionId}
+                                        syncKey={auditResults?.fechaAuditoria || ''}
+                                        onAskAboutHito={(h) => {
+                                            const q = `Según las bases de esta licitación, ¿qué debo cumplir respecto al hito «${h.nombre}»? Contexto: ${h.fecha_texto_raw || 'sin fecha textual'}.`;
+                                            setChatInput(q);
+                                        }}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'documentos_candidatos' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-documentos_candidatos"
+                                    aria-labelledby="session-tool-tab-documentos_candidatos"
+                                >
+                                    <DocumentCandidatePanel 
+                                        candidates={auditResults?.fastTrackDocumentCandidates || []}
+                                        onAskExpert={(q) => { setChatInput(q); }}
+                                        sessionId={sessionId}
+                                        companyId={selectedCompanyId}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'post_junta' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-post_junta"
+                                    aria-labelledby="session-tool-tab-post_junta"
+                                >
+                                    <PostClarificationPanel
+                                        sessionId={sessionId}
+                                        sources={sources}
+                                        syncKey={auditResults?.fechaAuditoria || ''}
+                                        onAskAboutActa={(ctx) => {
+                                            const q = `Ayúdame a revisar el borrador de carta 33 Bis y las preguntas Anexo 10. Estado: ${ctx?.estado || 'N/D'}, confianza de extracción: ${ctx?.confianza_extraccion ?? 'N/D'}.`;
+                                            setChatInput(q);
+                                        }}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'economico' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-economico"
+                                    aria-labelledby="session-tool-tab-economico"
+                                >
+                                    <EconomicValidationPanel
+                                        sessionId={sessionId}
+                                        syncKey={auditResults?.fechaAuditoria || ''}
+                                        onAskAboutValidation={(val) => {
+                                            const q = `Revisemos las validaciones económicas. Perfil: ${val?.perfil_usado || 'N/D'}. Bloqueos: ${(val?.blocking_issues || []).length}. ¿Qué debo corregir primero?`;
+                                            setChatInput(q);
+                                        }}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'calidad_docs' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-calidad_docs"
+                                    aria-labelledby="session-tool-tab-calidad_docs"
+                                >
+                                    <DocumentQualityDiagnosticPanel
+                                        snapshot={documentQualityGateSnapshot}
+                                        blocked={documentQualityBlockingSessionLatch}
+                                        busy={validationBusy}
+                                        onRevalidate={() => refreshValidationState()}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'avanzado' &&
+                                import.meta.env.VITE_SHOW_VALIDATION_POLICY !== 'false' && (
+                                    <div
+                                        role="tabpanel"
+                                        id="session-tool-panel-avanzado"
+                                        aria-labelledby="session-tool-tab-avanzado"
+                                    >
+                                        <ValidationPolicyAdmin sessionId={sessionId} />
+                                    </div>
+                                )}
+                        </div>
+                    )}
+
                     <DeliveryPanel results={generationResults || auditResults || {}} sessionName={sessionName} sessionId={sessionId} />
                 </section>
 
@@ -1277,9 +2191,42 @@ const App = () => {
                 {/* DERECHA: CHAT EXPERTO */}
                 <aside style={{ width: `${rightWidth}px`, borderLeft: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', background: 'rgba(0,0,0,0.2)', transition: isResizingRight ? 'none' : 'width 0.3s ease' }}>
                     <div style={{ padding: '20px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                            <Bot size={20} color="var(--primary)" />
-                            <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0 }}>EXPERTO RAG</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0, flex: '1 1 auto' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                                <Bot size={20} color="var(--primary)" />
+                                <div style={{ minWidth: 0 }}>
+                                    <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0 }}>Asistente de Licitación</h3>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, marginTop: '2px' }}>
+                                        {economicBlockingSessionLatch
+                                            ? 'Hay bloqueo de validación económica: lee los mensajes del asistente, ajusta tu Excel o cotización, y revalida o vuelve a generar desde la izquierda.'
+                                            : documentQualityBlockingSessionLatch
+                                                ? 'Hay bloqueo por calidad documental: revalida clasificación/evidencia antes de volver a generar.'
+                                            : 'Pregunta por fechas, requisitos o dudas de las bases — aquí abajo'}
+                                    </div>
+                                </div>
+                            </div>
+                            {(isGenerating || generationProgress.percent > 0) && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: '140px' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        {isGenerating && <Loader2 className="animate-spin" size={11} style={{ color: 'var(--primary)' }} />}
+                                        <span style={{ fontWeight: 700, color: 'var(--primary)' }}>
+                                            {Math.round(generationProgress.percent)}%
+                                        </span>
+                                        <span style={{ whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '160px' }}>
+                                            {generationProgress.message || 'Preparando documentos…'}
+                                        </span>
+                                    </div>
+                                    <div style={{ width: '100%', height: '3px', background: 'rgba(255,255,255,0.08)', borderRadius: '999px', overflow: 'hidden' }}>
+                                        <div style={{
+                                            height: '100%',
+                                            width: `${Math.max(2, generationProgress.percent)}%`,
+                                            background: 'var(--primary)',
+                                            borderRadius: '999px',
+                                            transition: 'width 0.5s ease',
+                                        }} />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                         <button
                             type="button"
@@ -1308,32 +2255,552 @@ const App = () => {
                     </div>
 
                     <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                        <BlockResolutionPanel
+                            sessionId={sessionId}
+                            companyId={selectedCompanyId}
+                            onAfterSave={handleBlockResolutionSaved}
+                        />
+                        {intakeUiSnapshot && (
+                            <IntakeProgressCard
+                                progressCurrent={intakeUiSnapshot.progressCurrent}
+                                progressTotal={intakeUiSnapshot.progressTotal}
+                                progressLabel={intakeUiSnapshot.progressLabel}
+                                blockingCount={intakeUiSnapshot.blockingCount}
+                                remainingCount={intakeUiSnapshot.remainingCount}
+                                isResumed={intakeUiSnapshot.isResumed}
+                                auditMode={intakeUiSnapshot.auditMode}
+                            />
+                        )}
+                        {validationEvents.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {validationEvents.map((ev, idx) => (
+                                    <ValidationAlert
+                                        key={`${ev.error_type || "ev"}-${idx}`}
+                                        event={ev}
+                                        busy={validationBusy}
+                                        onPrimaryAction={handleValidationPrimaryAction}
+                                        onSecondaryAction={handleValidationSecondaryAction}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                        {economicBlockingSessionLatch && validationBlockingCount > 0 && (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    padding: '12px',
+                                    borderRadius: '12px',
+                                    border: '1px solid rgba(239,68,68,0.35)',
+                                    background: 'rgba(239,68,68,0.06)',
+                                }}
+                            >
+                                <div style={{ fontSize: '11px', fontWeight: 800, color: '#fca5a5' }}>
+                                    Validación económica bloqueante
+                                </div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                                    Corrige la plantilla o importes; luego recalcula validaciones en servidor. Cuando no queden bloqueos, pulsa <strong>GENERAR PROPUESTA</strong> de nuevo.
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => refreshValidationState()}
+                                    disabled={validationBusy || !sessionId}
+                                    style={{
+                                        width: '100%',
+                                        padding: '10px 12px',
+                                        borderRadius: '10px',
+                                        border: '1px solid rgba(248,113,113,0.5)',
+                                        background: 'rgba(248,113,113,0.18)',
+                                        color: '#fff',
+                                        fontSize: '12px',
+                                        fontWeight: 800,
+                                        cursor: validationBusy || !sessionId ? 'not-allowed' : 'pointer',
+                                        opacity: validationBusy || !sessionId ? 0.55 : 1,
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '8px',
+                                    }}
+                                >
+                                    {validationBusy ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                                    Revalidar validaciones
+                                </button>
+                            </div>
+                        )}
+                        {documentQualityBlockingSessionLatch && validationBlockingCount > 0 && (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    padding: '12px',
+                                    borderRadius: '12px',
+                                    border: '1px solid rgba(245,158,11,0.35)',
+                                    background: 'rgba(245,158,11,0.06)',
+                                }}
+                            >
+                                <div style={{ fontSize: '11px', fontWeight: 800, color: '#fbbf24' }}>
+                                    Bloqueo por calidad documental
+                                </div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                                    La clasificación documental no es confiable para generar sin riesgo. Revisa fuentes, clasificación de requisitos y vuelve a revalidar.
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => refreshValidationState()}
+                                    disabled={validationBusy || !sessionId}
+                                    style={{
+                                        width: '100%',
+                                        padding: '10px 12px',
+                                        borderRadius: '10px',
+                                        border: '1px solid rgba(245,158,11,0.5)',
+                                        background: 'rgba(245,158,11,0.16)',
+                                        color: '#fff',
+                                        fontSize: '12px',
+                                        fontWeight: 800,
+                                        cursor: validationBusy || !sessionId ? 'not-allowed' : 'pointer',
+                                        opacity: validationBusy || !sessionId ? 0.55 : 1,
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '8px',
+                                    }}
+                                >
+                                    {validationBusy ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                                    Revalidar calidad documental
+                                </button>
+                            </div>
+                        )}
+                        {latestPriceProvenance && (
+                            <div
+                                style={{
+                                    position: 'relative',
+                                    border: provenanceCardPulse
+                                        ? '1px solid rgba(34, 197, 94, 0.55)'
+                                        : '1px solid rgba(56, 189, 248, 0.45)',
+                                    background: 'rgba(56, 189, 248, 0.08)',
+                                    borderRadius: '12px',
+                                    padding: '10px 12px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '10px',
+                                    transition: 'border-color 220ms ease, box-shadow 220ms ease',
+                                    boxShadow: provenanceCardPulse
+                                        ? '0 0 18px rgba(34, 197, 94, 0.35)'
+                                        : 'none',
+                                }}
+                            >
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'flex-start',
+                                        justifyContent: 'space-between',
+                                        gap: '10px',
+                                    }}
+                                >
+                                    <div style={{ minWidth: 0 }}>
+                                        <div
+                                            style={{
+                                                fontSize: '11px',
+                                                fontWeight: 800,
+                                                color: '#7dd3fc',
+                                                transition: 'transform 220ms ease',
+                                                transform: provenanceCardPulse ? 'scale(1.02)' : 'scale(1)',
+                                            }}
+                                        >
+                                            Procedencia de precio
+                                        </div>
+                                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                                            Cascada: Chat → Documento → Catálogo · {latestPriceProvenance.capturedAt}
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPriceProvenanceModal(true)}
+                                        onMouseEnter={() => setChatProvBadgeHover('detailBtn')}
+                                        onMouseLeave={() => setChatProvBadgeHover(null)}
+                                        style={{
+                                            border:
+                                                chatProvBadgeHover === 'detailBtn'
+                                                    ? '1px solid rgba(125, 211, 252, 0.7)'
+                                                    : '1px solid rgba(255,255,255,0.2)',
+                                            background:
+                                                chatProvBadgeHover === 'detailBtn'
+                                                    ? 'rgba(125, 211, 252, 0.12)'
+                                                    : 'rgba(255,255,255,0.06)',
+                                            color: '#fff',
+                                            borderRadius: '999px',
+                                            padding: '6px 10px',
+                                            fontSize: '11px',
+                                            fontWeight: 700,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            flexShrink: 0,
+                                            transition: 'all 220ms ease',
+                                            boxShadow:
+                                                chatProvBadgeHover === 'detailBtn'
+                                                    ? '0 0 10px rgba(125,211,252,0.22)'
+                                                    : 'none',
+                                        }}
+                                    >
+                                        <Info size={12} />
+                                        Ver detalle
+                                    </button>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+                                    {[
+                                        {
+                                            id: 'chat',
+                                            icon: '🟢',
+                                            label: 'Chat',
+                                            hint: 'Prioridad 1: instrucción directa del usuario en el chat (override manual).',
+                                        },
+                                        {
+                                            id: 'doc',
+                                            icon: '🟡',
+                                            label: 'Documento',
+                                            hint: 'Prioridad 2: partidas tabulares normalizadas (Excel/CSV de la sesión).',
+                                        },
+                                        {
+                                            id: 'cat',
+                                            icon: '⚪',
+                                            label: 'Catálogo',
+                                            hint: 'Prioridad 3: catálogo de empresa e inferencia del agente económico.',
+                                        },
+                                        {
+                                            id: 'summary',
+                                            icon: '📋',
+                                            label: 'Resumen',
+                                            hint:
+                                                (latestPriceProvenance.text || '').slice(0, 360) +
+                                                ((latestPriceProvenance.text || '').length > 360 ? '…' : ''),
+                                        },
+                                    ].map((b) => {
+                                        const isH = chatProvBadgeHover === b.id;
+                                        return (
+                                            <div
+                                                key={b.id}
+                                                style={{ position: 'relative' }}
+                                                onMouseEnter={() => setChatProvBadgeHover(b.id)}
+                                                onMouseLeave={() => setChatProvBadgeHover(null)}
+                                            >
+                                                <div
+                                                    style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '5px',
+                                                        borderRadius: '999px',
+                                                        border: isH
+                                                            ? '1px solid rgba(125, 211, 252, 0.7)'
+                                                            : '1px solid rgba(255,255,255,0.18)',
+                                                        padding: '4px 8px',
+                                                        fontSize: '10px',
+                                                        color: '#cbd5e1',
+                                                        background: isH
+                                                            ? 'rgba(125, 211, 252, 0.12)'
+                                                            : 'rgba(255,255,255,0.04)',
+                                                        cursor: 'default',
+                                                        transition: 'all 220ms ease',
+                                                        boxShadow: isH
+                                                            ? '0 0 10px rgba(125,211,252,0.2)'
+                                                            : 'none',
+                                                    }}
+                                                >
+                                                    <span>{b.icon}</span>
+                                                    <span>{b.label}</span>
+                                                </div>
+                                                {isH && b.hint && (
+                                                    <div
+                                                        style={{
+                                                            position: 'absolute',
+                                                            top: 'calc(100% + 6px)',
+                                                            left: 0,
+                                                            width: 'min(300px, 72vw)',
+                                                            zIndex: 20,
+                                                            background: 'rgba(15, 23, 42, 0.96)',
+                                                            border: '1px solid rgba(125,211,252,0.35)',
+                                                            borderRadius: '10px',
+                                                            padding: '8px 10px',
+                                                            boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+                                                            whiteSpace: 'pre-wrap',
+                                                            textAlign: 'left',
+                                                            lineHeight: 1.45,
+                                                            color: '#e2e8f0',
+                                                            fontSize: '11px',
+                                                        }}
+                                                    >
+                                                        {b.hint}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
                         {chatMessages.length === 0 ? (
                             <div style={{ margin: 'auto', textAlign: 'center', opacity: 0.2 }}>
                                 <Bot size={50} style={{ marginBottom: '15px' }} />
                                 <p style={{ fontSize: '13px' }}>El experto forense puede ayudarte con el análisis de bases y los datos faltantes del expediente.</p>
                             </div>
                         ) : (
-                            chatMessages.map((msg, i) => (
-                                <div key={i} style={{ alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start', maxWidth: '85%' }}>
-                                    <div style={{ background: msg.sender === 'user' ? 'var(--primary)' : 'rgba(255,255,255,0.05)', color: '#fff', padding: '12px 16px', borderRadius: msg.sender === 'user' ? '15px 15px 0 15px' : '0 15px 15px 15px', fontSize: '14px', lineHeight: 1.5, border: msg.isGlow ? '2px solid var(--primary)' : '1px solid rgba(255,255,255,0.05)', boxShadow: msg.isGlow ? '0 0 20px var(--primary-glow)' : 'none' }}>
-                                        {msg.text}
+                            chatMessages.map((msg, i) => {
+                                // --- Estilos diferenciados por tipo de mensaje ---
+                                const isBlockingDenied = msg.tipo === 'skip_denied_blocking';
+                                const isFieldSkipped = msg.tipo === 'field_skipped';
+                                const isPendingQuestion = msg.tipo === 'pending_question';
+                                const isDataSaved = msg.tipo === 'data_saved';
+
+                                let bubbleBg = msg.sender === 'user' ? 'var(--primary)' : 'rgba(255,255,255,0.05)';
+                                let bubbleBorder = msg.isGlow ? '2px solid var(--primary)' : '1px solid rgba(255,255,255,0.05)';
+                                let bubbleShadow = msg.isGlow ? '0 0 20px var(--primary-glow)' : 'none';
+                                let msgPrefix = null;
+
+                                if (msg.sender === 'bot') {
+                                    if (isBlockingDenied) {
+                                        // Campo bloqueante: advertencia urgente (rojo/naranja)
+                                        bubbleBg = 'rgba(239,68,68,0.10)';
+                                        bubbleBorder = '2px solid rgba(239,68,68,0.55)';
+                                        bubbleShadow = '0 0 14px rgba(239,68,68,0.18)';
+                                        msgPrefix = (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px', fontSize: '11px', fontWeight: 800, color: '#fca5a5' }}>
+                                                <AlertTriangle size={14} />
+                                                <span>Campo obligatorio — no se puede omitir</span>
+                                            </div>
+                                        );
+                                    } else if (isFieldSkipped) {
+                                        // Campo informativo omitido: tono suave (verde/azul)
+                                        bubbleBg = 'rgba(34,197,94,0.07)';
+                                        bubbleBorder = '1px solid rgba(34,197,94,0.35)';
+                                        bubbleShadow = 'none';
+                                        msgPrefix = (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#86efac' }}>
+                                                <CheckCircle size={13} />
+                                                <span>Campo omitido (opcional)</span>
+                                            </div>
+                                        );
+                                    } else if (isPendingQuestion) {
+                                        // Pregunta pendiente activa: tono informativo (azul)
+                                        bubbleBg = 'rgba(56,189,248,0.07)';
+                                        bubbleBorder = '1px solid rgba(56,189,248,0.35)';
+                                        bubbleShadow = '0 0 12px rgba(56,189,248,0.10)';
+                                    } else if (isDataSaved) {
+                                        // Dato guardado: confirmación suave (verde)
+                                        bubbleBg = 'rgba(34,197,94,0.07)';
+                                        bubbleBorder = '1px solid rgba(34,197,94,0.30)';
+                                        bubbleShadow = 'none';
+                                    }
+                                }
+
+                                return (
+                                    <div key={i} style={{ alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start', maxWidth: '85%' }}>
+                                        <div style={{ 
+                                            background: bubbleBg,
+                                            color: '#fff', 
+                                            padding: '12px 16px', 
+                                            borderRadius: msg.sender === 'user' ? '15px 15px 0 15px' : '0 15px 15px 15px', 
+                                            fontSize: '14px', 
+                                            lineHeight: 1.5, 
+                                            border: bubbleBorder,
+                                            boxShadow: bubbleShadow,
+                                            whiteSpace: 'pre-wrap'
+                                        }}>
+                                            {msgPrefix}
+                                            {msg.text.includes('|') && msg.text.includes('---') ? (
+                                                <div style={{ fontFamily: 'monospace', fontSize: '12px', overflowX: 'auto', background: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '8px' }}>
+                                                    {msg.text}
+                                                </div>
+                                            ) : (
+                                                msg.text
+                                            )}
+                                        </div>
+                                        {msg.suggestedActions && msg.suggestedActions.length > 0 && (
+                                            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                                {msg.suggestedActions.map((action, idx) => (
+                                                    <button
+                                                        key={idx}
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setChatInput(action.payload);
+                                                            // Forzamos el envío
+                                                            setTimeout(() => {
+                                                                const btn = document.querySelector('button[title="Enviar consulta"]');
+                                                                if (btn) btn.click();
+                                                                else {
+                                                                    // Fallback si el selector falla
+                                                                    const form = document.querySelector('input')?.parentElement?.querySelector('button');
+                                                                    if (form) form.click();
+                                                                }
+                                                            }, 50);
+                                                        }}
+                                                        style={{
+                                                            padding: '6px 12px',
+                                                            borderRadius: '20px',
+                                                            fontSize: '11px',
+                                                            fontWeight: 800,
+                                                            background: action.style === 'primary' ? 'var(--primary)' : 'rgba(255,255,255,0.1)',
+                                                            border: action.style === 'primary' ? 'none' : '1px solid rgba(255,255,255,0.2)',
+                                                            color: '#fff',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        {action.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
-                                    {msg.citations && <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '5px' }}>{msg.citations.length} citas detectadas.</div>}
-                                </div>
-                            ))
+                                );
+                            })
                         )}
                         <div ref={chatEndRef} />
                         {isThinking && <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '10px' }}><Loader2 className="spin" size={14} /> Trabajando...</div>}
+                        {isGenerating && (
+                            <div style={{
+                                alignSelf: 'flex-start',
+                                maxWidth: '92%',
+                                width: '100%',
+                                background: 'rgba(99,102,241,0.08)',
+                                border: '1px solid rgba(99,102,241,0.25)',
+                                borderRadius: '0 15px 15px 15px',
+                                padding: '16px 18px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '10px',
+                            }}>
+                                {/* Cabecera con spinner y etapa actual */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <Loader2 className="animate-spin" size={16} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                                    <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--primary)' }}>
+                                        Generando propuesta…
+                                    </span>
+                                    <span style={{ marginLeft: 'auto', fontSize: '12px', fontWeight: 800, color: 'var(--primary)' }}>
+                                        {Math.round(generationProgress.percent)}%
+                                    </span>
+                                </div>
+
+                                {/* Barra de progreso */}
+                                <div style={{
+                                    width: '100%',
+                                    height: '6px',
+                                    background: 'rgba(255,255,255,0.08)',
+                                    borderRadius: '999px',
+                                    overflow: 'hidden',
+                                }}>
+                                    <div style={{
+                                        height: '100%',
+                                        width: `${Math.max(4, generationProgress.percent)}%`,
+                                        background: 'linear-gradient(90deg, var(--primary), #818cf8)',
+                                        borderRadius: '999px',
+                                        transition: 'width 0.6s ease',
+                                    }} />
+                                </div>
+
+                                {/* Mensaje de etapa actual */}
+                                <div style={{ fontSize: '11px', color: 'rgba(226,232,240,0.65)', lineHeight: 1.4 }}>
+                                    {generationProgress.message || 'Preparando documentos…'}
+                                </div>
+
+                                {/* Etapas del pipeline */}
+                                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '2px' }}>
+                                    {[
+                                        { key: 'technical', label: '📄 Técnica', pctRange: [93, 94] },
+                                        { key: 'formats', label: '📋 Formatos', pctRange: [95, 96] },
+                                        { key: 'economic_writer', label: '💰 Económica', pctRange: [97, 98] },
+                                        { key: 'packager', label: '📦 Sobres', pctRange: [98, 99] },
+                                        { key: 'delivery', label: '✅ Entrega', pctRange: [99, 100] },
+                                    ].map(({ key, label, pctRange }) => {
+                                        const pct = generationProgress.percent;
+                                        const done = pct >= pctRange[1];
+                                        const active = pct >= pctRange[0] && pct < pctRange[1];
+                                        return (
+                                            <span key={key} style={{
+                                                fontSize: '10px',
+                                                fontWeight: 700,
+                                                padding: '3px 8px',
+                                                borderRadius: '999px',
+                                                background: done
+                                                    ? 'rgba(34,197,94,0.15)'
+                                                    : active
+                                                        ? 'rgba(99,102,241,0.25)'
+                                                        : 'rgba(255,255,255,0.05)',
+                                                color: done
+                                                    ? '#4ade80'
+                                                    : active
+                                                        ? '#a5b4fc'
+                                                        : 'rgba(226,232,240,0.35)',
+                                                border: active ? '1px solid rgba(99,102,241,0.4)' : '1px solid transparent',
+                                                transition: 'all 0.3s ease',
+                                            }}>
+                                                {done ? '✓ ' : active ? '⟳ ' : ''}{label}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <form onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px' }}>
-                        <input type="text" value={chatInput} onChange={e => setChatInput(e.target.value)} placeholder="Pregunta sobre las bases o aporta un dato del expediente…" style={{ flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '12px 15px', borderRadius: '10px', color: '#fff', outline: 'none' }} />
+                        <input
+                            type="text"
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            placeholder={
+                                economicBlockingSessionLatch
+                                    ? 'Pregunta al asistente (bases, totales, IVA…) — el desbloqueo es en Excel y Revalidar arriba'
+                                    : 'Pregunta sobre las bases o aporta un dato del expediente…'
+                            }
+                            style={{
+                                flex: 1,
+                                background: 'rgba(255,255,255,0.05)',
+                                border: '1px solid rgba(255,255,255,0.1)',
+                                padding: '12px 15px',
+                                borderRadius: '10px',
+                                color: '#fff',
+                                outline: 'none',
+                            }}
+                        />
                         <button type="submit" style={{ background: 'var(--primary)', border: 'none', color: '#fff', padding: '10px 15px', borderRadius: '10px', cursor: 'pointer' }}><Send size={18} /></button>
                     </form>
                 </aside>
 
             </main>
+
+            {/* OVERLAY DE CONEXIÓN CAÍDA (NOCTURNO / REINICIO) */}
+            {isServerDisconnected && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)', zIndex: 99999,
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    color: 'white', backdropFilter: 'blur(8px)', textAlign: 'center', padding: '20px'
+                }}>
+                    <AlertTriangle size={80} color="#f59e0b" style={{ marginBottom: '25px' }} />
+                    <h2 style={{ fontSize: '28px', fontWeight: 900, marginBottom: '15px', letterSpacing: '-0.5px' }}>Conexión Perdida con el Servidor</h2>
+                    <p style={{ fontSize: '16px', color: '#cbd5e1', marginBottom: '30px', maxWidth: '600px', lineHeight: 1.6 }}>
+                        Parece que el servidor se ha reiniciado o hemos perdido la conexión, posiblemente debido a inactividad o un reinicio nocturno tras una carga masiva.
+                        <br/><br/>
+                        No te preocupes, el sistema está diseñado para retener tu progreso. Por favor, recarga la página para restaurar la sesión de forma segura y continuar.
+                    </p>
+                    <button
+                        onClick={() => window.location.reload()}
+                        style={{
+                            padding: '14px 30px', backgroundColor: 'var(--primary)', color: '#000',
+                            border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: 800, 
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px',
+                            boxShadow: '0 4px 15px rgba(0, 212, 255, 0.3)', transition: 'transform 0.2s'
+                        }}
+                        onMouseEnter={(e) => e.target.style.transform = 'scale(1.05)'}
+                        onMouseLeave={(e) => e.target.style.transform = 'scale(1)'}
+                    >
+                        <RefreshCw size={18} />
+                        Recargar Sistema
+                    </button>
+                </div>
+            )}
 
             {/* OVERLAY DE CARGA (DRAGGABLE) */}
             {isAnalyzing && (
@@ -1371,7 +2838,102 @@ const App = () => {
                         <div style={{ height: '100%', width: `${auditProgress.percent}%`, background: 'var(--primary)', transition: 'width 0.3s' }}></div>
                     </div>
                     <div style={{ fontSize: '10px', marginTop: '10px', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{auditProgress.currentFile}</div>
+                    
+                    <button 
+                        onClick={handleCancelUpload}
+                        style={{
+                            width: '100%',
+                            marginTop: '15px',
+                            padding: '8px',
+                            background: 'rgba(239, 68, 68, 0.2)',
+                            border: '1px solid rgba(239, 68, 68, 0.5)',
+                            color: '#fca5a5',
+                            borderRadius: '8px',
+                            fontSize: '11px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                        }}
+                        onMouseEnter={(e) => e.target.style.background = 'rgba(239, 68, 68, 0.3)'}
+                        onMouseLeave={(e) => e.target.style.background = 'rgba(239, 68, 68, 0.2)'}
+                    >
+                        CANCELAR INGESTA
+                    </button>
+
                     <div style={{ fontSize: '9px', textAlign: 'center', marginTop: '10px', opacity: 0.5 }}>Arrastra para mover</div>
+                </div>
+            )}
+            <JustificationModal
+                open={!!pendingJustificationEvent}
+                busy={validationBusy}
+                title={pendingJustificationEvent?.ux?.title || "Justificacion requerida"}
+                onCancel={() => setPendingJustificationEvent(null)}
+                onConfirm={handleJustificationConfirm}
+            />
+            {showPriceProvenanceModal && latestPriceProvenance && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(0,0,0,0.65)',
+                        zIndex: 12000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '20px',
+                    }}
+                    onClick={() => setShowPriceProvenanceModal(false)}
+                >
+                    <div
+                        style={{
+                            width: 'min(760px, 95vw)',
+                            maxHeight: '80vh',
+                            overflowY: 'auto',
+                            background: '#111827',
+                            border: '1px solid rgba(56,189,248,0.35)',
+                            borderRadius: '14px',
+                            padding: '16px',
+                            boxShadow: '0 20px 60px rgba(0,0,0,0.55)',
+                            transform: provenanceModalAnimIn ? 'scale(1)' : 'scale(0.96)',
+                            opacity: provenanceModalAnimIn ? 1 : 0.88,
+                            transition: 'transform 0.22s ease-out, opacity 0.22s ease-out',
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                            <h4 style={{ margin: 0, fontSize: '14px', color: '#7dd3fc' }}>Trazabilidad de precio aplicado</h4>
+                            <button
+                                type="button"
+                                onClick={() => setShowPriceProvenanceModal(false)}
+                                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                            >
+                                Cerrar
+                            </button>
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
+                            Confianza: {latestPriceProvenance.confidence} · Capturado: {latestPriceProvenance.capturedAt}
+                        </div>
+                        <pre
+                            style={{
+                                margin: 0,
+                                whiteSpace: 'pre-wrap',
+                                fontFamily: 'inherit',
+                                fontSize: '12px',
+                                lineHeight: 1.5,
+                                color: '#e5e7eb',
+                                background: 'rgba(255,255,255,0.03)',
+                                border: '1px solid rgba(255,255,255,0.08)',
+                                borderRadius: '10px',
+                                padding: '12px',
+                                transition: 'box-shadow 0.35s ease',
+                                boxShadow: provenanceModalPrePulse
+                                    ? '0 0 16px rgba(34,197,94,0.35)'
+                                    : 'none',
+                            }}
+                        >
+                            {latestPriceProvenance.text}
+                        </pre>
+                    </div>
                 </div>
             )}
         </div>

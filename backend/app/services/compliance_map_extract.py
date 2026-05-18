@@ -20,8 +20,10 @@ from app.contracts.compliance_items import (
     ComplianceMapChunkOutputStrict,
 )
 from app.services.llm_service import LLMServiceClient
+from app.services.resilient_llm import ResilientLLMClient
+from app.core.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 RETRY_PROMPT_SUFFIX_ES = (
     "\n\nTu respuesta anterior no cumplió el esquema JSON requerido. Errores: {summary}\n"
@@ -77,6 +79,18 @@ class ComplianceJsonExtractResult:
     raw_preview: Optional[str] = None
 
 
+def _is_all_empty_arrays(d: Optional[Dict[str, Any]]) -> bool:
+    """Detecta el caso donde el LLM devuelve arrays vacíos en todas las zonas.
+
+    Esto ocurre cuando el chunk no tiene contenido relevante pero el schema es válido.
+    Se trata como empty_response para evitar warnings falsos de parse_or_schema_fail.
+    """
+    if not isinstance(d, dict):
+        return False
+    keys = ("administrativo", "tecnico", "formatos")
+    return all(isinstance(d.get(k), list) and len(d.get(k, [])) == 0 for k in keys)
+
+
 def _strict_validate(d: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[ValidationError]]:
     if not isinstance(d, dict):
         return None, None
@@ -88,7 +102,7 @@ def _strict_validate(d: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, An
 
 
 async def extract_compliance_data_with_retry(
-    client: LLMServiceClient,
+    client: ResilientLLMClient,
     *,
     prompt: str,
     system_prompt: Optional[str],
@@ -103,20 +117,21 @@ async def extract_compliance_data_with_retry(
     Telemetría: ``result_type`` en {``success_first_try``, ``success_on_retry``,
     ``fail_schema_mismatch``, ``llm_error``, ``empty_response``}.
     """
-    raw = await client.generate(
+    res = await client.generate(
         prompt=prompt,
         system_prompt=system_prompt,
         model=model,
         format="json",
+        correlation_id=correlation_id,
     )
-    if "error" in raw:
+    if not res.success:
         return ComplianceJsonExtractResult(
             data=None,
             result_type="llm_error",
-            error=str(raw.get("error", "LLM error")),
+            error=res.error or "LLM error",
         )
 
-    raw_str = raw.get("response", "") or ""
+    raw_str = res.response or ""
     if not str(raw_str).strip():
         return ComplianceJsonExtractResult(data=None, result_type="empty_response", error="empty")
 
@@ -125,6 +140,20 @@ async def extract_compliance_data_with_retry(
     d1 = _coerce_llm_text_to_dict(raw_str)
     ok1, err1 = _strict_validate(d1)
     if ok1 is not None:
+        # Ajuste: JSON con todos los arrays vacíos = chunk sin contenido relevante
+        if _is_all_empty_arrays(ok1):
+            logger.info(
+                "compliance_map_json_extract",
+                result_type="empty_response",
+                correlation_id=correlation_id,
+                note="all_arrays_empty_treated_as_no_content",
+            )
+            return ComplianceJsonExtractResult(
+                data=None,
+                result_type="empty_response",
+                error="chunk sin requisitos relevantes",
+                raw_preview=preview,
+            )
         logger.info(
             "compliance_map_json_extract",
             result_type="success_first_try",
@@ -135,13 +164,14 @@ async def extract_compliance_data_with_retry(
     summary = _validation_error_summary(err1) if err1 is not None else "JSON ilegible o no es objeto con claves esperadas"
     retry_prompt = prompt + RETRY_PROMPT_SUFFIX_ES.format(summary=summary)
 
-    raw2 = await client.generate(
+    res2 = await client.generate(
         prompt=retry_prompt,
         system_prompt=system_prompt,
         model=model,
         format="json",
+        correlation_id=correlation_id,
     )
-    if "error" in raw2:
+    if not res2.success:
         loose = _try_loose(d1)
         if loose is not None:
             logger.warning(
@@ -153,20 +183,28 @@ async def extract_compliance_data_with_retry(
             return ComplianceJsonExtractResult(
                 data=loose,
                 result_type="fail_schema_mismatch",
-                error=str(raw2.get("error")),
+                error=res2.error,
                 raw_preview=preview,
             )
         return ComplianceJsonExtractResult(
             data=None,
             result_type="llm_error",
-            error=str(raw2.get("error", "LLM error")),
+            error=res2.error or "LLM error",
             raw_preview=preview,
         )
 
-    raw_str2 = raw2.get("response", "") or ""
+    raw_str2 = res2.response or ""
     d2 = _coerce_llm_text_to_dict(raw_str2)
     ok2, err2 = _strict_validate(d2)
     if ok2 is not None:
+        # Ajuste: mismo chequeo de arrays vacíos en el reintento
+        if _is_all_empty_arrays(ok2):
+            return ComplianceJsonExtractResult(
+                data=None,
+                result_type="empty_response",
+                error="chunk sin requisitos relevantes (retry)",
+                raw_preview=preview,
+            )
         logger.info(
             "compliance_map_json_extract",
             result_type="success_on_retry",

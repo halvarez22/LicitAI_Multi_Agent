@@ -1,9 +1,11 @@
 import json
 import logging
+from app.core.logging_config import get_logger
 import os
 import re
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
+from hashlib import sha1
 
 try:
     from rapidfuzz import fuzz as _rf_fuzz
@@ -19,8 +21,280 @@ from app.services.analyst_output_normalize import (
 )
 from app.economic_validation.engine import validate_economic_proposal
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.services.economic_cotization_filters import (
+    build_upstream_doc_ids,
+    is_contaminated_economic_pending_question,
+    should_exclude_technical_for_cotization,
+)
+from app.services.validation_service import validation_mapping_service
+from app.services.validation_policy_service import resolve_validation_policy
+from app.services.economic_calculator_engine import EconomicCalculatorEngine
+from app.config.settings import settings as app_settings
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+
+def _tech_requirement_by_id(
+    tech_requirements: List[Dict[str, Any]], concepto_id: Any
+) -> Optional[Dict[str, Any]]:
+    """Localiza el requisito técnico original por id (para enriquecer mensajes al usuario)."""
+    if concepto_id is None:
+        return None
+    sid = str(concepto_id).strip()
+    if not sid:
+        return None
+    for r in tech_requirements or []:
+        if isinstance(r, dict) and str(r.get("id", "")).strip() == sid:
+            return r
+    return None
+
+
+def _blob_for_guard_detection(concepto: str, req: Optional[Dict[str, Any]], ref: str) -> str:
+    """Texto agregado para heurística de servicios por guardia / vigilancia."""
+    parts: List[str] = [str(concepto or ""), str(ref or "")]
+    if isinstance(req, dict):
+        for k in (
+            "nombre",
+            "label",
+            "titulo",
+            "descripcion",
+            "texto_literal",
+            "texto",
+            "snippet",
+            "norma_o_fragmento",
+        ):
+            v = req.get(k)
+            if v is not None:
+                parts.append(str(v))
+    return " ".join(p.lower() for p in parts if p)
+
+
+def _is_guard_like_context(concepto: str, req: Optional[Dict[str, Any]], ref: str) -> bool:
+    """
+    Heurística conservadora: vigilancia, guardias, turnos operativos en bases/dictamen.
+    Sirve para redactar preguntas en lenguaje natural y, si aplica, pedir esquema de horas.
+    """
+    blob = _blob_for_guard_detection(concepto, req, ref)
+    if not blob.strip():
+        return False
+    keys = (
+        "vigilanc",
+        "guardia",
+        "rond",
+        "custodia",
+        "custodio",
+        "elemento de vigilancia",
+        "personal de seguridad",
+        "seguridad f",
+        "seguridad física",
+        "vigilante",
+        "24x24",
+        "12x12",
+        "12 x 12",
+        "24 x 24",
+        "turno de",
+        "horario de servicio",
+        "periodo de horas",
+        "período de horas",
+        "por guardia",
+    )
+    return any(k in blob for k in keys)
+
+
+def _economic_gap_reference_snippet(req: Optional[Dict[str, Any]], concepto: str) -> str:
+    """Fragmento de texto de bases/dictamen más informativo que el solo título corto."""
+    if not isinstance(req, dict):
+        return ""
+    c0 = str(concepto or "").strip()
+    for key in ("snippet", "texto_literal", "texto", "descripcion", "norma_o_fragmento"):
+        val = req.get(key)
+        if val is None:
+            continue
+        s = str(val).strip()
+        if len(s) >= 24 and s.lower() != c0.lower():
+            return s[:420] + ("…" if len(s) > 420 else "")
+    blob = " ".join(
+        str(req.get(k) or "")
+        for k in ("descripcion", "nombre", "label", "titulo", "texto")
+    ).strip()
+    if len(blob) >= len(c0) + 20:
+        return blob[:420] + ("…" if len(blob) > 420 else "")
+    return ""
+
+
+def _strict_anchor_from_requirement(req: Optional[Dict[str, Any]], fallback_snippet: str) -> Dict[str, Any]:
+    """Construye ancla verificable estricta (documento + página + fragmento)."""
+    if not isinstance(req, dict):
+        return {}
+    source = (
+        req.get("source")
+        or req.get("documento")
+        or req.get("archivo")
+        or req.get("fuente")
+        or req.get("doc_id")
+    )
+    page = req.get("page") or req.get("pagina")
+    snippet = req.get("snippet") or req.get("texto_literal") or req.get("texto") or fallback_snippet
+    out: Dict[str, Any] = {}
+    if source is not None:
+        out["source"] = str(source).strip()
+    if page is not None:
+        try:
+            out["page"] = int(page)
+        except (TypeError, ValueError):
+            pass
+    if snippet is not None:
+        out["snippet"] = str(snippet).strip()
+    return out
+
+
+def _has_strict_anchor_for_user(item: Dict[str, Any]) -> bool:
+    """Fail-closed: exige documento + página + fragmento para preguntar precio al usuario."""
+    if not isinstance(item, dict):
+        return False
+    oi = item.get("original_item")
+    if not isinstance(oi, dict):
+        return False
+    src = str(oi.get("source") or "").strip()
+    sn = str(oi.get("snippet") or "").strip()
+    pg = oi.get("page")
+    if not src or len(sn) < 12:
+        return False
+    try:
+        return int(pg) >= 1
+    except (TypeError, ValueError):
+        return False
+
+
+def _slug_block_item_id(error_type: str, label: str) -> str:
+    base = f"{error_type}|{label}".encode("utf-8", errors="ignore")
+    return f"blk_{sha1(base).hexdigest()[:12]}"
+
+def _looks_documental_non_cotizable(label: str) -> bool:
+    """
+    Cortafuego inmediato: requisitos documentales/legales no deben entrar
+    al flujo de cotización económica.
+    """
+    s = re.sub(r"\s+", " ", str(label or "").strip().lower())
+    if not s:
+        return True
+    documental_terms = (
+        "repse",
+        "registro",
+        "acta",
+        "carta",
+        "constancia",
+        "anexo",
+        "identificacion",
+        "identificación",
+        "certificado",
+        "escrito",
+        "declaracion",
+        "declaración",
+        "manifestacion",
+        "manifiesto",
+    )
+    if any(t in s for t in documental_terms):
+        return True
+    # Regla positiva mínima: para cotización en bloqueo masivo pedimos indicios
+    # de servicio/suministro/mantenimiento/unidad operativa.
+    service_terms = (
+        "servicio",
+        "suministro",
+        "mantenimiento",
+        "vigilancia",
+        "guardia",
+        "pieza",
+        "lote",
+        "puesto",
+        "turno",
+        "equipo",
+        "instalacion",
+        "instalación",
+    )
+    return not any(t in s for t in service_terms)
+
+
+def _human_economic_blocking_summary(
+    validation_events: List[Dict[str, Any]],
+    validation_result: Any,
+) -> str:
+    """Resume el bloqueo en lenguaje de negocio (UX / primer issue), sin jerga de motor."""
+    for ev in validation_events or []:
+        if not isinstance(ev, dict):
+            continue
+        ux = ev.get("ux") if isinstance(ev.get("ux"), dict) else {}
+        title = str(ux.get("title") or "").strip()
+        um = str(ux.get("user_message") or "").strip()
+        if len(um) >= 12:
+            lead = f"{title}: {um}" if title else um
+            return (lead[:320] + "…") if len(lead) > 320 else lead
+    if isinstance(validation_result, dict):
+        issues = list(validation_result.get("blocking_issues") or [])
+    else:
+        issues = getattr(validation_result, "blocking_issues", None) or []
+    if issues:
+        first = str(issues[0]).strip()
+        if len(first) >= 8:
+            return (first[:320] + "…") if len(first) > 320 else first
+    return ""
+
+
+def _calcular_multiplicador_plantilla_lft(turno_horario: str, dias_semana: str) -> float:
+    """
+    Ingeniería de Turnos (Capa Operativa):
+    Determina cuántos guardias reales en nómina se requieren para cubrir 
+    un (1) elemento físico en el área, según el horario exigido por las bases.
+    """
+    turno = str(turno_horario).strip().upper()
+    dias = str(dias_semana).strip().upper()
+    
+    # FLAG DE RIESGO 1: Puesto 24/7 (168 horas semanales)
+    # Según LFT (48h/semana por guardia), cubrir 1 punto 24/7 exige matemáticamente
+    # 3.5 guardias (168/48). Pero en el esquema común 24x24 (descanso 24h),
+    # necesitas un multiplicador mínimo de 2 (Dos guardias turnándose 1 plaza).
+    if "24 HORAS" in turno and any(d in dias for d in ["LUN-DOM", "L-D", "LUNES A DOMINGO"]):
+        return 2.0  # El factor de doble plantilla (Relevo)
+    
+    # FLAG DE RIESGO 2: Puesto 12/7 Diurno/Nocturno (84 horas semanales)
+    elif "12 HORAS" in turno and any(d in dias for d in ["LUN-DOM", "L-D"]):
+        return 1.5  # Plantilla de relevo fraccionado
+    
+    return 1.0  # Turno normal de 8 horas L-V
+
+def _validar_viabilidad_operativa_fila(fila: dict) -> dict:
+    """
+    Intercepta la fila extraída antes de enviarla a cotización.
+    """
+    try:
+        elementos_fisicos = float(fila.get("numero_elementos", 1))
+    except (TypeError, ValueError):
+        elementos_fisicos = 1.0
+
+    multiplicador = _calcular_multiplicador_plantilla_lft(
+        fila.get("turno", ""), 
+        fila.get("dias", "")
+    )
+    
+    elementos_nomina = elementos_fisicos * multiplicador
+    
+    riesgo_operativo = None
+    if multiplicador > 1.0:
+        riesgo_operativo = {
+            "flag": "FLAG_RIESGO_OPERATIVO",
+            "mensaje": (
+                f"ALERTA LFT: Las bases solicitan {elementos_fisicos} elementos para un "
+                f"turno '{fila.get('turno')} / {fila.get('dias')}'. "
+                f"El motor ajustará la cotización a {elementos_nomina} elementos en nómina "
+                f"para cubrir la operación sin pérdidas financieras."
+            )
+        }
+        
+    return {
+        "elementos_cotizables": elementos_nomina,
+        "riesgo": riesgo_operativo
+    }
+
 
 class EconomicAgent(BaseAgent):
     """
@@ -37,6 +311,7 @@ class EconomicAgent(BaseAgent):
         )
         self.llm = ResilientLLMClient()
         self.vector_db = VectorDbServiceClient()
+        self.calculator = EconomicCalculatorEngine()
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
@@ -82,6 +357,30 @@ class EconomicAgent(BaseAgent):
         reglas_bases = normalize_reglas_economicas_dict(
             analisis_bases.get("reglas_economicas") if isinstance(analisis_bases, dict) else None
         )
+
+        # --- ARQUITECTURA UNIVERSAL (Fase 2): Inyección de Overrides de Chat ---
+        # Priorizamos datos dictados por el usuario sobre extracciones automáticas del Analyst.
+        user_overrides = session_state.get("economic_user_inputs", {})
+        if user_overrides:
+            fsr_keys = [
+                "imss", "sar", "infonavit", "dias_no_laborados", "dias_laborados",
+                "prima_vacacional", "aguinaldo_dias"
+            ]
+            # Construir blob de overrides con separadores fuertes y limpieza de nulos
+            override_blob = ", ".join([
+                f"{k}={v}" for k, v in user_overrides.items()
+                if k in fsr_keys and v is not None
+            ])
+            if override_blob:
+                # Inyectar al inicio para que el motor determinista de FSR (regex-based)
+                # encuentre el override antes que el dato original del documento.
+                current_rules = reglas_bases.get("otras_reglas_oferta_precio") or ""
+                reglas_bases["otras_reglas_oferta_precio"] = f"{override_blob}. {current_rules}"
+                logger.info(
+                    "economic_agent_fsr_overrides_injected",
+                    session_id=session_id,
+                    overrides=override_blob,
+                )
         alcance_bases = normalize_alcance_operativo_list(
             analisis_bases.get("alcance_operativo") if isinstance(analisis_bases, dict) else None
         )
@@ -97,11 +396,53 @@ class EconomicAgent(BaseAgent):
             reglas_bases, alcance_bases, datos_tab
         )
         alertas_contexto_bases = self._build_bases_economic_alertas(reglas_bases, datos_tab)
+        # Contexto canónico (Sprint 1/2): ayuda a explicar bloqueos por plantillas o agregados.
+        econ_norm_root = session_state.get("economic_normalized_data")
+        if isinstance(econ_norm_root, dict):
+            summ = econ_norm_root.get("summary") or {}
+            if isinstance(summ, dict):
+                total_docs = int(summ.get("documents_count") or 0)
+                items_cnt = int(summ.get("items_count") or 0)
+                if total_docs > 0:
+                    alertas_contexto_bases.append(
+                        f"[Canónico] Fuentes económicas normalizadas: {total_docs} documento(s), {items_cnt} partida(s)."
+                    )
+                ph = summ.get("placeholder_signals") or {}
+                if isinstance(ph, dict) and (
+                    ph.get("raw_text_contains_total_0")
+                    or ph.get("raw_text_contains_pending_markers")
+                    or ph.get("high_zero_ratio")
+                ):
+                    alertas_contexto_bases.append(
+                        "[Canónico] Señales de plantilla detectadas (totales en 0 o marcadores pendientes); validar cantidad de elementos y total final."
+                    )
         alcance_catalog = self._alcance_rows_to_catalog_entries(alcance_bases)
 
         # 3. Identificar requerimientos que necesitan COTIZACIÓN
-        tech_requirements = master_list.get("tecnico") or master_list.get("técnico") or []
-        print(f"    [DEBUG] Técnico items count: {len(tech_requirements)}", flush=True)
+        # Filtrar ítems técnicos que son documentos generados por la app (no cotizables)
+        # Estrategia dual (Cursor): señales negativas + señales positivas + categoría upstream
+        tech_requirements_raw = master_list.get("tecnico") or master_list.get("técnico") or []
+
+        doc_ids_upstream = build_upstream_doc_ids(master_list)
+
+        tech_requirements = []
+        excluded_as_docs = []
+        for req in tech_requirements_raw:
+            if should_exclude_technical_for_cotization(req, doc_ids_upstream):
+                excluded_as_docs.append(req)
+                continue
+            tech_requirements.append(req)
+
+        if excluded_as_docs:
+            logger.info(
+                "economic_excluded_doc_items",
+                session_id=session_id,
+                excluded_count=len(excluded_as_docs),
+                remaining_count=len(tech_requirements),
+            )
+            print(f"    [Económico] Excluidos {len(excluded_as_docs)} ítems documentales (no cotizables). Cotizables: {len(tech_requirements)}", flush=True)
+
+        print(f"    [DEBUG] Técnico items count: {len(tech_requirements)} (de {len(tech_requirements_raw)} totales)", flush=True)
         
         if not tech_requirements:
             print("    [-] No se detectaron ítems cotizables en la auditoría previa.", flush=True)
@@ -129,7 +470,8 @@ class EconomicAgent(BaseAgent):
                 continue
             
             # Consultamos la base vectorial por este concepto
-            rag_results = self.vector_db.query_texts(session_id, f"precio unitario de {label}", n_results=3)
+            # Aumentado a 6 para asegurar captura de precios unitarios en tablas de anexos económicos
+            rag_results = self.vector_db.query_texts(session_id, f"precio unitario de {label}", n_results=6)
             docs = (
                 rag_results.get("documents", [])
                 if isinstance(rag_results, dict)
@@ -145,6 +487,16 @@ class EconomicAgent(BaseAgent):
                     "price": 0.0, # El LLM lo extraerá del texto de la descripción
                     "is_rag_reference": True
                 })
+
+        # --- SILENCIO ECONÓMICO (Hito A1): Prioridad al Inventario Forense ---
+        if await self._check_economic_silence(session_id, correlation_id):
+            return AgentOutput(
+                status=AgentStatus.SUCCESS,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message="Validación económica en pausa hasta completar inventario legal.",
+                correlation_id=correlation_id
+            )
 
         # 4. Cálculo de Propuesta (mapeo semántico con marco de bases del Analista)
         calculation_result = await self._calculate_proposal(
@@ -173,6 +525,23 @@ class EconomicAgent(BaseAgent):
         proposal_draft = self._apply_tabular_prices_to_proposal(
             proposal_draft, tech_requirements, session_line_items
         )
+        proposal_draft = self._bootstrap_proposal_from_tabular_rows(
+            proposal_draft, session_line_items
+        )
+        from app.services.economic_refresher import EconomicRefresherService
+        refresher = EconomicRefresherService()
+        proposal_draft = refresher.apply_overrides(
+            proposal_draft,
+            session_state.get("economic_user_inputs") or {},
+            tech_requirements,
+            session_state # Argumento faltante que causaba TypeError
+        )
+        proposal_draft = self._attach_guard_schedules_from_session(
+            proposal_draft,
+            session_state.get("economic_user_inputs") or {},
+        )
+        proposal_draft = self._attach_provenance_ui_defaults(proposal_draft)
+        chat_override_alerts = self._build_chat_override_alerts(proposal_draft)
         proposal_draft = self._ensure_supervisor_no_cost_item(
             proposal_draft, alcance_bases, tech_requirements
         )
@@ -192,78 +561,680 @@ class EconomicAgent(BaseAgent):
                 economic_gaps.append(item)
         
         if economic_gaps:
-            print(f"    🚨 GAP ECONÓMICO: Faltan {len(economic_gaps)} precios unitarios.")
+            logger.info("economic_gaps_detected", session_id=session_id, count=len(economic_gaps))
             
             # --- Hito 6: Generar pending_questions econonómicas ---
             missing_fields = []
-            for gap in economic_gaps:
+            unverified_suggestions: List[Dict[str, Any]] = []
+            non_cotizable_fields = {
+                str(it.get("field"))
+                for it in (session_state.get("economic_non_cotizable_overrides") or [])
+                if str(it.get("field") or "").strip()
+            }
+            min_block = max(1, int(getattr(app_settings, "BLOCK_RESOLUTION_MIN_ITEMS", 3) or 3))
+            block_group_key: Optional[str] = None
+            if len(economic_gaps) >= min_block:
+                # Misma clave para todos los gaps de esta corrida → RequirementGrouper puede armar un bloque.
+                block_group_key = f"economic_proposal:{session_id}"
+            seq_real = 0
+            for _, gap in enumerate(economic_gaps):
                 concepto = gap.get("concepto", "Concepto técnico")
-                missing_fields.append({
+                req_g = _tech_requirement_by_id(tech_requirements, gap.get("concepto_id"))
+                ref_g = _economic_gap_reference_snippet(req_g, str(concepto))
+                guard_ctx = _is_guard_like_context(str(concepto), req_g, ref_g)
+                anchor = _strict_anchor_from_requirement(req_g, ref_g)
+                oi_enriched = dict(gap or {})
+                oi_enriched.update({k: v for k, v in anchor.items() if v is not None})
+                row: Dict[str, Any] = {
                     "field": f"price_{gap.get('concepto_id', concepto)}", # ID virtual o nombre
-                    "label": f"Precio de: {concepto}",
-                    "question": f"¿Cuál es el **precio unitario** (sin IVA) para el concepto: **{concepto}**?",
-                    "document_hint": "Catálogo de precios o cotización base",
+                    "label": f"Precio (sin IVA): {concepto}",
+                    "question": self._build_economic_price_question_for_user(
+                        str(concepto), tech_requirements, gap
+                    ),
+                    "document_hint": str(anchor.get("source") or ""),
                     "type": "economic_price",
-                    "original_item": gap
-                })
-            
-            await self._save_pending_questions(session_id, missing_fields)
+                    "original_item": oi_enriched,
+                    "capture_guard_schedule": guard_ctx,
+                }
+                if str(row.get("field") or "") in non_cotizable_fields:
+                    logger.info(
+                        "economic_gap_skipped_non_cotizable_override",
+                        session_id=session_id,
+                        field=str(row.get("field")),
+                    )
+                    continue
+                if is_contaminated_economic_pending_question(row):
+                    logger.warning(
+                        "economic_gap_skipped_documental",
+                        session_id=session_id,
+                        concepto_preview=str(concepto)[:120],
+                    )
+                    continue
+                if not _has_strict_anchor_for_user(row):
+                    unverified_suggestions.append(
+                        {
+                            "field": str(row.get("field") or ""),
+                            "label": str(row.get("label") or "")[:280],
+                            "reason": "missing_strict_anchor",
+                            "source": "economic_fail_closed",
+                            "concepto": str(concepto)[:220],
+                            "anchor_preview": {
+                                "source": row["original_item"].get("source"),
+                                "page": row["original_item"].get("page"),
+                                "snippet": str(row["original_item"].get("snippet") or "")[:180],
+                            },
+                        }
+                    )
+                    logger.warning(
+                        "economic_gap_skipped_unanchored",
+                        session_id=session_id,
+                        field=str(row.get("field") or ""),
+                    )
+                    continue
+                if block_group_key:
+                    row["block_group_key"] = block_group_key
+                    row["block_item_seq"] = seq_real
+                    seq_real += 1
+                missing_fields.append(row)
 
-            nombres_conceptos = [f"**{gap.get('concepto', 'Concepto técnico')}**" for gap in economic_gaps]
-            conceptos_str = ", ".join(nombres_conceptos)
-            
+            if unverified_suggestions:
+                s2 = await self.context_manager.memory.get_session(session_id) or {}
+                bucket = list(s2.get("economic_unverified_suggestions") or [])
+                bucket.extend(unverified_suggestions)
+                s2["economic_unverified_suggestions"] = bucket[-400:]
+                await self.context_manager.memory.save_session(session_id, s2)
+
+            if not missing_fields:
+                logger.warning(
+                    "economic_gaps_all_filtered_documental",
+                    session_id=session_id,
+                    raw_gaps=len(economic_gaps),
+                )
+            else:
+                # --- SILENCIO ECONÓMICO (Hito A1): Prioridad al Inventario Forense ---
+                inv = session_state.get("document_inventory", {})
+                inv_items = inv.get("items", [])
+                has_pending_legal = any(
+                    (str(it.get("category") or "").strip().lower() == "legal_administrative" or 
+                     str(it.get("requirement_type") or "").strip().lower() == "legal_administrative")
+                    and str(it.get("status") or "").strip().lower() == "pending"
+                    for it in inv_items
+                )
+                
+                if has_pending_legal:
+                    logger.info("economic_silence_active", session_id=session_id, reason="pending_legal_docs")
+                    return AgentOutput(
+                        status=AgentStatus.WAITING_FOR_DATA,
+                        agent_id=self.agent_id,
+                        session_id=session_id,
+                        message="Validación económica en pausa hasta completar inventario legal.",
+                        correlation_id=correlation_id
+                    )
+
+                await self._save_pending_questions(session_id, missing_fields)
+                n = len(missing_fields)
+                first_gap = missing_fields[0].get("original_item") or economic_gaps[0]
+                msg_intro = self._build_economic_msg_intro(n, first_gap, tech_requirements)
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=msg_intro,
+                    data={
+                        "missing": missing_fields,
+                        "alertas_contexto_bases": list(alertas_contexto_bases) + list(chat_override_alerts),
+                        "contexto_bases_analista": {
+                            "reglas_economicas": reglas_bases,
+                            "alcance_operativo_filas": len(alcance_bases),
+                            "datos_tabulares": dict(datos_tab),
+                        },
+                    },
+                    correlation_id=correlation_id,
+                )
+
+        # 6. Consolidación Final (motor determinista + cuadratura)
+        user_inputs = session_state.get("economic_user_inputs") or {}
+        proposal_draft = self.calculator.normalize_items(proposal_draft)
+        session_name_for_profile = str(session_state.get("name") or session_id)
+        
+        # Inyectar overrides del chat (FSR) en las reglas en formato texto para el Regex del Engine
+        # Hito 4.3: Inyectar también valores de ley por defecto si faltan, para evitar bloqueos innecesarios
+        defaults = {
+            "sar": "0.02",
+            "infonavit": "0.05",
+            "prima_vacacional": "0.25",
+            "dias_laborados": "365",
+            "dias_no_laborados": "0"
+        }
+        
+        # Primero inyectamos defaults (si no están ya en reglas_bases)
+        for k, v in defaults.items():
+            if k not in reglas_bases:
+                reglas_bases[f"default_{k}"] = f"{k}: {v}"
+
+        # Luego inyectamos los del usuario (tienen prioridad absoluta)
+        for k, v in user_inputs.items():
+            if k != "concept_prices" and v is not None:
+                reglas_bases[f"chat_override_{k}"] = f"{k}: {v}"
+
+        totals = self.calculator.compute_totals(
+            proposal_draft, reglas_bases, session_name_for_profile
+        )
+        total_base = float(totals.get("total_base") or 0.0)
+        grand_total = float(totals.get("grand_total") or 0.0)
+        if total_base <= 0 and session_line_items:
+            # Fallback duro P0: si el LLM no produjo renglones cotizables, usar directamente
+            # session_line_items para evitar engine_total=0 con Excel sí presente.
+            proposal_draft = self._proposal_from_session_line_items(session_line_items)
+            proposal_draft = self.calculator.normalize_items(proposal_draft)
+            totals = self.calculator.compute_totals(
+                proposal_draft, reglas_bases, session_name_for_profile
+            )
+            total_base = float(totals.get("total_base") or 0.0)
+            grand_total = float(totals.get("grand_total") or 0.0)
+        calc_blocking_issues = list(totals.get("blocking_issues") or [])
+        quadrature_report = self.calculator.build_quadrature_report(
+            proposal_draft, session_line_items
+        )
+        alertas_merged = (
+            list(alertas if isinstance(alertas, list) else [])
+            + alertas_contexto_bases
+            + chat_override_alerts
+        )
+        if quadrature_report.get("available"):
+            alertas_merged.append(
+                (
+                    "[Cuadratura] Excel vs motor: "
+                    f"{quadrature_report.get('excel_total', 0.0):.2f} vs "
+                    f"{quadrature_report.get('engine_total', 0.0):.2f} "
+                    f"(delta {quadrature_report.get('delta_total', 0.0):.2f})."
+                )
+            )
+        if calc_blocking_issues:
+            fsr_msg = (
+                "No cierres la app. Faltan parámetros obligatorios para calcular el Factor de Salario Real "
+                "(Anexos 8/9/9A/13). Captura los datos requeridos y vuelve a generar."
+            )
+            calc_missing = [
+                {
+                    "field": "validation_rule_fsr_required",
+                    "label": "Completar parámetros FSR",
+                    "question": str(calc_blocking_issues[0]),
+                    "document_hint": "Captura IMSS, SAR, Infonavit, días laborados/no laborados y prestaciones.",
+                    "type": "economic_validation_blocking",
+                    "blocking_items": [],
+                }
+            ]
+            await self._save_pending_questions(session_id, calc_missing)
+            blocked_payload: Dict[str, Any] = {
+                "status": "waiting_for_data",
+                "currency": "MXN",
+                "items": proposal_draft,
+                "total_base": float(total_base),
+                "grand_total": float(grand_total),
+                "analisis_precios": {"alertas": alertas_merged},
+                "missing": calc_missing,
+                "calculator_result": {
+                    "profile_name": totals.get("profile_name"),
+                    "formula_set": totals.get("formula_set"),
+                    "fsr": totals.get("fsr"),
+                    "blocking_issues": calc_blocking_issues,
+                },
+                "quadrature_report": quadrature_report,
+                "contexto_bases_analista": {
+                    "reglas_economicas": reglas_bases,
+                    "alcance_operativo_filas": len(alcance_bases),
+                    "datos_tabulares": dict(datos_tab),
+                },
+            }
+            await self.context_manager.record_task_completion(
+                session_id, "economic_proposal", blocked_payload
+            )
             return AgentOutput(
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message=f"Necesito que proporciones los precios unitarios para {len(economic_gaps)} conceptos técnicos detectados: {conceptos_str}.",
+                message=fsr_msg,
                 data={
-                    "missing": missing_fields,
-                    "alertas_contexto_bases": alertas_contexto_bases,
+                    "missing": calc_missing,
+                    "alertas_contexto_bases": list(alertas_contexto_bases) + list(chat_override_alerts),
+                    "calculator_result": {
+                        "profile_name": totals.get("profile_name"),
+                        "formula_set": totals.get("formula_set"),
+                        "fsr": totals.get("fsr"),
+                        "blocking_issues": calc_blocking_issues,
+                    },
+                    "quadrature_report": quadrature_report,
                     "contexto_bases_analista": {
                         "reglas_economicas": reglas_bases,
                         "alcance_operativo_filas": len(alcance_bases),
                         "datos_tabulares": dict(datos_tab),
                     },
                 },
-                correlation_id=correlation_id
+                correlation_id=correlation_id,
             )
-
-        # 6. Consolidación Final
-        total_base = sum(item.get("subtotal", 0) for item in proposal_draft)
-        alertas_merged = list(alertas if isinstance(alertas, list) else []) + alertas_contexto_bases
-        validation_result = validate_economic_proposal(
-            proposal_items=proposal_draft,
-            currency="MXN",
-            total_base=float(total_base),
-            grand_total=float(total_base * 1.15),
-            reglas_economicas=reglas_bases,
-            session_name=str(session_state.get("name") or session_id),
-        )
-        if validation_result.blocking_issues:
-            missing_fields = [
+        if bool(quadrature_report.get("blocking")):
+            cuadratura_msg = (
+                "No cierres la app. Detecté una diferencia de cuadratura entre tu Excel y el cálculo del motor "
+                "económico mayor a $0.01. Revisa partidas y vuelve a generar."
+            )
+            quadrature_missing = [
                 {
-                    "field": f"validation_rule_{i}",
-                    "label": "Resolver validación económica bloqueante",
-                    "question": issue,
-                    "document_hint": "Bases, catálogo y anexos económicos",
+                    "field": "validation_rule_quadrature",
+                    "label": "Corregir cuadratura económica",
+                    "question": (
+                        "El total del Excel no cuadra con el total calculado por el motor. "
+                        "Ajusta precios o cantidades en tu Excel y vuelve a intentar."
+                    ),
+                    "document_hint": "Revisa subtotal por partida en tu Excel/cotización.",
                     "type": "economic_validation_blocking",
+                    "blocking_items": [],
                 }
-                for i, issue in enumerate(validation_result.blocking_issues, start=1)
             ]
-            await self._save_pending_questions(session_id, missing_fields)
+            await self._save_pending_questions(session_id, quadrature_missing)
+            blocked_payload: Dict[str, Any] = {
+                "status": "waiting_for_data",
+                "currency": "MXN",
+                "items": proposal_draft,
+                "total_base": float(total_base),
+                "grand_total": float(grand_total),
+                "analisis_precios": {"alertas": alertas_merged},
+                "missing": quadrature_missing,
+                "calculator_result": {
+                    "profile_name": totals.get("profile_name"),
+                    "formula_set": totals.get("formula_set"),
+                    "fsr": totals.get("fsr"),
+                    "blocking_issues": calc_blocking_issues,
+                },
+                "quadrature_report": quadrature_report,
+                "contexto_bases_analista": {
+                    "reglas_economicas": reglas_bases,
+                    "alcance_operativo_filas": len(alcance_bases),
+                    "datos_tabulares": dict(datos_tab),
+                },
+            }
+            await self.context_manager.record_task_completion(
+                session_id, "economic_proposal", blocked_payload
+            )
             return AgentOutput(
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message=(
-                    "La propuesta económica requiere correcciones antes de cerrar: "
-                    f"{len(validation_result.blocking_issues)} validaciones bloqueantes."
-                ),
+                message=cuadratura_msg,
+                data={
+                    "missing": quadrature_missing,
+                    "alertas_contexto_bases": list(alertas_contexto_bases) + list(chat_override_alerts),
+                    "calculator_result": {
+                        "profile_name": totals.get("profile_name"),
+                        "formula_set": totals.get("formula_set"),
+                        "fsr": totals.get("fsr"),
+                        "blocking_issues": calc_blocking_issues,
+                    },
+                    "quadrature_report": quadrature_report,
+                    "contexto_bases_analista": {
+                        "reglas_economicas": reglas_bases,
+                        "alcance_operativo_filas": len(alcance_bases),
+                        "datos_tabulares": dict(datos_tab),
+                    },
+                },
+                correlation_id=correlation_id,
+            )
+        allow_zero_total_base = bool(
+            (session_state.get("economic_user_inputs") or {}).get("allow_zero_total_base_ack")
+        )
+        validation_result = validate_economic_proposal(
+            proposal_items=proposal_draft,
+            currency="MXN",
+            total_base=float(total_base),
+            grand_total=float(grand_total),
+            reglas_economicas=reglas_bases,
+            session_name=session_name_for_profile,
+            allow_zero_total_base=allow_zero_total_base,
+        )
+        if validation_result.blocking_issues:
+            validation_events: List[Dict[str, Any]] = []
+            for issue in validation_result.blocking_issues:
+                error_type = str(issue).split(":", 1)[0].strip().lower()
+                if not error_type:
+                    error_type = "economic_validation_blocking"
+                raw_context: Dict[str, Any] = {"session_id": session_id}
+                traz = validation_result.trazabilidad.get(error_type)
+                if isinstance(traz, dict):
+                    valor = traz.get("valor_calculado")
+                    if isinstance(valor, dict):
+                        raw_context.update(valor)
+                    elif isinstance(valor, list) and valor:
+                        names = [str(x).strip() for x in valor if str(x).strip()]
+                        # La traza puede truncar nombres (p. ej. [:8]); el texto del issue lleva el total real.
+                        total_from_issue: Optional[int] = None
+                        if isinstance(issue, str):
+                            _mct = re.search(r"(\d+)\s*ítems", issue, re.I)
+                            if _mct:
+                                total_from_issue = int(_mct.group(1))
+                        raw_context["item_count"] = (
+                            total_from_issue if total_from_issue is not None else max(len(names), 1)
+                        )
+                        raw_context["lista_breve"] = (
+                            ", ".join(names[:4]) + (f" (y {len(names) - 4} más)" if len(names) > 4 else "")
+                            if names
+                            else "partidas sin nombre legible"
+                        )
+                        # Mantener lista explícita para que el chatbot pida concepto por concepto
+                        # (evita degradar a placeholders tipo "3 partidas").
+                        raw_context["valor_calculado"] = names
+                        raw_context["item_name"] = names[0] if names else ""
+                        raw_context["raw_value"] = "0"
+                policy = resolve_validation_policy(
+                    session_state,
+                    error_type=error_type,
+                )
+                event = validation_mapping_service.build_event(
+                    error_type=error_type,
+                    context=raw_context,
+                    raw_message=issue,
+                    policy=policy,
+                )
+                validation_events.append(event)
+
+            missing_fields = []
+            def _locator_from_requirement_or_item(label: str, proposal_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                """Ubica evidencia mínima (página o fila) + snippet para un concepto bloqueado."""
+                norm_lbl = self._normalize_econ_label(label)
+                req_hit: Optional[Dict[str, Any]] = None
+                if isinstance(proposal_item, dict):
+                    req_hit = _tech_requirement_by_id(tech_requirements, proposal_item.get("concepto_id"))
+                if req_hit is None:
+                    for req in tech_requirements or []:
+                        if not isinstance(req, dict):
+                            continue
+                        cand = str(
+                            req.get("label")
+                            or req.get("descripcion")
+                            or req.get("titulo")
+                            or req.get("texto")
+                            or ""
+                        ).strip()
+                        if not cand:
+                            continue
+                        n_cand = self._normalize_econ_label(cand)
+                        if norm_lbl == n_cand or (len(norm_lbl) >= 6 and (norm_lbl in n_cand or n_cand in norm_lbl)):
+                            req_hit = req
+                            break
+                anchor = _strict_anchor_from_requirement(req_hit, label)
+                page_number = anchor.get("page")
+                row_index = None
+                if isinstance(proposal_item, dict):
+                    for rk in ("row_index", "tabular_row_index", "excel_row_index"):
+                        rv = proposal_item.get(rk)
+                        if rv is not None:
+                            try:
+                                row_index = int(float(rv))
+                                break
+                            except (TypeError, ValueError):
+                                row_index = None
+                snippet = str(anchor.get("snippet") or "").strip()
+                if not snippet and isinstance(proposal_item, dict):
+                    snippet = str(
+                        proposal_item.get("descripcion")
+                        or proposal_item.get("concepto")
+                        or label
+                    ).strip()
+                return {
+                    "source_name": str(anchor.get("source") or "propuesta_economica").strip(),
+                    "page_number": int(page_number) if isinstance(page_number, int) else None,
+                    "row_index": row_index,
+                    "context_snippet": snippet[:420],
+                }
+
+            def _build_blocking_item(label: str, error_type: str, valor_detectado: float = 0.0, proposal_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                loc = _locator_from_requirement_or_item(label, proposal_item=proposal_item)
+                return {
+                    "concepto_id": _slug_block_item_id(error_type, label),
+                    "concepto_label": label[:280],
+                    "motivo": error_type,
+                    "valor_detectado": valor_detectado,
+                    "trace_ref": {"source": "validation_result.trazabilidad"},
+                    "source_name": loc.get("source_name"),
+                    "page_number": loc.get("page_number"),
+                    "row_index": loc.get("row_index"),
+                    "context_snippet": loc.get("context_snippet"),
+                    "evidence_quality": "strict" if (loc.get("page_number") is not None or loc.get("row_index") is not None) else "weak",
+                }
+
+            def _filter_actionable_blocking_items(items: List[Dict[str, Any]], field_id: str) -> List[Dict[str, Any]]:
+                """Contrato canónico: sin page_number ni row_index, el ítem no se expone al usuario."""
+                ok: List[Dict[str, Any]] = []
+                for it in items or []:
+                    has_locator = it.get("page_number") is not None or it.get("row_index") is not None
+                    if has_locator:
+                        ok.append(it)
+                        continue
+                    bucket = list(session_state.get("economic_unverified_suggestions") or [])
+                    bucket.append(
+                        {
+                            "field": field_id,
+                            "label": str(it.get("concepto_label") or "")[:280],
+                            "reason": "missing_evidence_locator",
+                            "source": "economic_evidence_contract",
+                            "error_type": str(it.get("motivo") or "economic_validation_blocking"),
+                        }
+                    )
+                    session_state["economic_unverified_suggestions"] = bucket[-400:]
+                return ok
+
+            def _fallback_blocking_items_from_proposal(
+                issue_text: str,
+                error_type: str,
+            ) -> List[Dict[str, Any]]:
+                """
+                Deriva items accionables desde `proposal_draft` cuando la trazabilidad
+                no trae nombres legibles (caso real en producción para precios_positivos).
+                """
+                if error_type == "total_base_cotizable":
+                    return [
+                        {
+                            "concepto_id": _slug_block_item_id(error_type, "subtotal_base"),
+                            "concepto_label": "Subtotal cotizable antes de IVA",
+                            "motivo": error_type,
+                            "valor_detectado": float(total_base),
+                            "trace_ref": {"source": "total_base_cotizable"},
+                            "source_name": "propuesta_economica",
+                            "page_number": None,
+                            "row_index": 1,
+                            "context_snippet": (
+                                "El importe base es cero o inferior al mínimo operativo. "
+                                "Captura precios en tu cotización o solicita confirmación HITL de oferta sin importe base."
+                            )[:420],
+                            "evidence_quality": "strict",
+                        }
+                    ]
+                if error_type != "precios_positivos":
+                    return []
+                out_items: List[Dict[str, Any]] = []
+                for pos, it in enumerate(proposal_draft or [], start=1):
+                    if not isinstance(it, dict):
+                        continue
+                    if it.get("supervisor_sin_costo") is True:
+                        continue
+                    try:
+                        pu = float(it.get("precio_unitario") or 0)
+                    except (TypeError, ValueError):
+                        pu = 0.0
+                    if pu > 0:
+                        continue
+                    raw_label = str(it.get("concepto") or it.get("descripcion") or "").strip()
+                    label = raw_label if raw_label else f"Ítem #{pos} de tu lista de precios"
+                    if _looks_documental_non_cotizable(label):
+                        continue
+                    cid_raw = str(it.get("concepto_id") or "").strip()
+                    cid = cid_raw or _slug_block_item_id(error_type, label)
+                    bi = _build_blocking_item(label=label, error_type=error_type, valor_detectado=pu, proposal_item=it)
+                    bi["concepto_id"] = cid[:120]
+                    bi["trace_ref"] = {"source": "proposal_items", "index": pos}
+                    out_items.append(bi)
+                if out_items:
+                    return out_items
+                mcnt = re.search(r"(\d+)\s*ítems", str(issue_text or ""), re.I)
+                if mcnt and int(mcnt.group(1)) > 0:
+                    n = min(int(mcnt.group(1)), 50)
+                    return [
+                        {
+                            "concepto_id": _slug_block_item_id(error_type, f"item_{i}"),
+                            "concepto_label": f"Ítem #{i} de tu lista de precios",
+                            "motivo": error_type,
+                            "valor_detectado": 0,
+                            "trace_ref": {"source": "blocking_issue_count_fallback", "index": i},
+                            "source_name": "propuesta_economica",
+                            "page_number": None,
+                            "row_index": i,
+                            "context_snippet": f"Ítem #{i} detectado sin etiqueta legible en la propuesta económica.",
+                            "evidence_quality": "strict",
+                        }
+                        for i in range(1, n + 1)
+                    ]
+                return []
+            for i, (issue, ev) in enumerate(
+                zip(validation_result.blocking_issues, validation_events), start=1
+            ):
+                ux = ev.get("ux") or {}
+                friendly_q = (ux.get("user_message") or issue or "").strip()
+                ctx = ev.get("context") if isinstance(ev.get("context"), dict) else {}
+                items_raw = ctx.get("valor_calculado") if isinstance(ctx, dict) else None
+                blocking_items: List[Dict[str, Any]] = []
+                if isinstance(items_raw, list):
+                    for nm in items_raw:
+                        s = str(nm).strip()
+                        if not s:
+                            continue
+                        if _looks_documental_non_cotizable(s):
+                            continue
+                        blocking_items.append(
+                            _build_blocking_item(
+                                label=s,
+                                error_type=str(ev.get("error_type") or "economic_validation_blocking"),
+                                valor_detectado=0,
+                            )
+                        )
+                elif isinstance(ctx.get("item_name"), str) and ctx.get("item_name").strip():
+                    s = str(ctx.get("item_name")).strip()
+                    # Descartar placeholders agregados ("N partidas"/"N conceptos"), no son accionables.
+                    if (not re.match(r"^\d+\s+(partidas?|conceptos?)$", s, re.I)) and (not _looks_documental_non_cotizable(s)):
+                        blocking_items.append(
+                            _build_blocking_item(
+                                label=s,
+                                error_type=str(ev.get("error_type") or "economic_validation_blocking"),
+                                valor_detectado=0,
+                            )
+                        )
+                if not blocking_items:
+                    blocking_items = _fallback_blocking_items_from_proposal(
+                        issue_text=str(issue),
+                        error_type=str(ev.get("error_type") or "").strip().lower(),
+                    )
+                blocking_items = _filter_actionable_blocking_items(
+                    blocking_items,
+                    field_id=f"validation_rule_{i}",
+                )
+                if not blocking_items:
+                    # Fail-closed para bloqueos no accionables por chat.
+                    bucket = list(session_state.get("economic_unverified_suggestions") or [])
+                    bucket.append(
+                        {
+                            "field": f"validation_rule_{i}",
+                            "label": str(ux.get("title") or "Corregir propuesta económica").strip()[:280],
+                            "reason": "blocking_without_actionable_items",
+                            "source": "economic_validation_fail_closed",
+                            "error_type": str(ev.get("error_type") or "economic_validation_blocking"),
+                        }
+                    )
+                    session_state["economic_unverified_suggestions"] = bucket[-400:]
+                    continue
+                missing_fields.append(
+                    {
+                        "field": f"validation_rule_{i}",
+                        "label": str(ux.get("title") or "Corregir propuesta económica").strip(),
+                        "question": friendly_q,
+                        "document_hint": "Responde en el chat del asistente o ajusta precios en tu Excel/cotización.",
+                        "type": "economic_validation_blocking",
+                        "blocking_items": blocking_items,
+                    }
+                )
+            if missing_fields:
+                await self._save_pending_questions(session_id, missing_fields)
+            else:
+                await self.context_manager.memory.save_session(session_id, session_state)
+            # Persistir igual que en el camino de éxito: el chatbot lee tasks_completed → economic_proposal → validation_result.
+            blocked_payload: Dict[str, Any] = {
+                "status": "waiting_for_data",
+                "currency": "MXN",
+                "items": proposal_draft,
+                "total_base": float(total_base),
+                "grand_total": float(grand_total),
+                "allow_zero_total_base_ack": allow_zero_total_base,
+                "analisis_precios": {"alertas": alertas_merged},
+                "validation_result": validation_result.model_dump(mode="json"),
+                "missing": missing_fields,
+                "validation_events": validation_events,
+                "calculator_result": {
+                    "profile_name": totals.get("profile_name"),
+                    "formula_set": totals.get("formula_set"),
+                    "fsr": totals.get("fsr"),
+                    "blocking_issues": calc_blocking_issues,
+                },
+                "quadrature_report": quadrature_report,
+                "contexto_bases_analista": {
+                    "reglas_economicas": reglas_bases,
+                    "alcance_operativo_filas": len(alcance_bases),
+                    "datos_tabulares": dict(datos_tab),
+                },
+            }
+            validation_dump = blocked_payload["validation_result"]
+            datos_tabular_payload = blocked_payload.get("contexto_bases_analista", {}).get("datos_tabulares") or {}
+            datos_tabulares_metric = (
+                len(datos_tabular_payload)
+                if isinstance(datos_tabular_payload, dict)
+                else 0
+            )
+            logger.info(
+                "economic_proposal_blocking_persisted",
+                session_id=session_id,
+                blocking_issues_count=len(validation_dump.get("blocking_issues") or []),
+                validations_count=len(validation_dump.get("validations") or []),
+                alerts_count=len(validation_dump.get("alerts") or []),
+                validation_events_count=len(blocked_payload.get("validation_events") or []),
+                missing_pending_count=len(blocked_payload.get("missing") or []),
+                datos_tabulares_top_keys=datos_tabulares_metric,
+                perfil_usado=str(validation_dump.get("perfil_usado") or "unknown"),
+            )
+            await self.context_manager.record_task_completion(
+                session_id, "economic_proposal", blocked_payload
+            )
+            actionable_count = sum(
+                len((mf.get("blocking_items") if isinstance(mf.get("blocking_items"), list) else []))
+                for mf in (missing_fields or [])
+                if str(mf.get("type") or "") == "economic_validation_blocking"
+            )
+            if actionable_count > 0:
+                blocking_user_msg = (
+                    "Para finalizar el análisis de tu propuesta, necesito que me ayudes con el valor de las partidas faltantes.\n\n"
+                    f"Todavía me faltan **{actionable_count}** precio(s) por capturar para poder completar la validación económica."
+                )
+            else:
+                blocking_user_msg = (
+                    "Necesito tu ayuda para completar algunos precios que no pude localizar automáticamente en los documentos.\n\n"
+                    "Por favor, revisa tus partidas en el chat o en tu cotización y proporciónanos los valores para poder avanzar."
+                )
+            return AgentOutput(
+                status=AgentStatus.WAITING_FOR_DATA,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message=blocking_user_msg,
                 data={
                     "missing": missing_fields,
-                    "alertas_contexto_bases": alertas_contexto_bases,
+                    "validation_events": validation_events,
+                    "alertas_contexto_bases": list(alertas_contexto_bases) + list(chat_override_alerts),
                     "validation_result": validation_result.model_dump(mode="json"),
+                    "actionable_missing_count": actionable_count,
                     "contexto_bases_analista": {
                         "reglas_economicas": reglas_bases,
                         "alcance_operativo_filas": len(alcance_bases),
@@ -277,12 +1248,19 @@ class EconomicAgent(BaseAgent):
             "currency": "MXN",
             "items": proposal_draft,
             "total_base": total_base,
-            "margin_suggested": "15%",
-            "grand_total": total_base * 1.15,
+            "grand_total": grand_total,
+            "allow_zero_total_base_ack": allow_zero_total_base,
             "analisis_precios": {
                 "alertas": alertas_merged,
             },
             "validation_result": validation_result.model_dump(mode="json"),
+            "calculator_result": {
+                "profile_name": totals.get("profile_name"),
+                "formula_set": totals.get("formula_set"),
+                "fsr": totals.get("fsr"),
+                "blocking_issues": calc_blocking_issues,
+            },
+            "quadrature_report": quadrature_report,
             "contexto_bases_analista": {
                 "reglas_economicas": reglas_bases,
                 "alcance_operativo_filas": len(alcance_bases),
@@ -326,14 +1304,14 @@ class EconomicAgent(BaseAgent):
             if isinstance(r, dict)
         )
         source = f"{joined} {req_joined}".strip()
-        needs_supervisor = re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno|vigilancia|guardia|turno)", source)
+        needs_supervisor = re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno)", source)
         no_cost_signal = re.search(r"(?i)(sin\s*costo|0\.00|sin\s*cargo|costos?\s+indirectos?)", source)
         if not needs_supervisor:
             return proposal_items
         has_item = False
         for it in proposal_items:
             text = f"{it.get('concepto','')} {it.get('descripcion','')}"
-            if re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno|vigilancia|guardia)", text):
+            if re.search(r"(?i)(supervisor|coordinador|jefe\s*de\s*turno)", text):
                 has_item = True
                 if no_cost_signal or re.search(r"(?i)(sin\s*costo|0\.00|sin\s*cargo|costos?\s+indirectos?)", text):
                     it["precio_unitario"] = 0.0
@@ -466,6 +1444,184 @@ class EconomicAgent(BaseAgent):
             )
         return out
 
+    def _proposal_from_session_line_items(
+        self,
+        session_line_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Construye propuesta mínima directamente desde partidas tabulares de sesión."""
+        out: List[Dict[str, Any]] = []
+        for idx, row in enumerate(session_line_items or [], start=1):
+            try:
+                qty = float(row.get("cantidad") or 1.0)
+            except (TypeError, ValueError):
+                qty = 1.0
+            if qty <= 0:
+                qty = 1.0
+            try:
+                pu = float(row.get("precio_unitario") or 0.0)
+            except (TypeError, ValueError):
+                pu = 0.0
+            concepto = str(
+                row.get("concepto_raw")
+                or row.get("concepto_norm")
+                or f"Partida tabular {idx}"
+            ).strip()
+            out.append(
+                {
+                    "concepto_id": str(row.get("id") or f"line_{idx}"),
+                    "concepto": concepto,
+                    "descripcion": str(row.get("concepto_raw") or concepto),
+                    "unidad": row.get("unidad") or "SERVICIO",
+                    "cantidad": qty,
+                    "precio_unitario": pu,
+                    "status": "matched",
+                    "price_source": "session_line_items_engine_fallback",
+                }
+            )
+        return out
+
+    def _bootstrap_proposal_from_tabular_rows(
+        self,
+        proposal_draft: List[Dict[str, Any]],
+        tabular_rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Fallback determinista cuando el LLM no aterriza partidas cotizables.
+
+        Si hay filas tabulares en sesión pero la propuesta queda vacía o en ceros,
+        construye ítems mínimos desde `session_line_items` para que el motor económico
+        pueda cuadrar contra Excel y no se quede en `engine_total=0`.
+        """
+        if not tabular_rows:
+            return proposal_draft
+
+        has_positive = False
+        for item in proposal_draft or []:
+            try:
+                if float(item.get("subtotal") or 0.0) > 0:
+                    has_positive = True
+                    break
+            except (TypeError, ValueError):
+                continue
+        if proposal_draft and has_positive:
+            return proposal_draft
+
+        boot_items: List[Dict[str, Any]] = []
+        for idx, row in enumerate(tabular_rows, start=1):
+            try:
+                qty = float(row.get("cantidad") or 1.0)
+            except (TypeError, ValueError):
+                qty = 1.0
+            if qty <= 0:
+                qty = 1.0
+            try:
+                pu = float(row.get("precio_unitario") or 0.0)
+            except (TypeError, ValueError):
+                pu = 0.0
+            if row.get("subtotal") is not None:
+                try:
+                    subtotal = float(row.get("subtotal") or 0.0)
+                except (TypeError, ValueError):
+                    subtotal = qty * pu
+            elif row.get("importe") is not None:
+                try:
+                    subtotal = float(row.get("importe") or 0.0)
+                except (TypeError, ValueError):
+                    subtotal = qty * pu
+            else:
+                subtotal = qty * pu
+
+            concepto = str(
+                row.get("concepto_raw")
+                or row.get("concepto_norm")
+                or f"Partida tabular {idx}"
+            ).strip()
+            boot_items.append(
+                {
+                    "concepto_id": str(row.get("id") or f"tabular_{idx}"),
+                    "concepto": concepto,
+                    "unidad": row.get("unidad") or "SERVICIO",
+                    "cantidad": qty,
+                    "precio_unitario": pu,
+                    "subtotal": subtotal,
+                    "status": "matched",
+                    "price_source": "session_line_items_bootstrap",
+                    "provenance_ui": {
+                        "source_key": "excel",
+                        "source_label": "Excel",
+                        "source_icon": "🟡",
+                        "detail": "Partida construída automáticamente desde session_line_items.",
+                    },
+                }
+            )
+        return boot_items
+
+    def _build_economic_price_question_for_user(
+        self,
+        concepto: str,
+        tech_requirements: List[Dict[str, Any]],
+        gap: Dict[str, Any],
+    ) -> str:
+        """
+        Pregunta HITL en lenguaje natural: precio unitario sin IVA y, si el contexto es de
+        vigilancia por guardia, también el esquema de horas (consumible vía ``economic_user_inputs``).
+        """
+        req = _tech_requirement_by_id(tech_requirements, gap.get("concepto_id"))
+        ref = _economic_gap_reference_snippet(req, concepto)
+        guard = _is_guard_like_context(str(concepto), req, ref)
+
+        if guard:
+            lines = [
+                "Necesito el precio unitario sin IVA del servicio de vigilancia por guardia "
+                f"(o unidad operativa equivalente) para: {concepto}.",
+                "También dime qué periodos de horas por guardia van a ejecutar "
+                "(por ejemplo 12x12 o 24x24).",
+            ]
+            if ref:
+                lines.insert(1, f"Referencia en bases/dictamen: {ref}.")
+            lines.append(
+                "Cómo responder: escribe el importe (solo número, sin IVA) y, si ya tienes el esquema, "
+                "ponlo en la misma línea separado por punto y coma (ejemplo: 5800; 24x24) "
+                "o en el siguiente mensaje. Si no aplica costo: 0. Si aún no defines turnos: pendiente. "
+                "Para aplazar: siguiente."
+            )
+            return "\n\n".join(lines)
+
+        lines = [
+            f"Necesito el precio unitario sin IVA que ofertas para el servicio o entregable "
+            f"relacionado con: {concepto}.",
+            "Si en bases la unidad es distinta (mes, evento, global, licencia, etc.), usa la misma unidad "
+            "con la que cotizas en tu Excel o tabla de precios.",
+        ]
+        if ref:
+            lines.insert(1, f"Referencia en bases/dictamen: {ref}.")
+        lines.append(
+            "Responde con el número (sin IVA). Si no lleva dinero: 0 o sin costo. Para aplazar: siguiente."
+        )
+        return "\n\n".join(lines)
+
+    def _build_economic_msg_intro(
+        self,
+        n: int,
+        first_gap: Dict[str, Any],
+        tech_requirements: List[Dict[str, Any]],
+    ) -> str:
+        """Mensaje resumido al usuario: alineado con el primer pendiente y tono humano."""
+        concepto = str(first_gap.get("concepto") or "este concepto").strip()
+        req = _tech_requirement_by_id(tech_requirements, first_gap.get("concepto_id"))
+        ref = _economic_gap_reference_snippet(req, concepto)
+        if _is_guard_like_context(concepto, req, ref):
+            return (
+                f"Para completar la propuesta, necesito que definamos {n} datos de cotización que no logré extraer de los documentos.\n\n"
+                f"¿Cuál es el **precio unitario (sin IVA)** para **{concepto}**? "
+                "Si ya tienes definido el esquema de horas (ej. 12x12 o 24x24), puedes incluirlo también."
+            )
+        return (
+            f"He identificado {n} conceptos que requieren tu validación de precio para cerrar el cálculo económico.\n\n"
+            f"¿Qué **precio unitario (sin IVA)** debemos asignar a **{concepto}**?\n"
+            "Si prefieres dejarlo para después, solo escribe 'siguiente'."
+        )
+
     def _normalize_econ_label(self, value: Any) -> str:
         t = re.sub(r"\s+", " ", str(value).strip().lower())
         return t[:2000] if len(t) > 2000 else t
@@ -481,6 +1637,7 @@ class EconomicAgent(BaseAgent):
             return max(
                 _rf_fuzz.partial_ratio(a, b) / 100.0,
                 _rf_fuzz.token_sort_ratio(a, b) / 100.0,
+                _rf_fuzz.token_set_ratio(a, b) / 100.0,
             )
         ta = " ".join(sorted(a.split()))
         tb = " ".join(sorted(b.split()))
@@ -592,8 +1749,235 @@ class EconomicAgent(BaseAgent):
             if fuzzy_sc > 0:
                 item["price_source"] = "session_line_items_fuzzy"
                 item["tabular_match_score"] = round(fuzzy_sc, 3)
+                item["provenance_ui"] = {
+                    "source_key": "excel",
+                    "source_label": "Excel",
+                    "source_icon": "🟡",
+                    "detail": (
+                        f"Precio tomado de partidas tabulares de sesión "
+                        f"(matching difuso, score={round(fuzzy_sc, 3)})."
+                    ),
+                }
             else:
                 item["price_source"] = "session_line_items"
+                row_idx = hit.get("row_index")
+                item["provenance_ui"] = {
+                    "source_key": "excel",
+                    "source_label": "Excel",
+                    "source_icon": "🟡",
+                    "detail": (
+                        f"Precio tomado de archivo tabular de sesión"
+                        + (f", fila {row_idx}." if row_idx is not None else ".")
+                    ),
+                }
+        return proposal_draft
+
+    def _build_chat_override_alerts(self, proposal_draft: List[Dict[str, Any]]) -> List[str]:
+        """
+        Construye alertas explicables para los precios sobreescritos por chat.
+        """
+        out: List[str] = []
+        for item in proposal_draft or []:
+            if str(item.get("price_source") or "").strip() != "chat_user_override":
+                continue
+            concepto = str(item.get("concepto") or item.get("descripcion") or "concepto").strip()
+            try:
+                precio = float(item.get("precio_unitario") or 0.0)
+            except (TypeError, ValueError):
+                precio = 0.0
+            out.append(
+                f"[Conversación] Se aplicó precio manual para: {concepto} (${precio:,.2f}) vía Chat."
+            )
+        return out
+
+    def _apply_chat_overrides_to_proposal(
+        self,
+        proposal_draft: List[Dict[str, Any]],
+        tech_requirements: List[Dict[str, Any]],
+        economic_user_inputs: Any,
+    ) -> List[Dict[str, Any]]:
+        """
+        Aplica overrides transaccionales del chat al borrador de propuesta.
+
+        Cascada de verdad:
+        1) economic_user_inputs (chat)
+        2) session_line_items / económico canónico (ya aplicados antes)
+        3) inferencia LLM.
+        """
+        if not proposal_draft or not isinstance(economic_user_inputs, dict):
+            return proposal_draft
+
+        concept_prices = economic_user_inputs.get("concept_prices")
+        if not isinstance(concept_prices, dict) or not concept_prices:
+            return proposal_draft
+
+        req_by_id: Dict[str, Dict[str, Any]] = {}
+        for req in tech_requirements or []:
+            rid = req.get("id")
+            if rid is not None:
+                req_by_id[str(rid)] = req
+
+        # Depuración: Ver qué conceptos tenemos en la propuesta
+        available_concepts = [str(it.get("concepto") or it.get("descripcion") or "S/N") for it in proposal_draft]
+        logger.info(
+            "economic_agent_override_debug",
+            session_id=self.agent_id,
+            user_input_concepts=list(concept_prices.keys()),
+            proposal_concepts_count=len(available_concepts),
+            proposal_concepts_preview=available_concepts[:10]
+        )
+
+        for k, v in concept_prices.items():
+            try:
+                normalized_prices[self._normalize_econ_label(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+
+        for item in proposal_draft:
+            candidates: List[str] = []
+            concepto = item.get("concepto")
+            if concepto:
+                candidates.append(self._normalize_econ_label(concepto))
+
+            cid = item.get("concepto_id")
+            if cid is not None and str(cid) in req_by_id:
+                req = req_by_id[str(cid)]
+                lbl = req.get("label") or req.get("descripcion") or req.get("titulo") or req.get("texto")
+                if lbl:
+                    candidates.append(self._normalize_econ_label(lbl))
+
+            if not candidates:
+                continue
+
+            hit_key: Optional[str] = None
+            # 1) exacto
+            for c in candidates:
+                if c in normalized_prices:
+                    hit_key = c
+                    break
+            # 2) subcadena
+            if hit_key is None:
+                for c in candidates:
+                    for k in normalized_prices.keys():
+                        if (len(c) >= 8 and c in k) or (len(k) >= 8 and k in c):
+                            hit_key = k
+                            break
+                    if hit_key is not None:
+                        break
+            # 3) fuzzy (Matching Inteligente con RapidFuzz)
+            if hit_key is None:
+                best_score = 0.0
+                best_key = None
+                # Umbral de confianza ajustado para balancear Wow vs Seguridad
+                # 0.70 permite variaciones descriptivas pero bloquea cargos distintos.
+                CONFIDENCE_THRESHOLD = 0.70 
+                
+                for c in candidates:
+                    for k in normalized_prices.keys():
+                        sc = self._tabular_similarity(c, k)
+                        if sc > best_score:
+                            best_score = sc
+                            best_key = k
+                
+                if best_key is not None:
+                    logger.info(
+                        "economic_agent_fuzzy_match_attempt",
+                        input_concept=c,
+                        best_match=best_key,
+                        score=round(best_score, 3),
+                        threshold=CONFIDENCE_THRESHOLD,
+                        passed=best_score >= CONFIDENCE_THRESHOLD
+                    )
+
+                if best_key is not None and best_score >= CONFIDENCE_THRESHOLD:
+                    hit_key = best_key
+                    logger.info(
+                        "economic_agent_fuzzy_chat_match_found",
+                        candidate=candidates[0] if candidates else "N/A",
+                        matched_key=hit_key,
+                        score=round(best_score, 3)
+                    )
+
+            if hit_key is None:
+                continue
+
+            try:
+                qty = float(item.get("cantidad") or 1.0)
+            except (TypeError, ValueError):
+                qty = 1.0
+            price = float(normalized_prices[hit_key])
+            item["precio_unitario"] = price
+            item["subtotal"] = qty * price
+            item["status"] = "matched"
+            item["price_source"] = "chat_user_override"
+            item["provenance_ui"] = {
+                "source_key": "chat",
+                "source_label": "Chat",
+                "source_icon": "🟢",
+                "detail": f"Instrucción directa del usuario para '{hit_key}': ${price:,.2f}.",
+            }
+
+        return proposal_draft
+
+    def _attach_guard_schedules_from_session(
+        self,
+        proposal_draft: List[Dict[str, Any]],
+        economic_user_inputs: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """
+        Copia a cada ítem el texto de esquema de horas por guardia capturado en chat
+        (``economic_user_inputs["concept_guard_schedules"]``), para consumo en UI/export.
+        """
+        schedules = economic_user_inputs.get("concept_guard_schedules")
+        if not isinstance(schedules, dict) or not schedules:
+            return proposal_draft
+        for item in proposal_draft:
+            cid = item.get("concepto_id")
+            keys = []
+            if cid is not None and str(cid).strip():
+                keys.append(str(cid).strip())
+                keys.append(f"price_{str(cid).strip()}")
+            concepto = item.get("concepto")
+            if concepto is not None and str(concepto).strip():
+                keys.append(f"price_{str(concepto).strip()}")
+            note = None
+            for k in keys:
+                if k in schedules and str(schedules.get(k) or "").strip():
+                    note = str(schedules[k]).strip()[:2000]
+                    break
+            if note:
+                item["horario_ofertado_por_guardia"] = note
+        return proposal_draft
+
+    def _attach_provenance_ui_defaults(self, proposal_draft: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Asegura `provenance_ui` en cada ítem para renderizado frontend.
+        """
+        for item in proposal_draft or []:
+            if isinstance(item.get("provenance_ui"), dict):
+                continue
+            src = str(item.get("price_source") or "").strip()
+            if src in {"chat_user_override"}:
+                item["provenance_ui"] = {
+                    "source_key": "chat",
+                    "source_label": "Chat",
+                    "source_icon": "🟢",
+                    "detail": "Precio aplicado por conversación (override manual).",
+                }
+            elif src in {"session_line_items", "session_line_items_fuzzy"}:
+                item["provenance_ui"] = {
+                    "source_key": "excel",
+                    "source_label": "Excel",
+                    "source_icon": "🟡",
+                    "detail": "Precio obtenido de partidas tabulares normalizadas.",
+                }
+            else:
+                item["provenance_ui"] = {
+                    "source_key": "catalog_or_llm",
+                    "source_label": "Catálogo/Inferencia",
+                    "source_icon": "⚪",
+                    "detail": "Precio estimado desde catálogo y/o inferencia del agente económico.",
+                }
         return proposal_draft
 
     async def _calculate_proposal(
@@ -604,7 +1988,7 @@ class EconomicAgent(BaseAgent):
         *,
         bases_economic_context: str = "",
     ) -> Dict:
-        """Usa el LLM para mapear requerimientos a precios; incorpora marco económico del Analista de bases."""
+        """Usa el LLM para mapear requerimientos; el cálculo monetario es determinista en Python."""
         ctx_block = (bases_economic_context or "").strip()
         if not ctx_block:
             ctx_block = "(Sin contexto adicional del analista de bases.)"
@@ -614,6 +1998,15 @@ CATALOGO: {json.dumps(catalog)}
 
 CONTEXTO DEL ANALISTA DE BASES (usar para coherencia de cantidades, plazos y alertas; no inventar precios aquí):
 {ctx_block}
+
+REGLA CRÍTICA MONETARIA (NO RELAJABLE):
+- NO calcules importes ni subtotales.
+- Si no hay precio verificable en el material, usa status="price_missing".
+
+REGLA CRÍTICA (NO RELAJABLE):
+- NO cotices entregables documentales/legales. Si el concepto parece "carta", "escrito", "declaración",
+  "bajo protesta", "acta", "constancia", "anexo", "formato", "manifiesto", etc., NO lo marques como
+  "matched" ni "price_missing": simplemente omítelo de "items".
 
 Prioriza precios así: 1) ítems con "is_session_tabular": true (Excel de sesión), 2) catálogo de empresa sin flags,
 3) "is_alcance_operativo": true como guía de descripción y cantidad si aplica al requerimiento,
@@ -627,8 +2020,6 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             "concepto": "nombre del requerimiento",
             "concepto_id": "id del requerimiento original",
             "cantidad": 1,
-            "precio_unitario": 0.0,
-            "subtotal": 0.0,
             "status": "matched" // (usa price_missing si no hallas precio exacto)
         }}
     ],
@@ -671,20 +2062,78 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             return {}
 
     async def _save_pending_questions(self, session_id: str, missing_fields: List[Dict]):
-        """Persiste preguntas para el chatbot (Hito 6)."""
+        """Persiste preguntas para el chatbot de forma segura (Hito 6)."""
         try:
-            session_state = await self.context_manager.memory.get_session(session_id)
-            if session_state is None:
-                session_state = {}
-            # Merge con preguntas existentes si las hubiera
-            existing = session_state.get("pending_questions", [])
-            existing_fields = {q["field"] for q in existing}
-            new_questions = [q for q in missing_fields if q["field"] not in existing_fields]
+            # Leer el estado más fresco posible
+            fresh = await self.context_manager.memory.get_session(session_id)
+            if fresh is None:
+                fresh = {}
+            
+            existing = fresh.get("pending_questions", []) or []
+            incoming_types = {str(q.get("type") or "") for q in missing_fields}
+            
+            # Limpiar solo las previas del mismo tipo para evitar duplicados de lógica económica
+            if "economic_validation_blocking" in incoming_types:
+                existing = [
+                    q for q in existing if str(q.get("type") or "") != "economic_validation_blocking"
+                ]
+            
+            def _get_q_key(q):
+                return str(q.get("question_id") or q.get("field") or q.get("field_target") or "")
 
-            session_state["pending_questions"] = existing + new_questions
-            if "current_question_index" not in session_state:
-                session_state["current_question_index"] = 0
+            existing_keys = {_get_q_key(q) for q in existing if _get_q_key(q)}
+            new_questions = [q for q in missing_fields if _get_q_key(q) not in existing_keys]
 
-            await self.context_manager.memory.save_session(session_id, session_state)
+            final_list = existing + new_questions
+            
+            # Log de seguridad (para trazabilidad con Orchestrator)
+            logger.info("economic_save_pending_questions", 
+                        session_id=session_id, 
+                        count=len(final_list),
+                        added=len(new_questions))
+
+            updates = {
+                "pending_questions": final_list
+            }
+            
+            # Forzar foco si hay nuevas económicas
+            if new_questions and any(str(q.get("type")) == "economic_price" for q in new_questions):
+                updates["current_question_index"] = 0
+            elif "current_question_index" not in fresh:
+                updates["current_question_index"] = 0
+
+            # Aplicar cambios al estado fresco
+            fresh.update(updates)
+            await self.context_manager.memory.save_session(session_id, fresh)
+            
         except Exception as e:
-            print(f"[EconomicAgent] ⚠️ Error guardando preguntas econ: {e}")
+            logger.error(f"[EconomicAgent] ⚠️ Error guardando preguntas econ: {e}")
+
+    async def _check_economic_silence(self, session_id: str, correlation_id: str) -> bool:
+        """Determina si debemos callar las brechas económicas en favor del inventario legal."""
+        try:
+            fresh = await self.context_manager.memory.get_session(session_id)
+            if not fresh: 
+                logger.info("silence_check_no_session", session_id=session_id)
+                return False
+            
+            inv = fresh.get("document_inventory", {})
+            inv_items = inv.get("items", [])
+            logger.info("silence_check_inventory", session_id=session_id, items_count=len(inv_items))
+            
+            # Prioridad: Si hay algo legal_administrative pendiente, silenciar económico.
+            has_pending_legal = False
+            for it in inv_items:
+                cat = str(it.get("category") or it.get("requirement_type") or "").strip().lower()
+                status = str(it.get("status") or "").strip().lower()
+                if cat == "legal_administrative" and status == "pending":
+                    has_pending_legal = True
+                    logger.info("silence_check_hit", session_id=session_id, item=it.get("name"))
+                    break
+            
+            if has_pending_legal:
+                logger.info("economic_silence_active", session_id=session_id, reason="pending_legal_docs")
+                return True
+        except Exception as e:
+            logger.warning("economic_silence_check_failed", session_id=session_id, error=str(e))
+        return False

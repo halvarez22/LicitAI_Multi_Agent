@@ -4,6 +4,7 @@ Persistencia y reglas de negocio del checklist de hitos (sesión → submission_
 from __future__ import annotations
 
 import logging
+from app.core.logging_config import get_logger
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -15,7 +16,7 @@ from app.checklist.hito_scheduler import (
 )
 from app.checklist.models import HitoModel, MarkHitoPayload, SubmissionChecklistModel
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SESSION_KEY = "submission_checklist"
 

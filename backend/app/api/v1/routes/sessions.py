@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Dict, Any
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
 from app.api.deps import get_connected_memory
 from app.config.settings import settings
 from app.api.schemas.responses import GenericResponse
@@ -22,17 +22,65 @@ from app.economic_validation.service import (
     get_latest_analysis_and_economic,
     refresh_economic_validations_for_session,
 )
+from app.services.validation_service import validation_mapping_service
+from app.services.validation_policy_service import resolve_validation_policy
 import logging
+from app.core.logging_config import get_logger
 from app.services.vector_service import VectorDbServiceClient
 
 class DictamenRequest(BaseModel):
     dictamen: Dict[str, Any]
 
-logger = logging.getLogger(__name__)
+
+class ValidationAcknowledgeRequest(BaseModel):
+    error_type: str = Field(..., min_length=1)
+    item_id: str | None = None
+
+
+class ValidationJustificationRequest(BaseModel):
+    action_id: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=3)
+    item_id: str | None = None
+    error_type: str | None = None
+
+
+class ValidationTelemetryRequest(BaseModel):
+    event: str = Field(..., min_length=1)
+    error_type: str = Field(..., min_length=1)
+    severity: str | None = None
+    resolution_time_ms: int | None = None
+    clicks_to_fix: int | None = None
+    justification_length: int | None = None
+    item_id: str | None = None
+
+
+class ValidationPolicyUpdateRequest(BaseModel):
+    policy: Dict[str, Any] = Field(..., description="Nuevo objeto validation_policy para la sesión")
+    reason: str = Field(..., min_length=3, description="Motivo del cambio (auditoría)")
+    updated_by: Optional[str] = Field(
+        default=None,
+        description="Usuario o sistema que realizó el cambio (para auditoría)",
+    )
+
+
+class EconomicZeroTotalBaseAckRequest(BaseModel):
+    """HITL auditable: admite oferta con subtotal base cotizable bajo el umbral cuando las bases lo permiten."""
+
+    confirm: bool = Field(..., description="Debe ser true para activar el reconocimiento")
+    reason: str = Field(..., min_length=3, description="Cita o fundamento (auditoría)")
+
+
+logger = get_logger(__name__)
 router = APIRouter()
 
 async def get_repository():
     return await get_connected_memory()
+
+
+def _utc_iso_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 @router.get("", response_model=GenericResponse)
 async def list_licitaciones():
@@ -107,7 +155,26 @@ async def get_dictamen(session_id: str):
     try:
         session_data = await repo.get_session(session_id)
         if session_data and "dictamen" in session_data:
-            return GenericResponse(success=True, message="Dictamen recuperado", data={"dictamen": session_data["dictamen"]})
+            decision = session_data.get("last_orchestrator_decision") or {}
+            last_quality_hints = session_data.get("last_document_quality_waiting_hints")
+            last_fill_hints = session_data.get("last_document_fill_quality_waiting_hints")
+            doc_candidates = session_data.get("document_candidates_consolidated") or session_data.get("document_candidates_final") or session_data.get("document_candidates_v1")
+            return GenericResponse(
+                success=True,
+                message="Dictamen recuperado",
+                data={
+                    "dictamen": session_data["dictamen"],
+                    "go_no_go_result": session_data.get("go_no_go_result"),
+                    "stop_reason": decision.get("stop_reason"),
+                    "last_document_quality_waiting_hints": last_quality_hints
+                    if isinstance(last_quality_hints, dict)
+                    else None,
+                    "last_document_fill_quality_waiting_hints": last_fill_hints
+                    if isinstance(last_fill_hints, dict)
+                    else None,
+                    "fast_track_document_candidates": doc_candidates if isinstance(doc_candidates, dict) else None,
+                }
+            )
         return GenericResponse(success=False, message="No hay dictamen guardado")
     except Exception as e:
         logger.error(f"Error recuperando dictamen: {e}")
@@ -319,5 +386,238 @@ async def refresh_economic_validations(session_id: str):
     except Exception as e:
         logger.error(f"Error recalculando validaciones económicas: {e}")
         raise HTTPException(status_code=500, detail=f"Error refrescando validaciones: {str(e)}")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/economic-hitl/zero-total-base-ack", response_model=GenericResponse)
+async def economic_zero_total_base_ack(session_id: str, payload: EconomicZeroTotalBaseAckRequest):
+    """
+    Registra confirmación explícita (HITL) para relajar la regla ``total_base_cotizable``
+    en la sesión y, si existe ``economic_proposal``, recalcula validaciones.
+    """
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="confirm debe ser true")
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id) or {}
+        eu = dict(session.get("economic_user_inputs") or {})
+        eu["allow_zero_total_base_ack"] = True
+        eu["allow_zero_total_base_ack_reason"] = str(payload.reason).strip()[:4000]
+        eu["allow_zero_total_base_ack_at"] = _utc_iso_now()
+        session["economic_user_inputs"] = eu
+        await repo.save_session(session_id, session)
+        try:
+            result = await refresh_economic_validations_for_session(repo, session_id)
+            vr = result.model_dump(mode="json")
+        except Exception as _refr:
+            logger.info(
+                "economic_zero_total_base_ack_refresh_skipped",
+                session_id=session_id,
+                error=str(_refr),
+            )
+            vr = None
+        return GenericResponse(
+            success=True,
+            message="Confirmación HITL registrada para oferta sin importe base positivo.",
+            data={"allow_zero_total_base_ack": True, "validation_result": vr},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error guardando ack zero total base: {e}")
+        raise HTTPException(status_code=500, detail="Error guardando confirmación económica")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/validation-events/ack", response_model=GenericResponse)
+async def acknowledge_validation_warning(session_id: str, payload: ValidationAcknowledgeRequest):
+    """Registra ack de advertencia de validacion por sesion."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id) or {}
+        state = session.get("user_validation_state") or {}
+        ack_list = list(state.get("acknowledged_warnings") or [])
+        entry = {
+            "error_type": payload.error_type,
+            "item_id": payload.item_id,
+            "acknowledged_at": _utc_iso_now(),
+        }
+        ack_list.append(entry)
+        state["acknowledged_warnings"] = ack_list
+        session["user_validation_state"] = state
+        await repo.save_session(session_id, session)
+        return GenericResponse(success=True, message="Advertencia reconocida", data={"acknowledged": entry})
+    except Exception as e:
+        logger.error(f"Error guardando acknowledge de validacion: {e}")
+        raise HTTPException(status_code=500, detail="Error guardando acknowledge")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/validation-events/justify", response_model=GenericResponse)
+async def save_validation_justification(session_id: str, payload: ValidationJustificationRequest):
+    """Guarda justificacion de usuario para acciones de validacion."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id) or {}
+        state = session.get("user_validation_state") or {}
+        just_list = list(state.get("justifications") or [])
+        entry = {
+            "action_id": payload.action_id,
+            "error_type": payload.error_type,
+            "item_id": payload.item_id,
+            "reason": payload.reason,
+            "created_at": _utc_iso_now(),
+        }
+        just_list.append(entry)
+        state["justifications"] = just_list
+        session["user_validation_state"] = state
+        await repo.save_session(session_id, session)
+        return GenericResponse(success=True, message="Justificacion guardada", data={"justification": entry})
+    except Exception as e:
+        logger.error(f"Error guardando justificacion de validacion: {e}")
+        raise HTTPException(status_code=500, detail="Error guardando justificacion")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/validation-telemetry", response_model=GenericResponse)
+async def save_validation_telemetry(session_id: str, payload: ValidationTelemetryRequest):
+    """Persiste eventos minimos de telemetria de interaccion de validaciones."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id) or {}
+        telemetry = list(session.get("validation_telemetry") or [])
+        entry = {
+            "event": payload.event,
+            "error_type": payload.error_type,
+            "severity": payload.severity,
+            "resolution_time_ms": payload.resolution_time_ms,
+            "clicks_to_fix": payload.clicks_to_fix,
+            "justification_length": payload.justification_length,
+            "item_id": payload.item_id,
+            "created_at": _utc_iso_now(),
+        }
+        telemetry.append(entry)
+        session["validation_telemetry"] = telemetry[-300:]
+        await repo.save_session(session_id, session)
+        return GenericResponse(success=True, message="Telemetria guardada", data={"telemetry": entry})
+    except Exception as e:
+        logger.error(f"Error guardando telemetria de validacion: {e}")
+        raise HTTPException(status_code=500, detail="Error guardando telemetria")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/validation-policy", response_model=GenericResponse)
+async def get_validation_policy(session_id: str):
+    """Obtiene la política dinámica de validación y su historial (si existe)."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        policy = session.get("validation_policy") or {}
+        history = session.get("validation_policy_history") or []
+        return GenericResponse(
+            success=True,
+            message="Política de validación recuperada",
+            data={"validation_policy": policy, "history": history},
+        )
+    except Exception as e:
+        logger.error(f"Error leyendo validation_policy: {e}")
+        raise HTTPException(status_code=500, detail="Error al leer política de validación")
+    finally:
+        await repo.disconnect()
+
+
+@router.put("/{session_id}/validation-policy", response_model=GenericResponse)
+async def update_validation_policy(session_id: str, payload: ValidationPolicyUpdateRequest):
+    """
+    Actualiza la política dinámica de validación de una sesión y registra historial.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id) or {}
+        old_policy = session.get("validation_policy") or {}
+        history: List[Dict[str, Any]] = list(session.get("validation_policy_history") or [])
+
+        entry = {
+            "previous_policy": old_policy,
+            "new_policy": payload.policy,
+            "reason": payload.reason,
+            "updated_by": payload.updated_by or "ui-admin",
+            "updated_at": _utc_iso_now(),
+        }
+        history.append(entry)
+        # Mantener solo últimos 50 cambios por sesión
+        session["validation_policy_history"] = history[-50:]
+        session["validation_policy"] = payload.policy
+
+        await repo.save_session(session_id, session)
+        return GenericResponse(
+            success=True,
+            message="Política de validación actualizada",
+            data={"validation_policy": payload.policy, "last_change": entry},
+        )
+    except Exception as e:
+        logger.error(f"Error actualizando validation_policy: {e}")
+        raise HTTPException(status_code=500, detail="Error al actualizar política de validación")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/validation-events/revalidate", response_model=GenericResponse)
+async def revalidate_validation_events(session_id: str):
+    """
+    Revalida reglas economicas y devuelve eventos UX actualizados.
+
+    Permite cerrar bloqueos por estado real de validacion (no por click).
+    """
+    repo = await get_repository()
+    try:
+        session_state = await repo.get_session(session_id) or {}
+        result = await refresh_economic_validations_for_session(repo, session_id)
+        events: list[dict[str, Any]] = []
+        for issue in list(result.blocking_issues or []):
+            error_type = str(issue).split(":", 1)[0].strip().lower()
+            if not error_type:
+                error_type = "economic_validation_blocking"
+            ctx: Dict[str, Any] = {"session_id": session_id}
+            traz = result.trazabilidad.get(error_type)
+            if isinstance(traz, dict):
+                valor = traz.get("valor_calculado")
+                if isinstance(valor, dict):
+                    ctx.update(valor)
+                elif isinstance(valor, list) and valor:
+                    ctx["item_name"] = str(valor[0])
+                    ctx["raw_value"] = 0
+            policy = resolve_validation_policy(session_state, error_type=error_type)
+            events.append(
+                validation_mapping_service.build_event(
+                    error_type=error_type,
+                    context=ctx,
+                    raw_message=issue,
+                    policy=policy,
+                )
+            )
+        return GenericResponse(
+            success=True,
+            message="Revalidacion economica completada.",
+            data={
+                "validation_result": result.model_dump(mode="json"),
+                "validation_events": events,
+                "blocking_count": len(result.blocking_issues or []),
+                "policy_preview": {
+                    et: resolve_validation_policy(session_state, error_type=et)
+                    for et in {str(i).split(":", 1)[0].strip().lower() for i in list(result.blocking_issues or [])}
+                },
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error revalidando validation events: {e}")
+        raise HTTPException(status_code=500, detail=f"Error revalidando eventos: {str(e)}")
     finally:
         await repo.disconnect()

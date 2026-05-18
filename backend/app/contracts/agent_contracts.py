@@ -52,6 +52,10 @@ class AgentInput(BaseModel):
         None,
         description="ID del Job asíncrono para reporte de progreso"
     )
+    triage_context: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Contexto normativo (ley, categoría, reglas) detectado por el Router"
+    )
 
     @field_validator("mode")
     @classmethod
@@ -60,6 +64,13 @@ class AgentInput(BaseModel):
         if v not in valid:
             raise ValueError(f"Modo inválido '{v}'. Válidos: {sorted(valid)}")
         return v
+
+
+class SuggestedAction(BaseModel):
+    """Modelo para botones de acción sugeridos en la UI"""
+    label: str = Field(..., description="Texto que verá el usuario en el botón")
+    payload: str = Field(..., description="Comando técnico que se enviará al backend")
+    style: str = Field(default="primary", description="Estilo visual: primary, secondary, danger, etc.")
 
 
 class AgentOutput(BaseModel):
@@ -87,6 +98,10 @@ class AgentOutput(BaseModel):
         description="Duración de procesamiento en segundos"
     )
     correlation_id: Optional[str] = None
+    suggested_actions: List[SuggestedAction] = Field(
+        default_factory=list,
+        description="Lista de acciones proactivas para renderizar como botones en la UI"
+    )
 
     @model_validator(mode="after")
     def error_requires_message(self) -> "AgentOutput":
@@ -108,4 +123,6 @@ class AgentOutput(BaseModel):
             out["message"] = self.message
         if self.error:
             out["error"] = self.error
+        if self.suggested_actions:
+            out["suggested_actions"] = [sa.model_dump() for sa in self.suggested_actions]
         return out

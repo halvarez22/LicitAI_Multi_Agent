@@ -9,6 +9,9 @@ class LLMServiceClient:
     
     def __init__(self):
         self.base_url = os.getenv("LLM_URL", "http://llm-inference:11434")
+        # En host (fuera de Docker), "llm-inference" no resuelve.
+        if not os.path.exists("/.dockerenv") and "llm-inference" in self.base_url:
+            self.base_url = self.base_url.replace("llm-inference", "127.0.0.1")
         self.timeout = 600.0 # Aumentado a 10 minutos para procesar contextos pesados (>30k chars)
         self.default_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
@@ -61,11 +64,29 @@ class LLMServiceClient:
     async def chat(self, messages: List[Dict[str, str]], model: Optional[str] = None, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Genera respuesta manteniendo el historial (RolePlay). messages debe ser [{'role': 'user', 'content': 'hola'}]"""
         url = f"{self.base_url}/api/chat"
+        _ctx_raw = os.getenv("OLLAMA_NUM_CTX", "12288").strip()
+        try:
+            _num_ctx = int(_ctx_raw) if _ctx_raw else 12288
+        except ValueError:
+            _num_ctx = 12288
+        _num_ctx = max(2048, min(_num_ctx, 131072))
+        _np_chat_raw = os.getenv("OLLAMA_CHAT_NUM_PREDICT", "2048").strip()
+        try:
+            _np_chat = int(_np_chat_raw) if _np_chat_raw else 2048
+        except ValueError:
+            _np_chat = 2048
+        _np_chat = max(256, min(_np_chat, 16384))
+        default_opts: Dict[str, Any] = {
+            "temperature": 0.35,
+            "num_ctx": _num_ctx,
+            "num_predict": _np_chat,
+        }
+        merged_opts = {**default_opts, **(options or {})}
         payload = {
             "model": model or self.default_model,
             "messages": messages,
             "stream": False,
-            "options": options or {"temperature": 0.3} # Temperatura baja por defecto para licitaciones precisas
+            "options": merged_opts,
         }
         
         try:

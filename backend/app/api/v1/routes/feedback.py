@@ -5,8 +5,9 @@ from app.api.schemas.responses import GenericResponse
 from app.services.feedback_service import FeedbackService
 from app.config.settings import settings
 import logging
+from app.core.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter()
 
 async def get_feedback_service():

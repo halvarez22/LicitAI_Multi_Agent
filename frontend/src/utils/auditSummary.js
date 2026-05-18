@@ -273,11 +273,14 @@ export function synthesizePipelineTelemetryFromDictamen(dictamen) {
 
 export function enrichDictamenFromStorage(dictamen) {
     if (!dictamen || typeof dictamen !== 'object') return dictamen;
+    const fastTrack = dictamen.fastTrackDocumentCandidates || null;
     if (dictamen.compliancePorZona && Object.keys(dictamen.compliancePorZona).length > 0) {
         const withAlias = dictamen.causalesPorZona != null
             ? dictamen
             : { ...dictamen, causalesPorZona: dictamen.compliancePorZona };
-        return finalizeStoredDictamenDedupe(withAlias);
+        const result = finalizeStoredDictamenDedupe(withAlias);
+        if (fastTrack) result.fastTrackDocumentCandidates = fastTrack;
+        return result;
     }
     const compliance = (dictamen.causales || []).filter((c) => c.category === 'compliance');
     if (compliance.length === 0) {
@@ -309,7 +312,9 @@ export function enrichDictamenFromStorage(dictamen) {
         c.category === 'compliance' ? normalized[ni++] : c
     );
     const porZona = buildCompliancePorZona(normalized);
-    return finalizeStoredDictamenDedupe({ ...dictamen, causales: causalesMerged, compliancePorZona: porZona, causalesPorZona: porZona });
+    const enriched = finalizeStoredDictamenDedupe({ ...dictamen, causales: causalesMerged, compliancePorZona: porZona, causalesPorZona: porZona });
+    if (fastTrack) enriched.fastTrackDocumentCandidates = fastTrack;
+    return enriched;
 }
 
 /**
@@ -558,6 +563,10 @@ export const processAuditResults = (resultsData) => {
     const wh = resultsData.orchestrator_decision?.waiting_hints;
     if (wh && typeof wh === 'object') {
         base.economicWaitingHints = wh;
+    }
+    const ftDocs = resultsData.fast_track_document_candidates || resultsData.fastTrackDocumentCandidates;
+    if (ftDocs) {
+        base.fastTrackDocumentCandidates = ftDocs;
     }
     return applyInfrastructureUxOverrides(base);
 };

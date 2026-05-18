@@ -19,11 +19,11 @@ def _load_run_agnosticism():
 
 
 def test_detect_profile_sector_salud_sin_issste_en_nombre() -> None:
-    assert detect_profile({}, "Licitación servicios de salud regional 2026") == "health_sector_annex_like"
+    assert detect_profile({}, "Licitación servicios de salud regional 2026") == "perfil_con_salario_real_v1"
 
 
 def test_detect_profile_imss_en_reglas() -> None:
-    assert detect_profile({"modalidad": "Concurso IMSS obra civil"}, "") == "health_sector_annex_like"
+    assert detect_profile({"modalidad": "Concurso IMSS obra civil"}, "") == "perfil_con_salario_real_v1"
 
 
 def test_scan_app_tree_critical_on_session_slug(tmp_path: Path) -> None:

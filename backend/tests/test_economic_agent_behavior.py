@@ -5,22 +5,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.agents.economic import EconomicAgent
+from app.agents.economic import EconomicAgent, _human_economic_blocking_summary
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentStatus
 from app.economic_validation.models import EconomicValidationResult
 from app.services.resilient_llm import LLMResponse
 
 
-def _memory_stub(session: dict | None = None, company: dict | None = None):
+def _memory_stub(
+    session: dict | None = None,
+    company: dict | None = None,
+    line_items: list[dict] | None = None,
+):
     mem = AsyncMock()
     sess = session if session is not None else {"tasks_completed": []}
     comp = company if company is not None else None
+    litems = line_items if line_items is not None else []
     mem.get_session = AsyncMock(return_value=sess)
     mem.save_session = AsyncMock(return_value=True)
     mem.get_documents = AsyncMock(return_value=[])
     mem.get_company = AsyncMock(return_value=comp)
-    mem.get_line_items_for_session = AsyncMock(return_value=[])
+    mem.get_line_items_for_session = AsyncMock(return_value=litems)
     mem.replace_line_items_for_document = AsyncMock(return_value=True)
     mem.disconnect = AsyncMock()
     return mem
@@ -85,7 +90,7 @@ async def test_con_tecnico_y_llm_matched_devuelve_success_con_data():
         )
 
     assert out.status == AgentStatus.SUCCESS
-    assert out.data["grand_total"] == pytest.approx(230.0)
+    assert out.data["grand_total"] == pytest.approx(232.0)
     assert out.data["items"][0]["status"] == "matched"
     mock_llm.generate.assert_awaited_once()
 
@@ -109,14 +114,33 @@ async def test_price_missing_devuelve_waiting_for_data():
             _agent_input(
                 "s3",
                 company_id="co_x",
-                compliance_master_list={"tecnico": [{"id": "t1"}]},
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Seguro requerido",
+                            "source": "bases.pdf",
+                            "page": 33,
+                            "snippet": "Se solicita seguro con cobertura mínima",
+                        }
+                    ]
+                },
             )
         )
 
     assert out.status == AgentStatus.WAITING_FOR_DATA
     missing = out.data.get("missing", [])
-    assert len(missing) == 1
-    assert missing[0].get("type") == "economic_price"
+    assert len(missing) >= 2
+    types = {str(m.get("type")) for m in missing}
+    assert "economic_validation_blocking" in types
+    labels = " ".join(str(m.get("label") or "") for m in missing).lower()
+    assert "precio" in labels or "importe base" in labels
+    assert any(
+        (m.get("blocking_items") or [{}])[0].get("row_index") is not None
+        or (m.get("blocking_items") or [{}])[0].get("page_number") is not None
+        for m in missing
+        if m.get("blocking_items")
+    )
 
 
 @pytest.mark.asyncio
@@ -148,8 +172,8 @@ async def test_parser_correcto_mantiene_items_y_alertas_al_recibir_objeto():
 
 
 @pytest.mark.asyncio
-async def test_llm_json_ilegible_propaga_items_vacios_como_success():
-    """Documenta comportamiento actual: parse fallido -> [] -> totales 0 y success."""
+async def test_llm_json_ilegible_items_vacios_bloquea_total_base_cotizable():
+    """Parse fallido -> sin partidas / total 0: debe pausar (regla total_base_cotizable), no SUCCESS."""
     ctx = MCPContextManager(_memory_stub())
     agent = EconomicAgent(ctx)
 
@@ -168,9 +192,10 @@ async def test_llm_json_ilegible_propaga_items_vacios_como_success():
             )
         )
 
-    assert out.status == AgentStatus.SUCCESS
-    assert out.data["items"] == []
-    assert out.data["grand_total"] == 0
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    vres = out.data.get("validation_result") or {}
+    issues = " ".join(vres.get("blocking_issues") or [])
+    assert "total_base_cotizable" in issues
 
 
 @pytest.mark.asyncio
@@ -314,6 +339,71 @@ async def test_prompt_incluye_reglas_y_alcance_del_analista():
 
 
 @pytest.mark.asyncio
+async def test_quadrature_delta_mayor_a_un_centavo_bloquea_generacion():
+    """Si Excel y motor difieren > 0.01, el agente detiene y pide corrección."""
+    mem = _memory_stub(
+        line_items=[
+            {
+                "concepto_norm": "vigilante",
+                "concepto_raw": "Vigilante",
+                "cantidad": 1,
+                "precio_unitario": 120.00,
+                "subtotal": 120.00,
+            }
+        ]
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Vigilante", "cantidad": 1, "precio_unitario": 100.0, "subtotal": 100.0, "status": "matched"}], "alertas": []}'
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+    ):
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response=payload)
+        )
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-quadrature-block",
+                compliance_master_list={"tecnico": [{"id": "t1", "descripcion": "Vigilante"}]},
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    assert "cuadratura" in str(out.message or "").lower()
+    qr = out.data.get("quadrature_report") or {}
+    assert qr.get("available") is True
+    assert qr.get("blocking") is True
+
+
+@pytest.mark.asyncio
+async def test_health_profile_sin_parametros_fsr_bloquea():
+    """Perfiles salud deben fallar cerrado si faltan parámetros FSR."""
+    mem = _memory_stub()
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Servicio X", "cantidad": 1, "precio_unitario": 100.0, "subtotal": 100.0, "status": "matched"}], "alertas": []}'
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+    ):
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response=payload)
+        )
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-salario-real-block",
+                compliance_master_list={"tecnico": [{"id": "t1", "descripcion": "Servicio X"}]},
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    assert "factor de salario real" in str(out.message or "").lower()
+    calc = out.data.get("calculator_result") or {}
+    assert "salario_real_v1" in str(calc.get("formula_set") or "")
+
+
+@pytest.mark.asyncio
 async def test_alertas_contexto_bases_en_salida_y_waiting():
     """datos_tabulares.alerta_faltante y reglas no default pasan a analisis_precios / data."""
     sess = {
@@ -373,10 +463,436 @@ async def test_alertas_contexto_bases_en_salida_y_waiting():
         out_w = await agent.process(
             _agent_input(
                 "s-alert-wait",
-                compliance_master_list={"tecnico": [{"id": "t1"}]},
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Servicio X",
+                            "source": "bases.pdf",
+                            "page": 28,
+                            "snippet": "Partida con precio unitario obligatorio",
+                        }
+                    ]
+                },
             )
         )
 
     assert out_w.status == AgentStatus.WAITING_FOR_DATA
     acb = out_w.data.get("alertas_contexto_bases", [])
     assert any("Ingerir Excel" in a for a in acb)
+
+
+@pytest.mark.asyncio
+async def test_calculate_proposal_prompt_prohibe_documentales():
+    ctx = MCPContextManager(_memory_stub())
+    agent = EconomicAgent(ctx)
+    with patch.object(agent, "llm") as mock_llm:
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response='{"items":[],"alertas":[]}')
+        )
+        await agent._calculate_proposal(
+            requirements=[{"id": "t1", "descripcion": "Escrito bajo protesta"}],
+            catalog=[],
+            correlation_id="corr-test",
+            bases_economic_context="",
+        )
+        called_prompt = mock_llm.generate.await_args.kwargs.get("prompt", "")
+        assert "NO cotices entregables documentales/legales" in called_prompt
+
+
+@pytest.mark.asyncio
+async def test_non_cotizable_override_no_reemite_gap():
+    sess = {
+        "economic_non_cotizable_overrides": [
+            {"field": "price_t1", "reason": "user_marked_non_cotizable_documental"}
+        ],
+        "tasks_completed": [],
+    }
+    mem = _memory_stub(session=sess)
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    payload = '{"items": [{"concepto": "Seguros", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "price_missing"}]}'
+
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch(
+            "app.agents.economic.validate_economic_proposal",
+            return_value=EconomicValidationResult(perfil_usado="generic"),
+        ),
+    ):
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response=payload)
+        )
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-noncot",
+                company_id="co_x",
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Seguros",
+                            "source": "bases.pdf",
+                            "page": 45,
+                            "snippet": "Cobertura de seguros solicitada en el pliego",
+                        }
+                    ]
+                },
+            )
+        )
+
+    assert out.status == AgentStatus.SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_no_emite_gap_sin_ancla_y_registra_limbo():
+    sess = {"tasks_completed": []}
+    mem = _memory_stub(session=sess)
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    payload = '{"items": [{"concepto": "Seguros", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "price_missing"}]}'
+
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch(
+            "app.agents.economic.validate_economic_proposal",
+            return_value=EconomicValidationResult(perfil_usado="generic"),
+        ),
+    ):
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response=payload)
+        )
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-fail-closed",
+                company_id="co_x",
+                compliance_master_list={"tecnico": [{"id": "t1", "descripcion": "Seguros sin ancla"}]},
+            )
+        )
+
+    assert out.status == AgentStatus.SUCCESS
+    assert mem.save_session.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_validation_blocking_emite_blocking_items_accionables():
+    mem = _memory_stub(session={"tasks_completed": []})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Guardia", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"}], "alertas": []}'
+
+    vr = EconomicValidationResult(
+        perfil_usado="generic",
+        blocking_issues=["economic_validation_blocking: 2 items con precio <= 0"],
+        trazabilidad={
+            "economic_validation_blocking": {
+                "valor_calculado": ["Guardia diurna", "Guardia nocturna"]
+            }
+        },
+    )
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.validate_economic_proposal", return_value=vr),
+        patch("app.agents.economic.logger") as mock_logger,
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-block-items",
+                company_id="co_x",
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Guardia",
+                            "source": "bases.pdf",
+                            "page": 12,
+                            "snippet": "Se requiere servicio de guardia",
+                        }
+                    ]
+                },
+            )
+        )
+        log_calls = [c for c in mock_logger.info.call_args_list if c.args and c.args[0] == "economic_proposal_blocking_persisted"]
+        assert log_calls, "debe emitirse economic_proposal_blocking_persisted antes de persistir la tarea"
+        kw = log_calls[0].kwargs
+        assert kw.get("blocking_issues_count") == 1
+        assert kw.get("validation_events_count") >= 1
+        assert kw.get("missing_pending_count") >= 1
+        assert kw.get("perfil_usado") == "generic"
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing", [])
+    assert miss and miss[0].get("type") == "economic_validation_blocking"
+    bi = miss[0].get("blocking_items") or []
+    assert len(bi) >= 1
+    # El chatbot y servicios leen validation_result desde tasks_completed → economic_proposal.
+    persisted = False
+    for aw in mem.save_session.await_args_list:
+        args = getattr(aw, "args", None)
+        if not args or len(args) < 2 or not isinstance(args[1], dict):
+            continue
+        for t in args[1].get("tasks_completed") or []:
+            if t.get("task") != "economic_proposal":
+                continue
+            res = t.get("result") or {}
+            vr = res.get("validation_result") or {}
+            if vr.get("blocking_issues") and res.get("status") == "waiting_for_data":
+                persisted = True
+                break
+    assert persisted, "Debe persistirse economic_proposal con validation_result al bloquear por validación"
+
+
+@pytest.mark.asyncio
+async def test_validation_blocking_fallback_desde_proposal_si_trazabilidad_vacia():
+    """Si validation_result no trae nombres en trazabilidad, se deriva blocking_items desde proposal_draft."""
+    mem = _memory_stub(session={"tasks_completed": []})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Limpieza de vidrios", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"}], "alertas": []}'
+
+    vr = EconomicValidationResult(
+        perfil_usado="generic",
+        blocking_issues=["precios_positivos: 1 ítems con precio <= 0"],
+        trazabilidad={"precios_positivos": {"valor_calculado": []}},
+    )
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.validate_economic_proposal", return_value=vr),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-block-fallback-proposal",
+                company_id="co_x",
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Limpieza de vidrios",
+                            "source": "bases.pdf",
+                            "page": 10,
+                            "snippet": "Servicio de limpieza de vidrios",
+                        }
+                    ]
+                },
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing", [])
+    assert miss and miss[0].get("type") == "economic_validation_blocking"
+    bi = miss[0].get("blocking_items") or []
+    assert bi and "limpieza de vidrios" in str(bi[0].get("concepto_label") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_validation_blocking_precios_positivos_no_colapsa_a_n_partidas():
+    """Con múltiples conceptos en trazabilidad, el primer blocking_item debe ser concepto real."""
+    mem = _memory_stub(session={"tasks_completed": []})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = (
+        '{"items": ['
+        '{"concepto": "Servicio de vigilancia A", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"},'
+        '{"concepto": "Servicio de vigilancia B", "concepto_id": "t2", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"}'
+        '], "alertas": []}'
+    )
+    vr = EconomicValidationResult(
+        perfil_usado="generic",
+        blocking_issues=["precios_positivos: 3 ítems con precio <= 0"],
+        trazabilidad={
+            "precios_positivos": {
+                "valor_calculado": [
+                    "Servicio de vigilancia A",
+                    "Servicio de vigilancia B",
+                    "Servicio de vigilancia C",
+                ]
+            }
+        },
+    )
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.validate_economic_proposal", return_value=vr),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-block-multi",
+                company_id="co_x",
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t1",
+                            "descripcion": "Servicio de vigilancia A",
+                            "source": "bases.pdf",
+                            "page": 21,
+                            "snippet": "Servicio de vigilancia A requerido por la convocante.",
+                        }
+                    ]
+                },
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing", [])
+    bi = (miss[0].get("blocking_items") if miss else []) or []
+    assert bi
+    first = str(bi[0].get("concepto_label") or "").lower()
+    assert "partidas" not in first and "conceptos" not in first
+    assert "servicio de vigilancia a" in first or ("item #1" in first or "ítem #1" in first)
+
+
+@pytest.mark.asyncio
+async def test_validation_blocking_excluye_items_sin_page_ni_row():
+    """Contrato de evidencia: un ítem sin page_number ni row_index no debe exponerse al chat."""
+    mem = _memory_stub(session={"tasks_completed": []})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Frecuencias y rutinas del servicio", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"}], "alertas": []}'
+    vr = EconomicValidationResult(
+        perfil_usado="generic",
+        blocking_issues=["precios_positivos: 1 ítems con precio <= 0"],
+        trazabilidad={"precios_positivos": {"valor_calculado": ["Frecuencias y rutinas del servicio"]}},
+    )
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.validate_economic_proposal", return_value=vr),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-block-no-locator",
+                company_id="co_x",
+                compliance_master_list={"tecnico": [{"id": "t1", "descripcion": "Frecuencias y rutinas del servicio"}]},
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    assert out.data.get("missing") == []
+    assert "error de extracción" in str(out.message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_validation_blocking_excluye_documentales_como_repse():
+    """Cortafuego: términos documentales (p.ej. REPSE/registro) no se piden como precio."""
+    mem = _memory_stub(session={"tasks_completed": []})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = (
+        '{"items": ['
+        '{"concepto": "Registro de prestadores de servicios especializados u obras especializadas (REPSE)", "concepto_id": "t1", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"},'
+        '{"concepto": "Servicio de vigilancia turno diurno", "concepto_id": "t2", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "matched"}'
+        '], "alertas": []}'
+    )
+    vr = EconomicValidationResult(
+        perfil_usado="generic",
+        blocking_issues=["precios_positivos: 2 ítems con precio <= 0"],
+        trazabilidad={
+            "precios_positivos": {
+                "valor_calculado": [
+                    "Registro de prestadores de servicios especializados u obras especializadas (REPSE)",
+                    "Servicio de vigilancia turno diurno",
+                ]
+            }
+        },
+    )
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch("app.agents.economic.validate_economic_proposal", return_value=vr),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-block-no-repse",
+                company_id="co_x",
+                compliance_master_list={
+                    "tecnico": [
+                        {"id": "t1", "descripcion": "REPSE vigente", "source": "bases.pdf", "page": 25, "snippet": "presentar REPSE"},
+                        {"id": "t2", "descripcion": "Servicio de vigilancia turno diurno", "source": "bases.pdf", "page": 30, "snippet": "servicio de vigilancia turno diurno"},
+                    ]
+                },
+            )
+        )
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing", [])
+    bi = (miss[0].get("blocking_items") if miss else []) or []
+    labels = " | ".join(str(x.get("concepto_label") or "").lower() for x in bi)
+    assert "repse" not in labels and "registro" not in labels
+    assert "vigilancia" in labels
+
+
+@pytest.mark.asyncio
+async def test_save_pending_questions_reemplaza_bloqueo_economico_previo():
+    """Nueva corrida de bloqueo económico debe sustituir cola previa del mismo tipo (evita 3 vs 12)."""
+    mem = _memory_stub(
+        session={
+            "tasks_completed": [],
+            "pending_questions": [
+                {"field": "validation_rule_1", "type": "economic_validation_blocking", "question": "12 ítems"},
+                {"field": "validation_rule_2", "type": "economic_validation_blocking", "question": "12 ítems"},
+                {"field": "price_x", "type": "economic_price", "question": "precio x"},
+            ],
+            "current_question_index": 2,
+        }
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    await agent._save_pending_questions(
+        "s-queue-replace",
+        [
+            {
+                "field": "validation_rule_1",
+                "label": "Corregir propuesta económica",
+                "question": "3 ítems con precio <= 0",
+                "type": "economic_validation_blocking",
+                "blocking_items": [{"concepto_label": "Concepto A"}],
+            }
+        ],
+    )
+    saved = mem.save_session.await_args.args[1]
+    pending = saved.get("pending_questions") or []
+    assert len([q for q in pending if str(q.get("type")) == "economic_validation_blocking"]) == 1
+    assert any(str(q.get("question") or "").startswith("3 ítems") for q in pending)
+
+
+def test_human_economic_blocking_summary_prioriza_ux_user_message():
+    """Resumen humano: prioriza ux.user_message del primer evento con severidad block."""
+    vr = EconomicValidationResult(blocking_issues=["tipo: detalle técnico largo"])
+    evs = [
+        {
+            "severity": "block",
+            "error_type": "precios_positivos",
+            "ux": {"title": "Totales", "user_message": "El subtotal no coincide con la suma de partidas."},
+        }
+    ]
+    s = _human_economic_blocking_summary(evs, vr)
+    assert "subtotal" in s.lower()
+    assert "totales" in s.lower()
+
+
+def test_human_economic_blocking_summary_sin_ux_usa_primer_blocking_issue():
+    """Sin eventos UX, el resumen humano toma el primer blocking_issue (texto plano)."""
+    vr = EconomicValidationResult(blocking_issues=["Falta IVA en la fila de totales."])
+    s = _human_economic_blocking_summary([], vr)
+    assert "iva" in s.lower()
+    assert "totales" in s.lower()
+
+
+def test_human_economic_blocking_summary_acepta_validation_result_dict():
+    """Persistencia en sesión usa dict (JSON); el resumen debe leer blocking_issues igual."""
+    vr_dict = {"blocking_issues": ["totales: la suma no coincide con el subtotal."]}
+    s = _human_economic_blocking_summary([], vr_dict)
+    assert "subtotal" in s.lower() or "suma" in s.lower()

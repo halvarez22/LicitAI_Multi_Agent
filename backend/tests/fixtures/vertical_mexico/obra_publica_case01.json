@@ -1,0 +1,16 @@
+{
+  "case_id": "obra_publica_case01",
+  "vertical": "obra_publica",
+  "context_text": "Con fundamento en la Ley de Obras Publicas y su Reglamento, la convocante informa condiciones generales del procedimiento. Para la propuesta economica, el licitante debera presentar analisis de precios unitarios, catalogo de conceptos y programa de obra detallado por frente de trabajo. Tambien debera acreditar maquinaria y equipo disponible para ejecucion y control de volumenes de obra.",
+  "expected": {
+    "sector_id": "obra_publica",
+    "allowed_sector_ids": [
+      "obra_publica"
+    ],
+    "required_signal_codes": [
+      "OP_ANALISIS_PRECIOS_UNITARIOS",
+      "OP_CATALOGO_CONCEPTOS"
+    ],
+    "min_evidence_items": 2
+  }
+}

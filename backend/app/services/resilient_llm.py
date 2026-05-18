@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from app.core.logging_config import get_logger
 import os
 import time
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.llm_service import LLMServiceClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ─── Circuit Breaker ──────────────────────────────────────────────────────────

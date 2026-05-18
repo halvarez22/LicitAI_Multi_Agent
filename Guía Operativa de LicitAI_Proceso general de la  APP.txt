@@ -1,0 +1,112 @@
+Guía Operativa de LicitAI:
+NO TECNICO
+
+Proceso de Blindaje de Propuestas
+Este es el flujo de trabajo real que sigue tu asistente inteligente. Está diseñado para que tú te enfoques en la estrategia mientras nosotros nos encargamos del cumplimiento estricto.
+
+1. Lectura Deep-Scan de Bases
+En cuanto subes el pliego, LicitAI realiza un escaneo exhaustivo de cada página para extraer el ADN de la licitación: impuestos, plazos, monedas y requisitos obligatorios.
+
+2. Filtros de Viabilidad y Descalificación Automática
+El sistema actúa como tu primer filtro de riesgos:
+
+Descalificación Dura (Regla 12.1): Nuestro módulo de cumplimiento analiza si hay alguna causa de descalificación fatal. Si la encuentra, el sistema ejecuta un corte preventivo para avisarte que, bajo las reglas actuales, la propuesta sería rechazada.
+Semáforo de Riesgo: De forma paralela, el sistema calcula un semáforo (Rojo/Amarillo/Verde) de viabilidad general para ayudarte a decidir si vale la pena invertir tiempo en esta licitación.
+3. Inventario de Faltantes (DATAGAP)
+Comparamos tu expediente legal contra las bases. Si falta una fianza, un certificado o un dato, el chat te preguntará de forma proactiva. Puedes resolverlo ahí mismo para que el sistema lo archive y lo dé por cumplido.
+
+4. Doble Motor Económico (El Corazón del Sistema)
+Para eliminar el riesgo de errores aritméticos:
+
+Mapeo Inteligente: La IA identifica qué partida de las bases corresponde a cada ítem de tu catálogo.
+Cálculo Matemático Real: Una calculadora determinista (matemática pura) realiza todas las operaciones.
+Blindaje de Cuadratura: Si el total calculado por el sistema difiere del total de tu Excel de trabajo por más de un centavo, el sistema se detiene y bloquea la propuesta. No permitimos que generes una cotización que no cuadre perfectamente.
+FSR (Salario Real): Aplica fórmulas exactas de Ley para cargos indirectos y cargas sociales de personal.
+5. Chat RAG: Tu Asistente "Todo Terreno"
+Tienes un chat experto que conoce cada renglón de las bases y tus anexos:
+
+Incluso si tienes un bloqueo económico (por precios mal capturados), el chat se mantiene abierto. Puedes seguir haciéndole consultas sobre el pliego mientras corriges tus montos.
+Cada respuesta te dirá exactamente en qué página y documento encontró la información.
+6. Generación de Documentación Listos para Firma
+Una vez que el sistema valida que todo es correcto técnicamente y cuadra económicamente, genera tus entregables:
+
+Formatos en Excel (.xlsx): Listos para subirse a portales de compra o para ajustes de último minuto.
+Anexos en Word (.docx): Documentos técnicos y legales formateados según el pliego, listos para tu revisión y firma.
+Nota para el Especialista: Aunque el sistema automatiza la generación, contamos con un Reporte de Auditoría independiente que puedes solicitar al final para verificar la trazabilidad de cada precio antes de la entrega formal.
+
+
+
+
+
+Guía Operativa de LicitAI:
+TECNICO
+
+Este es el **Flujo de Trabajo Técnico Definitivo de LicitAI**. Este documento ha sido validado contra el código real y ajustado para reflejar con precisión matemática y arquitectónica el estado actual del sistema.
+
+---
+
+# 🤖 Arquitectura Técnica y Flujo de Trabajo: LicitAI Multi-Agent Pipeline
+
+El sistema opera bajo una orquestación centralizada (`OrchestratorAgent`) que coordina una cadena de **11 micro-servicios y agentes especializados**, asegurando un proceso lineal, auditable y de "Cero Errores Aritméticos".
+
+## 📡 Estructura del Pipeline (11 Etapas)
+
+### 1. Fase de Ingesta y Análisis (`analysis`)
+*   **Agente**: `AnalystAgent` (`app/agents/analyst.py`).
+*   **Proceso**: OCR y extracción semántica de bases (PDF/Word). Identifica parámetros de negocio (IVA, plazos, moneda) y alcance operativo sin realizar cálculos.
+
+### 2. Validación de Requisitos (`compliance`)
+*   **Agente**: `ComplianceAgent` (`app/agents/compliance.py`).
+*   **Proceso**: Compara los requisitos extraídos contra el catálogo de capacidades y documentos de la empresa. Genera la `master_compliance_list`.
+
+### 3. Barrera de Seguridad Determinista (`compliance_gate`)
+*   **Lógica**: Módulo de reglas rígidas.
+*   **Función**: Aplica la **Regla 12.1** (Descalificación Dura). Si detecta un incumplimiento insalvable, ejecuta un corte determinista del flujo para proteger la integridad de la propuesta.
+
+### 4. Evaluación de Riesgos (`go_no_go`)
+*   **Agente**: `GoNoGoAgent`.
+*   **Función**: Calcula el **Semáforo de Viabilidad (RED/YELLOW/GREEN)** basado en el porcentaje de cumplimiento y brechas críticas detectadas.
+
+### 5. Extracción Económica (`economic` - Capa 1)
+*   **Agente**: `EconomicExtractorLLM` (`app/agents/economic.py`).
+*   **Función**: Realiza el mapeo semántico puro: "Concepto de Bases" ↔ "Ítem del Catálogo".
+*   **Blindaje**: La IA tiene prohibido realizar cualquier operación aritmética. Solo extrae cantidades y unidades.
+
+### 6. Motor Determinista (`economic_calculator` - Capa 2)
+*   **Servicio**: `EconomicCalculatorEngine` (`app/services/economic_calculator_engine.py`).
+*   **Perfil Agóstico**: Detecta el tipo de licitación vía `profiles_config.json` (ej: Salario Real v1).
+*   **Aritmética Industrial**: Utiliza la librería `Decimal` para precisión absoluta.
+*   **Fail-Closed**: Bloquea el proceso si la **cuadratura** contra el Excel del usuario difiere por > $0.01 o si faltan parámetros obligatorios de FSR (IMSS, Infonavit, etc.).
+
+### 7. Cierre de Brechas e HITL (`datagap`)
+*   **Agente**: `DataGapAgent` (`app/agents/data_gap.py`).
+*   **HITL**: Genera preguntas proactivas (`pending_questions`) para datos faltantes. Permite la actualización de variables de perfil en tiempo real vía chat.
+
+### 8. Validación Técnica (`technical`)
+*   **Proceso**: Cruza especificaciones técnicas detalladas (fichas técnicas) contra requerimientos de las bases.
+
+### 9. Normalización de Formatos (`formats`)
+*   **Proceso**: Adapta la información extraída a las plantillas y anexos específicos solicitados en el pliego.
+
+### 10. Escritura de Entregables (`economic_writer`)
+*   **Agente**: `EconomicWriterAgent` (`app/agents/economic_writer.py`).
+*   **Salida**: Genera archivos físicos en formatos **.xlsx** (Cédulas) y **.docx** (Anexos y Cartas).
+
+### 11. Empaquetado y Entrega (`packager` & `delivery`)
+*   **Proceso**: Consolida el expediente final para su descarga o carga en portal.
+
+---
+
+## 💬 El Nuevo Componente Conversacional: Asistente RAG Experto
+*   **Archivo**: `app/agents/chatbot_rag.py`.
+*   **Inteligencia de Enrutamiento**: Clasifica en tiempo real si el mensaje es `DATA_INTAKE`, `META` o `QUERY`.
+*   **Búsqueda RAG 360°**: Escanea el documento principal y anexos secundarios simultáneamente.
+*   **Política "Fail-Open"**: A diferencia de las fases de generación, el Chat no se bloquea ante errores externos. Permite consultas al RAG mientras exista un bloqueo económico activo, inyectando recordatorios contextuales en cada respuesta.
+
+---
+
+## ✅ Resumen de Blindaje y Robustez
+1.  **Cero Aritmética Blanda**: La IA no toca los totales; el motor Python garantiza la exactitud monetaria.
+2.  **Desacoplamiento (Agnosticismo)**: Las reglas de cada institución (ISSSTE, IMSS, etc.) residen en archivos JSON externos, no en el código núcleo.
+3.  **Trazabilidad**: Aunque es un proceso de post-procesado, el sistema soporta auditorías vía `generate_audit_report.py` para certificar el origen de cada precio.
+4.  **Revalidación**: La actualización completa del motor económico requiere un trigger explícito de "Generar o Continuar" para asegurar la consistencia de todos los anexos.

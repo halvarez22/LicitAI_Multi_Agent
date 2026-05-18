@@ -1,0 +1,16 @@
+{
+  "case_id": "adquisiciones_case01",
+  "vertical": "adquisiciones",
+  "context_text": "De conformidad con la normatividad aplicable, se aceptaran proposiciones por partidas. Cada participante debera incluir fichas tecnicas de los bienes, plan de entrega de bienes y, cuando aplique, muestras para validacion tecnica. La convocante podra solicitar documentacion complementaria de garantia de fabricante.",
+  "expected": {
+    "sector_id": "adquisiciones",
+    "allowed_sector_ids": [
+      "adquisiciones"
+    ],
+    "required_signal_codes": [
+      "ADQ_PARTIDAS",
+      "ADQ_FICHAS_TECNICAS"
+    ],
+    "min_evidence_items": 2
+  }
+}

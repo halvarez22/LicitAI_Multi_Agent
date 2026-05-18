@@ -4,6 +4,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.routes import health, agents
 from app.api.v1.routes import upload, chatbot, sessions, companies, downloads, feedback, experience
+from app.api.v1.routes import go_no_go as go_no_go_routes
+from app.api.v1.routes import interaction_blocks
 from app.core.logging_config import configure_logging, get_logger
 
 # ================================
@@ -108,6 +110,8 @@ app.include_router(companies.router, prefix="/api/v1/companies", tags=["Base de 
 app.include_router(downloads.router, prefix="/api/v1/downloads", tags=["Descarga de Documentos"])
 app.include_router(feedback.router, prefix="/api/v1/feedback", tags=["Feedback HITL"])
 app.include_router(experience.router, prefix="/api/v1/experience", tags=["Experiencia y Casos Similares"])
+app.include_router(go_no_go_routes.router, prefix="/api/v1/go-no-go", tags=["Semáforo Go/No-Go"])
+app.include_router(interaction_blocks.router, prefix="/api/v1", tags=["Bloques de interacción"])
 
 @app.on_event("startup")
 async def startup_event():

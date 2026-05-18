@@ -1,0 +1,197 @@
+{
+  "version": "1.0.0",
+  "validation_rules": [
+    {
+      "error_type": "precios_positivos",
+      "severity": "block",
+      "ux": {
+        "title": "Faltan precios por capturar",
+        "user_message": "Para completar tu propuesta económica, necesito que me ayudes con los precios de algunas partidas (me faltan {{item_count}} conceptos).\n\nEl asistente te pedirá un dato a la vez en el chat. Solo escribe el número sin IVA (ej: 15000) o pon 0 si no lleva costo. Cuando termines, revalidaremos todo automáticamente.\n\nEjemplos pendientes: {{lista_breve}}.",
+        "primary_action": { "label": "Completar en el chat", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Justificar precio cero", "type": "modal", "requires_justification": true, "skip_condition": "allow_skip_with_justification" },
+        "impact": "Es necesario contar con todos los precios unitarios para garantizar que la oferta cumpla con los requisitos de la convocatoria."
+      },
+      "context_fields": ["item_id", "item_name", "raw_value", "item_count", "lista_breve"]
+    },
+    {
+      "error_type": "total_base_cotizable",
+      "severity": "block",
+      "ux": {
+        "title": "Importe total en cero",
+        "user_message": "El subtotal de la propuesta aún no se ha podido calcular porque faltan los precios base de las partidas principales.\n\nPor favor, proporciona los precios faltantes a través del chat para que podamos finalizar tu cotización correctamente.",
+        "primary_action": { "label": "Ir al chat", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Ver panel económico", "type": "navigate", "target": "economic_panel" },
+        "impact": "El importe total es un dato obligatorio para la validez legal de tu propuesta."
+      },
+      "context_fields": ["total_base", "currency", "items_count"]
+    },
+    {
+      "error_type": "document_quality_gate",
+      "severity": "block",
+      "ux": {
+        "title": "Calidad documental insuficiente para generar",
+        "user_message": "La clasificación documental de esta sesión no es suficientemente confiable para generar documentos sin riesgo (demasiados ítems ambiguos o evidencia débil). Revisa el clasificador/compliance, ajusta fuentes y vuelve a revalidar.",
+        "primary_action": { "label": "Revisar clasificación", "type": "navigate", "target": "validation_policy" },
+        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "impact": "Podrías terminar con documentos irrelevantes o incompletos y exponer descalificación por forma."
+      },
+      "context_fields": ["reason", "metrics"]
+    },
+    {
+      "error_type": "placeholder_detected",
+      "severity": "block",
+      "ux": {
+        "title": "Texto de relleno detectado en documento",
+        "user_message": "Se detectaron placeholders o textos de dato pendiente en un documento final. Antes de enviar, corrige el contenido para que quede con datos reales verificables.",
+        "primary_action": { "label": "Revisar documento afectado", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "impact": "Enviar formatos con texto de relleno puede invalidar la propuesta por incumplimiento formal."
+      },
+      "context_fields": ["document_id", "field_key", "detected_value", "expected_rule"]
+    },
+    {
+      "error_type": "required_field_missing",
+      "severity": "block",
+      "ux": {
+        "title": "Campo crítico faltante en documento",
+        "user_message": "Se detectó un campo obligatorio sin valor útil en el documento generado. Completa el dato y vuelve a generar/revalidar.",
+        "primary_action": { "label": "Completar dato faltante", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "impact": "Un campo crítico vacío puede causar observaciones o descalificación."
+      },
+      "context_fields": ["document_id", "field_key", "detected_value", "expected_rule"]
+    },
+    {
+      "error_type": "cross_field_inconsistency",
+      "severity": "block",
+      "ux": {
+        "title": "Inconsistencia entre campos del documento",
+        "user_message": "Se detectó inconsistencia entre campos relacionados (por ejemplo totales o datos de identidad). Revisa y corrige antes de continuar.",
+        "primary_action": { "label": "Revisar consistencia", "type": "navigate", "target": "economic_panel" },
+        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "impact": "Inconsistencias internas debilitan la validez técnica y económica de la oferta."
+      },
+      "context_fields": ["document_id", "field_key", "detected_value", "expected_rule"]
+    },
+    {
+      "error_type": "source_confidence_insufficient",
+      "severity": "block",
+      "ux": {
+        "title": "Confianza insuficiente en fuente de dato",
+        "user_message": "Un dato crítico proviene de una fuente con confianza baja para certificar llenado final. Refuerza evidencia o confirma manualmente.",
+        "primary_action": { "label": "Ver evidencia", "type": "navigate", "target": "validation_policy" },
+        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "impact": "Riesgo de enviar datos no verificables en documentos oficiales."
+      },
+      "context_fields": ["document_id", "field_key", "expected_rule"]
+    },
+    {
+      "error_type": "consistencia_subtotales",
+      "severity": "block",
+      "ux": {
+        "title": "Subtotal inconsistente",
+        "user_message": "La suma de partidas (${{raw_value}}) no coincide con el total declarado (${{expected_value}}).",
+        "primary_action": { "label": "Recalcular automatico", "type": "auto_fix", "target": "totals_section" },
+        "secondary_action": { "label": "Editar manualmente", "type": "navigate", "target": "line_items" },
+        "impact": "Error matematico critico; la plataforma rechazara la propuesta."
+      },
+      "context_fields": ["raw_value", "expected_value"]
+    },
+    {
+      "error_type": "missing_mandatory_field",
+      "severity": "block",
+      "ux": {
+        "title": "Dato obligatorio faltante",
+        "user_message": "El campo '{{field_name}}' es requisito explicito de la convocatoria.",
+        "primary_action": { "label": "Completar ahora", "type": "navigate", "target": "field_{{field_name}}" },
+        "secondary_action": { "label": "Ver ejemplo", "type": "modal" },
+        "impact": "Rechazo por incumplimiento formal."
+      },
+      "context_fields": ["field_name"]
+    },
+    {
+      "error_type": "unsupported_mime",
+      "severity": "block",
+      "ux": {
+        "title": "Archivo no compatible",
+        "user_message": "El archivo '{{file_name}}' no esta en los formatos aceptados para esta seccion.",
+        "primary_action": { "label": "Subir valido", "type": "navigate", "target": "upload_area" },
+        "secondary_action": { "label": "Ver formatos", "type": "modal" },
+        "impact": "Documento no evaluable en fase tecnica."
+      },
+      "context_fields": ["file_name", "uploaded_mime"]
+    },
+    {
+      "error_type": "iva_calculation_mismatch",
+      "severity": "warn",
+      "ux": {
+        "title": "IVA no coincide",
+        "user_message": "Subtotal + IVA != Total declarado. Verifica la tasa aplicada.",
+        "primary_action": { "label": "Recalcular IVA", "type": "auto_fix", "target": "tax_section" },
+        "secondary_action": { "label": "Continuar con advertencia", "type": "continue_with_warning" },
+        "impact": "Posible observacion financiera en dictamen."
+      },
+      "context_fields": ["item_id", "applied_rate"]
+    },
+    {
+      "error_type": "budget_exceeded",
+      "severity": "warn",
+      "ux": {
+        "title": "Monto supera tope",
+        "user_message": "La cotizacion excede el presupuesto base en ${{raw_value}}.",
+        "primary_action": { "label": "Optimizar precios", "type": "navigate", "target": "pricing_optimizer" },
+        "secondary_action": { "label": "Continuar con advertencia", "type": "continue_with_warning" },
+        "impact": "Menor competitividad o rechazo por fuera de rango."
+      },
+      "context_fields": ["raw_value", "tender_cap"]
+    },
+    {
+      "error_type": "duplicate_item_id",
+      "severity": "warn",
+      "ux": {
+        "title": "Concepto duplicado",
+        "user_message": "'{{item_name}}' aparece mas de una vez. Esto infla el total y genera observaciones.",
+        "primary_action": { "label": "Fusionar/Eliminar", "type": "modal", "target": "dedup_wizard" },
+        "secondary_action": { "label": "Continuar con advertencia", "type": "continue_with_warning" },
+        "impact": "Inflado artificial del monto total."
+      },
+      "context_fields": ["item_id", "item_name"]
+    },
+    {
+      "error_type": "invalid_date_format",
+      "severity": "warn",
+      "ux": {
+        "title": "Fecha con formato incorrecto",
+        "user_message": "Ingresaste '{{raw_value}}'. El sistema espera DD/MM/AAAA para calcular vigencias.",
+        "primary_action": { "label": "Corregir formato", "type": "navigate", "target": "date_field_{{field_name}}" },
+        "secondary_action": { "label": "Continuar con advertencia", "type": "continue_with_warning" },
+        "impact": "Riesgo administrativo en calculo de plazos."
+      },
+      "context_fields": ["field_name", "raw_value"]
+    },
+    {
+      "error_type": "signature_pending",
+      "severity": "block",
+      "ux": {
+        "title": "Firma pendiente",
+        "user_message": "La propuesta esta completa, pero falta la firma digital.",
+        "primary_action": { "label": "Iniciar firma", "type": "navigate", "target": "signing_flow" },
+        "secondary_action": { "label": "Guardar borrador", "type": "navigate", "target": "save_draft" },
+        "impact": "Propuesta invalida sin firma ante la entidad."
+      },
+      "context_fields": ["session_id"]
+    },
+    {
+      "error_type": "session_timeout",
+      "severity": "info",
+      "ux": {
+        "title": "Sesion reanudada",
+        "user_message": "Tu avance se guardo tras 30 min de inactividad. Todo esta listo para continuar.",
+        "primary_action": { "label": "Retomar", "type": "navigate", "target": "last_step" },
+        "secondary_action": { "label": "Cerrar", "type": "close" },
+        "impact": "Ninguno. Estado preservado."
+      },
+      "context_fields": ["last_active"]
+    }
+  ]
+}

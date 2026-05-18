@@ -9,6 +9,15 @@ LicitAI es un sistema multi-agente para la extracción, análisis y auditoría f
 - **Inteligencia Artificial:** Orquestación de Agentes con LangChain/LlamaIndex, ejecutando modelos mediante Ollama localmente (ej. qwen2.5-coder, llama3, etc.).
 - **Infraestructura:** Todo está contenerizado con Docker (orquestado vía `docker-compose.yml`).
 
+## Estándar replicable (portafolio / otras apps)
+
+El patrón **verdad canónica + gobernanza de validaciones + HITL transaccional + cascada de precedencia + procedencia visible** está documentado para reutilizarlo en cualquier proyecto:
+
+- **Normativa completa:** [`docs/ESTANDAR_ENTERPRISE_CANONICO_HITL.md`](docs/ESTANDAR_ENTERPRISE_CANONICO_HITL.md)
+- **Regla Cursor (siempre activa en este repo):** [`.cursor/rules/enterprise-canonical-hitl.mdc`](.cursor/rules/enterprise-canonical-hitl.mdc)
+- **Playbook de despliegue:** [`DEPLOY_HARDENING_PLAYBOOK.md`](DEPLOY_HARDENING_PLAYBOOK.md)
+- **Repo estándares (single source of truth, hermano):** `../licitai-estandares` — clonar o añadir como submodule para alinear otros productos.
+
 ## 🧠 Flujo de Análisis Forense
 El sistema sigue un flujo especializado "Pipeline" para analizar licitaciones:
 1. **Intake / VisionExtractor:** Extracción de datos de PDFs (escaneados y nativos).

@@ -44,6 +44,8 @@ async def test_formats_blocking_when_slots_missing():
     assert "rfc" in fields
     assert "domicilio_fiscal" in fields
     assert "representante_legal" in fields
+    assert "razon_social" not in fields
+    assert "cedula_representante" not in fields
     assert all(m.get("type") == "profile_field" for m in missing)
     assert all(m.get("blocking_job_id") == "job_fmt_block" for m in missing)
 

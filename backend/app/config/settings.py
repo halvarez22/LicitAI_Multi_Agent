@@ -1,7 +1,7 @@
 import os
 import re
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -52,7 +52,59 @@ class Settings(BaseSettings):
     EXPERIENCE_MIN_CASES: int = 1
     EXPERIENCE_API_ENABLED: bool = False
     EXPERIENCE_DEBUG: bool = False
-    
+
+    # --- Inventario de documentos (amplía compliance antes de generar Word) ---
+    DOCUMENT_INVENTORY_MERGE_ENABLED: bool = True
+    DOCUMENT_INVENTORY_MAX_ADD: int = 55
+    DOCUMENT_INVENTORY_CONTEXT_CHARS: int = 90000
+    DOCUMENT_INVENTORY_SERVICE_ENABLED: bool = True
+    DOCUMENT_INVENTORY_SERVICE_USE_LLM: bool = True
+    DOCUMENT_INVENTORY_SYNC_ENABLED: bool = True
+
+    # --- Gate duro de calidad documental ---
+    DOCUMENT_QUALITY_HARD_GATE_ENABLED: bool = True
+    DOCUMENT_QUALITY_GATE_MIN_ITEMS: int = 3
+    DOCUMENT_QUALITY_GATE_MAX_UNKNOWN_RATIO: float = 0.6
+    DOCUMENT_QUALITY_GATE_MIN_EVIDENCE_MATCH_RATIO: float = 0.5
+    DOCUMENT_FILL_QUALITY_GATE_ENABLED: bool = True
+    DOCUMENT_FILL_QUALITY_GATE_MODE: str = "audit"
+    DOCUMENT_FILL_QUALITY_MIN_CONFIDENCE_CRITICAL: float = 0.75
+    INTAKE_PLANNER_ENABLED: bool = True
+    INTAKE_PLANNER_SHADOW_MODE: bool = False
+    FAST_TRACK_DOC_CANDIDATES_ENABLED: bool = True
+    FAST_TRACK_REQUIRE_HUMAN_CONFIRM: bool = True
+    FAST_TRACK_LOW_CONF_THRESHOLD: float = 0.70
+
+    # --- Enhanced Analyst Agent (Solvencia Técnica y Condiciones Contractuales) ---
+    ENHANCED_EXTRACTION_ENABLED: bool = True
+    EXTRACTION_CONFIDENCE_THRESHOLD: float = 0.5
+    DEFAULT_CLASSIFICATION: str = "obligatorio"
+
+    # --- Tender Router & Legal Audit — Prompt Hardening v2 ---
+    # Rollback: setear ROUTER_PROMPT_VERSION=v1 para revertir a prompts originales
+    ROUTER_PROMPT_VERSION: str = "v2"          # "v1" | "v2"
+    TRIAGE_SIGNALS_ENABLED: bool = True        # Incluir signals_detected en triage
+    AUDIT_DUAL_OBLIGATION_ENABLED: bool = True # obligatorio_por_bases + por_marco_normativo
+    AUDIT_JUSTIFICATION_ENABLED: bool = True   # justificacion_clasificacion por item
+    TRIAGE_ENABLED: bool = True                # Master switch del triage normativo
+    # Post-proceso: anclar label_taxonomica desde texto + vocabulario cerrado en prompt de auditoría
+    COMPLIANCE_TAXONOMY_ANCHOR_ENABLED: bool = True
+
+    # --- EvidenceProfile Bridge (Go/No-Go con evidencia de sesión) ---
+    ENABLE_EVIDENCE_PROFILE_BRIDGE: bool = False
+
+    # --- Resolución por bloques (Hito A1) ---
+    ENABLE_BLOCK_RESOLUTION: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LICITAI_ENABLE_BLOCK_RESOLUTION", "ENABLE_BLOCK_RESOLUTION"),
+        description="Si True, expone preview/guardado masivo de InteractionBlock para pendientes económicos agrupados.",
+    )
+    BLOCK_RESOLUTION_MIN_ITEMS: int = Field(
+        default=3,
+        validation_alias=AliasChoices("LICITAI_BLOCK_RESOLUTION_MIN_ITEMS", "BLOCK_RESOLUTION_MIN_ITEMS"),
+        description="Mínimo de ítems economic_price en un mismo grupo para formar un InteractionBlock.",
+    )
+
     # Redis for communication
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379

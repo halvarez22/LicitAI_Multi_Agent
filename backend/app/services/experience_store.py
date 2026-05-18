@@ -1,13 +1,14 @@
 import hashlib
 import json
 import logging
+from app.core.logging_config import get_logger
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 from app.services.vector_service import VectorDbServiceClient
 from app.memory.factory import MemoryAdapterFactory
 from app.config.settings import settings
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class ExperienceCase(BaseModel):
     session_id: str

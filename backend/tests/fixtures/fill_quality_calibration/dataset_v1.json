@@ -1,0 +1,156 @@
+{
+  "dataset_version": "v1.0.0",
+  "notes": "Dataset inicial de calibracion con casos positivos, negativos y edge cases.",
+  "cases": [
+    {
+      "case_id": "formats_placeholder_block_001",
+      "stage": "formats",
+      "documents": [
+        {
+          "kind": "docx",
+          "filename": "anexo_7.docx",
+          "tipo": "administrativo",
+          "template_id": "anexo_7",
+          "lines": [
+            "Carta bajo protesta.",
+            "Representante legal: [NOMBRE COMPLETO]"
+          ]
+        }
+      ],
+      "master_profile": {
+        "razon_social": "ACME SA DE CV",
+        "rfc": "ACM010101AAA",
+        "representante_legal": "Ana Perez"
+      },
+      "expected_issues": [
+        {
+          "error_type": "placeholder_detected",
+          "field_key": "content",
+          "severity": "warn"
+        }
+      ],
+      "expected_blocking": false
+    },
+    {
+      "case_id": "economic_xlsx_missing_totals_001",
+      "stage": "economic",
+      "documents": [
+        {
+          "kind": "xlsx",
+          "filename": "TABLA_PRECIOS_UNITARIOS.xlsx",
+          "tipo": "tabla_precios",
+          "template_id": "tabla_precios",
+          "labels": {}
+        }
+      ],
+      "master_profile": {
+        "razon_social": "ACME SA DE CV",
+        "rfc": "ACM010101AAA",
+        "representante_legal": "Ana Perez"
+      },
+      "expected_issues": [
+        {
+          "error_type": "required_field_missing",
+          "field_key": "subtotal",
+          "severity": "warn"
+        },
+        {
+          "error_type": "required_field_missing",
+          "field_key": "iva",
+          "severity": "warn"
+        },
+        {
+          "error_type": "required_field_missing",
+          "field_key": "total",
+          "severity": "warn"
+        }
+      ],
+      "expected_blocking": false
+    },
+    {
+      "case_id": "economic_docx_valid_totals_001",
+      "stage": "economic",
+      "documents": [
+        {
+          "kind": "docx",
+          "filename": "ANEXO_AE_PROPUESTA_ECONOMICA.docx",
+          "tipo": "anexo_economico",
+          "template_id": "anexo_economico",
+          "lines": [
+            "SUBTOTAL: $100.00",
+            "IVA (16%): $16.00",
+            "TOTAL DE LA PROPUESTA: $116.00"
+          ]
+        }
+      ],
+      "master_profile": {
+        "razon_social": "ACME SA DE CV",
+        "rfc": "ACM010101AAA",
+        "representante_legal": "Ana Perez"
+      },
+      "expected_issues": [],
+      "expected_blocking": false
+    },
+    {
+      "case_id": "formats_persona_fisica_edge_001",
+      "stage": "formats",
+      "documents": [
+        {
+          "kind": "docx",
+          "filename": "anexo_7_pf.docx",
+          "tipo": "administrativo",
+          "template_id": "anexo_7",
+          "lines": [
+            "Persona fisica participante, sin representante legal obligatorio en este anexo."
+          ]
+        }
+      ],
+      "master_profile": {
+        "razon_social": "JUAN PEREZ",
+        "rfc": "PEPJ8001011A1",
+        "representante_legal": "",
+        "tipo_persona": "fisica"
+      },
+      "expected_issues": [],
+      "expected_blocking": false
+    },
+    {
+      "case_id": "formats_confidence_low_rfc_001",
+      "stage": "formats",
+      "documents": [
+        {
+          "kind": "docx",
+          "filename": "anexo_7_low_conf.docx",
+          "tipo": "administrativo",
+          "template_id": "anexo_7",
+          "lines": [
+            "Documento administrativo."
+          ]
+        }
+      ],
+      "master_profile": {
+        "razon_social": "ACME SA DE CV",
+        "rfc": "ACM010101AAA",
+        "representante_legal": "Ana Perez"
+      },
+      "provenance_context": {
+        "source": "llm_inference",
+        "field_provenance": {
+          "rfc": {
+            "source": "llm_inference",
+            "confidence": 0.45,
+            "anchor": null
+          }
+        }
+      },
+      "expected_issues": [
+        {
+          "error_type": "source_confidence_insufficient",
+          "field_key": "rfc",
+          "severity": "warn"
+        }
+      ],
+      "expected_blocking": false
+    }
+  ]
+}

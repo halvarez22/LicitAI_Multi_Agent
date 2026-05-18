@@ -1,0 +1,16 @@
+{
+  "case_id": "servicios_case01",
+  "vertical": "servicios",
+  "context_text": "Sin perjuicio de los requisitos legales del procedimiento, el proveedor debera presentar metodologia operativa y perfiles de personal para la prestacion del servicio. Se evaluaran niveles de servicio (SLA), cobertura operativa por turnos y esquema de supervision para cumplimiento del contrato.",
+  "expected": {
+    "sector_id": "servicios",
+    "allowed_sector_ids": [
+      "servicios"
+    ],
+    "required_signal_codes": [
+      "SER_SLA",
+      "SER_METODOLOGIA"
+    ],
+    "min_evidence_items": 2
+  }
+}

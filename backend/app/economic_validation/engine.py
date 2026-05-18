@@ -20,6 +20,18 @@ def _to_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _exempt_from_positive_unit_price(it: Dict[str, Any]) -> bool:
+    """
+    Renglones explícitamente marcados como sin precio unitario positivo (p. ej.
+    supervisor incluido en indirectos) no deben disparar precios_positivos.
+    """
+    if not isinstance(it, dict):
+        return False
+    if it.get("supervisor_sin_costo") is True:
+        return True
+    return False
+
+
 def _extract_first_amount(text: str) -> Optional[float]:
     if not isinstance(text, str):
         return None
@@ -65,6 +77,9 @@ def _add(
         out.alerts.append(f"{regla}: {evidencia}")
 
 
+_MIN_TOTAL_BASE_MONETARY = 0.01  # Un centavo; umbral operativo "cotizable distinto de cero"
+
+
 def validate_economic_proposal(
     *,
     proposal_items: List[Dict[str, Any]],
@@ -73,6 +88,7 @@ def validate_economic_proposal(
     grand_total: float,
     reglas_economicas: Dict[str, str],
     session_name: str = "",
+    allow_zero_total_base: bool = False,
 ) -> EconomicValidationResult:
     profile_name = detect_profile(reglas_economicas or {}, session_name=session_name)
     profile = get_profile(profile_name)
@@ -81,6 +97,8 @@ def validate_economic_proposal(
     # 1) Precios nulos/negativos
     bad_prices = []
     for it in proposal_items or []:
+        if _exempt_from_positive_unit_price(it):
+            continue
         pu = _to_float(it.get("precio_unitario"), default=-1.0)
         if pu <= 0:
             bad_prices.append(str(it.get("concepto") or it.get("descripcion") or "ítem"))
@@ -104,6 +122,48 @@ def validate_economic_proposal(
             fuente="proposal_items",
             formula="precio_unitario > 0",
             valor=True,
+        )
+
+    # 1b) Subtotal cotizable antes de IVA (evita éxito con solo renglones exentos o totales vacíos)
+    if allow_zero_total_base:
+        _add(
+            out,
+            regla="total_base_cotizable",
+            estado="ok",
+            evidencia="Importe base < umbral aceptado por confirmación explícita del usuario (HITL).",
+            severidad=1,
+            fuente="session.economic_user_inputs.allow_zero_total_base_ack",
+            formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY} OR allow_zero_total_base",
+            valor={"total_base": total_base, "allow_zero_total_base": True},
+        )
+    elif total_base >= _MIN_TOTAL_BASE_MONETARY:
+        _add(
+            out,
+            regla="total_base_cotizable",
+            estado="ok",
+            evidencia="El subtotal base cotizable supera el umbral mínimo operativo.",
+            severidad=1,
+            fuente="proposal_totals",
+            formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY}",
+            valor={"total_base": total_base},
+        )
+    else:
+        _add(
+            out,
+            regla="total_base_cotizable",
+            estado="blocking",
+            evidencia=(
+                f"El importe base de la propuesta ({total_base:.2f} {currency}) es cero o inferior "
+                f"a {_MIN_TOTAL_BASE_MONETARY:.2f}; no hay cotización accionable sin confirmación explícita."
+            ),
+            severidad=3,
+            fuente="proposal_totals",
+            formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY} OR allow_zero_total_base",
+            valor={
+                "total_base": total_base,
+                "currency": currency,
+                "items_count": len(proposal_items or []),
+            },
         )
 
     # 2) Consistencia subtotal por ítem

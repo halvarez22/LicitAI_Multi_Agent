@@ -2,6 +2,7 @@
 Slots obligatorios del piloto Hito 4 (FormatsAgent — formatos administrativos).
 
 Funciones puras para validación en tests y reutilización desde el agente.
+También usados por TechnicalWriterAgent antes de redactar propuesta técnica.
 """
 from __future__ import annotations
 
@@ -9,6 +10,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Orden estable: mismo orden en missing_fields y pending_questions
 PILOT_SLOT_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
+    (
+        "razon_social",
+        "Razón social de la empresa",
+        "Necesito la **razón social** registrada para generar encabezados y firmas correctas.",
+        "Consulta tu Acta Constitutiva o Constancia de Situación Fiscal.",
+    ),
     (
         "rfc",
         "RFC oficial de la empresa",
@@ -29,12 +36,32 @@ PILOT_SLOT_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
     ),
 )
 
+_PLACEHOLDER_STRINGS = frozenset(
+    {
+        "n/a",
+        "na",
+        "s/d",
+        "s.d.",
+        "pendiente",
+        "—",
+        "-",
+        "...",
+        "[dato]",
+        "n/d",
+    }
+)
+
 
 def _is_empty_profile_value(value: Any) -> bool:
     if value is None:
         return True
-    if isinstance(value, str) and not value.strip():
-        return True
+    if isinstance(value, str):
+        t = value.strip()
+        if not t:
+            return True
+        low = t.lower()
+        if low in _PLACEHOLDER_STRINGS:
+            return True
     return False
 
 

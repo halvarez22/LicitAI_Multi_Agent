@@ -137,6 +137,24 @@ class ComplianceGate:
 
         # Reglas textuales deterministas por regex.
         if rule.regex_pattern and re.search(rule.regex_pattern, evidence_text):
+            # 12.1.E: falso positivo frecuente — las bases mencionan la regla de descalificación
+            # en su propio texto. Solo bloquear si hay contexto activo de alteración
+            # (ej: "documento tachado", "enmendado por el licitante"), no si es texto normativo.
+            if rule.code == "12.1.E":
+                # Patrones que indican mención normativa (la base describe la regla, no una infracción)
+                normative_ctx = re.search(
+                    r"(?i)(ser[aá]\s+desechad|causa\s+de\s+desechamiento|motivo\s+de\s+descalificaci[oó]n"
+                    r"|no\s+se\s+aceptar[aá]n|quedar[aá]\s+descalificad|ser[aá]\s+descalificad"
+                    r"|numeral\s+12|art[íi]culo\s+\d|bases\s+de\s+licitaci[oó]n)",
+                    evidence_text,
+                )
+                if normative_ctx:
+                    result["decision"] = "warn"
+                    result["reason"] = (
+                        "Patrón detectado en texto normativo de las bases (mención de la regla, "
+                        "no evidencia de infracción activa). Requiere revisión manual."
+                    )
+                    return result
             result["decision"] = "block"
             result["reason"] = "Patrón de descalificación detectado en evidencia."
             return result

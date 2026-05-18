@@ -13,6 +13,19 @@ from app.services.resilient_llm import ResilientLLMClient
 from app.services.vector_service import VectorDbServiceClient
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 
+# Recordatorio de logística: la INE no se inserta en DOCX generados por el sistema;
+# es obligación de presentación física / sobre según bases (Kiro / producto).
+_CHECK_IDENTIFICACION_REPRESENTANTE = {
+    "check": (
+        "Identificación oficial del representante legal (INE o equivalente): preparar copia legible para "
+        "incluirla en el sobre que indiquen las bases (habitualmente documentación administrativa o técnica, "
+        "según convocatoria) y/o llevar la credencial para cotejo o exhibición en el acto de apertura de "
+        "proposiciones. Confirmar siempre en las bases oficiales."
+    ),
+    "status": "pendiente",
+}
+
+
 class DeliveryAgent(BaseAgent):
     """
     Agente: Guía de Entrega.
@@ -42,7 +55,32 @@ class DeliveryAgent(BaseAgent):
         
         # 3. Analizar modalidad vía LLM
         guia_data = await self._analizar_entrega_llm(context_rag, correlation_id)
-        
+
+        # 4. Enriquecer checklist con documentos reales generados (Req 7.1)
+        # Si el orquestador inyectó documentos_generados, los agregamos al checklist
+        # para que el usuario pueda verificar cada archivo antes de presentar.
+        company_data = agent_input.company_data or {}
+        documentos_generados: Dict[str, Any] = company_data.get("documentos_generados", {})
+        if documentos_generados:
+            checklist_docs = []
+            categoria_labels = {
+                "tecnica": "Propuesta Técnica",
+                "administrativa": "Documentos Administrativos",
+                "economica": "Propuesta Económica",
+            }
+            for cat_key, cat_label in categoria_labels.items():
+                for doc in documentos_generados.get(cat_key, []):
+                    nombre = doc.get("nombre") or doc.get("ruta", "Documento")
+                    checklist_docs.append({
+                        "check": f"[{cat_label}] {nombre}",
+                        "status": "pendiente",
+                    })
+            if checklist_docs:
+                # Anteponer los documentos reales al checklist del LLM
+                guia_data["checklist"] = checklist_docs + guia_data.get("checklist", [])
+
+        self._ensure_identificacion_representante_checklist(guia_data)
+
         # 4. Generar PDF de Instrucciones
         output_dir = os.path.join("/data", "outputs", session_id)
         os.makedirs(output_dir, exist_ok=True)
@@ -125,9 +163,25 @@ class DeliveryAgent(BaseAgent):
         return {
             "tipo": "DETERMINACIÓN_MANUAL_REQUERIDA",
             "alertas": ["No se pudo determinar la logística de forma automatizada. Por favor, consulte las bases en la sección de 'Presentación y Apertura de Proposiciones'."],
-            "checklist": [],
+            "checklist": [dict(_CHECK_IDENTIFICACION_REPRESENTANTE)],
             "pasos": []
         }
+
+    @staticmethod
+    def _ensure_identificacion_representante_checklist(guia_data: Dict[str, Any]) -> None:
+        """Añade recordatorio de INE/representante al checklist si aún no está (no bloquea generación DOCX)."""
+        raw = guia_data.get("checklist")
+        if not isinstance(raw, list):
+            guia_data["checklist"] = []
+            raw = guia_data["checklist"]
+        needle = "identificación oficial del representante"
+        if any(
+            needle in str((x or {}).get("check") or "").lower()
+            for x in raw
+            if isinstance(x, dict)
+        ):
+            return
+        raw.append(dict(_CHECK_IDENTIFICACION_REPRESENTANTE))
 
     def _generate_pdf_guide(self, path: str, data: Dict, session_id: str):
         """Genera un reporte PDF profesional usando ReportLab."""

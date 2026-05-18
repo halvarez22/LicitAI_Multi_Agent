@@ -1,0 +1,24 @@
+{
+  "policy_version": "fill-gate-policy-v1",
+  "ignore_rules": [
+    {
+      "error_type": "required_field_missing",
+      "field_key": "representante_legal",
+      "when_master_profile": {
+        "tipo_persona": "fisica"
+      }
+    },
+    {
+      "error_type": "source_confidence_insufficient",
+      "stage": "formats",
+      "template_id": "anexo_7"
+    }
+  ],
+  "severity_overrides": [
+    {
+      "error_type": "source_confidence_insufficient",
+      "field_key": "rfc",
+      "severity": "warn"
+    }
+  ]
+}

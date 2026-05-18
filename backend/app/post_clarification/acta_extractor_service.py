@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from app.core.logging_config import get_logger
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -8,7 +9,7 @@ from typing import Optional
 from app.agents.extractor_digital import DigitalExtractorAgent
 from app.agents.extractor_vision import VisionExtractorAgent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass

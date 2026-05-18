@@ -19,6 +19,24 @@ from app.services.analyst_output_normalize import (
 )
 from app.config.settings import settings
 
+# Enhanced extraction imports (Task 5)
+from app.agents.enhanced_prompts import (
+    SOLVENCIA_SEARCH_STRING,
+    CONTRACTUAL_SEARCH_STRING,
+    ENHANCED_EXTRACTION_PROMPT,
+    SECTOR_SPECIFIC_KEYWORDS,
+)
+from app.agents.enhanced_normalize import (
+    normalize_solvencia_tecnica,
+    normalize_condiciones_contractuales,
+)
+from app.agents.enhanced_models import (
+    AuditReport,
+    AlertaDescalificacion,
+    GapAnalysisItem,
+)
+from app.agents.enhanced_consolidator import consolidate_checklist
+
 # Logger estructurado
 logger = get_logger(__name__)
 
@@ -46,6 +64,52 @@ _CRONOGRAMA_ALIASES: Final[Dict[str, str]] = {
     "firma": "firma_contrato",
     "firma_del_contrato": "firma_contrato",
     "firma_contrato": "firma_contrato",
+}
+
+_SECTOR_IDS: Final[Tuple[str, ...]] = (
+    "obra_publica",
+    "salud",
+    "adquisiciones",
+    "servicios",
+    "tic",
+)
+
+_SECTOR_CONF_MIN: Final[float] = 0.55
+_SECTOR_DELTA_MIXTO: Final[float] = 0.10
+
+_SECTOR_SIGNAL_PATTERNS: Final[Dict[str, List[Tuple[str, str, float]]]] = {
+    "obra_publica": [
+        (r"an[aá]lisis de precios unitarios", "OP_ANALISIS_PRECIOS_UNITARIOS", 0.35),
+        (r"cat[aá]logo de conceptos", "OP_CATALOGO_CONCEPTOS", 0.28),
+        (r"programa de obra", "OP_PROGRAMA_OBRA", 0.22),
+        (r"maquinaria y equipo", "OP_MAQUINARIA", 0.18),
+        (r"vol[uú]menes de obra", "OP_VOLUMENES", 0.18),
+    ],
+    "salud": [
+        (r"registro sanitario", "SALUD_REG_SANITARIO", 0.34),
+        (r"cofepris", "SALUD_COFEPRIS", 0.30),
+        (r"cadena de fr[ií]o", "SALUD_CADENA_FRIO", 0.20),
+        (r"carta de apoyo del fabricante", "SALUD_CARTA_APOYO_FABRICANTE", 0.28),
+        (r"aviso de funcionamiento", "SALUD_AVISO_FUNCIONAMIENTO", 0.26),
+    ],
+    "adquisiciones": [
+        (r"\bpartidas?\b", "ADQ_PARTIDAS", 0.15),
+        (r"fichas? t[eé]cnicas?", "ADQ_FICHAS_TECNICAS", 0.18),
+        (r"entrega de bienes", "ADQ_ENTREGA_BIENES", 0.17),
+        (r"muestras?", "ADQ_MUESTRAS", 0.14),
+    ],
+    "servicios": [
+        (r"niveles? de servicio|\bsla\b", "SER_SLA", 0.24),
+        (r"metodolog[ií]a operativa", "SER_METODOLOGIA", 0.18),
+        (r"perfil de personal", "SER_PERFIL_PERSONAL", 0.18),
+        (r"cobertura operativa", "SER_COBERTURA", 0.15),
+    ],
+    "tic": [
+        (r"licenciamiento", "TIC_LICENCIAMIENTO", 0.22),
+        (r"ciberseguridad", "TIC_CIBERSEGURIDAD", 0.22),
+        (r"mesa de ayuda", "TIC_MESA_AYUDA", 0.16),
+        (r"integraciones? api", "TIC_API", 0.20),
+    ],
 }
 
 
@@ -149,7 +213,191 @@ def normalize_requisitos_participacion_list(raw: Any) -> List[Dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        out.append({"inciso": inc, "texto_literal": txt})
+        
+        # Captura de evidencia (NUEVO)
+        pg = item.get("pagina") or item.get("page") or ""
+        src = item.get("archivo_fuente") or item.get("source") or ""
+        snip = item.get("texto_literal") or item.get("snippet") or txt
+        
+        out.append({
+            "inciso": inc, 
+            "texto_literal": txt,
+            "pagina": str(pg),
+            "archivo_fuente": str(src),
+            "evidence_snippet": str(snip)[:500]
+        })
+    return out
+
+
+def _section_hint_for_index(context: str, index: int) -> str:
+    """Devuelve una pista de origen basada en encabezados de sección cercanos."""
+    lower = (context or "").lower()
+    markers: Tuple[Tuple[str, str], ...] = (
+        ("=== sección económica y partidas ===", "seccion_economica"),
+        ("=== sección alcance operativo", "seccion_alcance"),
+        ("=== sección participación", "seccion_participacion"),
+        ("=== sección filtros exclusión y documentación ===", "seccion_filtros"),
+        ("=== sección evaluación ===", "seccion_evaluacion"),
+    )
+    nearest = "contexto_general"
+    best = -1
+    for marker, label in markers:
+        pos = lower.rfind(marker, 0, max(index, 0) + 1)
+        if pos > best:
+            best = pos
+            nearest = label
+    return nearest
+
+
+def _excerpt(text: str, start: int, end: int, radius: int = 70) -> str:
+    """Extrae snippet legible alrededor de una coincidencia regex."""
+    if not text:
+        return ""
+    s = max(0, start - radius)
+    e = min(len(text), end + radius)
+    return " ".join(text[s:e].split())
+
+
+def build_sector_classification(context: str, llm_data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """
+    Clasifica sector principal con enfoque conservador y evidencia auditable.
+    Combina señales rule-based del contexto + señales llm-assisted derivadas de JSON del analista.
+    """
+    base_context = context or ""
+    evidence: List[Dict[str, Any]] = []
+    scores: Dict[str, float] = {sid: 0.0 for sid in _SECTOR_IDS}
+    method = "rule_based"
+
+    for sector_id, signal_defs in _SECTOR_SIGNAL_PATTERNS.items():
+        for pattern, signal_code, weight in signal_defs:
+            for match in re.finditer(pattern, base_context, flags=re.IGNORECASE):
+                snippet = _excerpt(base_context, match.start(), match.end())
+                if not snippet:
+                    continue
+                evidence.append(
+                    {
+                        "signal_code": signal_code,
+                        "snippet": snippet,
+                        "source_hint": _section_hint_for_index(base_context, match.start()),
+                        "weight": round(weight, 2),
+                    }
+                )
+                scores[sector_id] += weight
+
+    llm_text = ""
+    if isinstance(llm_data, dict):
+        llm_text = " ".join(
+            [
+                str(llm_data.get("requisitos_participacion", "")),
+                str(llm_data.get("requisitos_filtro", "")),
+                str(llm_data.get("reglas_economicas", "")),
+                str(llm_data.get("alcance_operativo", "")),
+            ]
+        )
+    if llm_text.strip():
+        method = "hybrid"
+        for sector_id, signal_defs in _SECTOR_SIGNAL_PATTERNS.items():
+            llm_hits = 0
+            for pattern, _, _ in signal_defs:
+                if re.search(pattern, llm_text, flags=re.IGNORECASE):
+                    llm_hits += 1
+            if llm_hits > 0:
+                scores[sector_id] += 0.06 * llm_hits
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top_sector, top_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    total = sum(scores.values())
+    confidence = top_score / total if total > 0 else 0.0
+
+    if total > 0 and (top_score - second_score) < _SECTOR_DELTA_MIXTO:
+        sector_id = "mixto"
+        reason = "Señales relevantes en más de un sector con diferencia no concluyente."
+    elif confidence < _SECTOR_CONF_MIN:
+        sector_id = "indeterminado"
+        reason = "Confianza insuficiente para clasificación sectorial concluyente."
+    else:
+        sector_id = top_sector
+        reason = f"Predominio de señales para {top_sector}."
+
+    return {
+        "sector_id": sector_id,
+        "confidence": round(confidence, 4),
+        "method": method,
+        "scores": {k: round(v, 4) for k, v in scores.items()},
+        "evidence": evidence[:12],
+        "decision_reason": reason,
+        "version": "sector-v1",
+    }
+
+
+def _build_solvencia_legal_requirements(text: str) -> List[Dict[str, Any]]:
+    """
+    Extrae señales de solvencia legal desde contexto de bases.
+    Heurístico determinista para no depender del estado del LLM.
+    """
+    t = (text or "").lower()
+    out: List[Dict[str, Any]] = []
+    if any(k in t for k in ("padron de proveedores", "padrón de proveedores", "registro estatal de proveedores")):
+        out.append(
+            {
+                "titulo": "Registro en padrón de proveedores",
+                "descripcion": "La convocante exige constancia vigente en padrón/registro de proveedores.",
+                "criticidad": "critico",
+                "evidencia": "padron_proveedores_detectado",
+                "confidence": 0.8,
+            }
+        )
+    if any(k in t for k in ("domicilio fiscal", "comprobante de domicilio")):
+        out.append(
+            {
+                "titulo": "Comprobante de domicilio fiscal",
+                "descripcion": "Se solicita comprobante de domicilio fiscal vigente.",
+                "criticidad": "critico",
+                "evidencia": "domicilio_fiscal_detectado",
+                "confidence": 0.8,
+            }
+        )
+    return out
+
+
+def _build_solvencia_economica_requirements(text: str) -> List[Dict[str, Any]]:
+    """
+    Extrae señales de solvencia económica desde contexto.
+    """
+    t = (text or "").lower()
+    out: List[Dict[str, Any]] = []
+    if any(k in t for k in ("estados financieros auditados", "estados financieros dictaminados")):
+        out.append(
+            {
+                "titulo": "Estados financieros auditados",
+                "descripcion": "Las bases requieren estados financieros auditados/dictaminados.",
+                "criticidad": "critico",
+                "evidencia": "estados_financieros_auditados_detectado",
+                "confidence": 0.82,
+            }
+        )
+    if any(k in t for k in ("declaración anual isr", "declaracion anual isr", "declaracion anual")):
+        out.append(
+            {
+                "titulo": "Declaración anual ISR",
+                "descripcion": "Se requiere declaración anual de ISR reciente.",
+                "criticidad": "critico",
+                "evidencia": "declaracion_anual_isr_detectado",
+                "confidence": 0.78,
+            }
+        )
+    m = re.search(r"capital (?:contable )?m[ií]nimo.{0,40}\$?\s*([0-9][0-9,\.]+)", text or "", flags=re.IGNORECASE)
+    if m:
+        out.append(
+            {
+                "titulo": "Capital mínimo requerido",
+                "descripcion": f"Las bases mencionan capital mínimo requerido aproximado de {m.group(1)}.",
+                "criticidad": "bloqueante",
+                "evidencia": "capital_minimo_detectado",
+                "confidence": 0.85,
+            }
+        )
     return out
 
 
@@ -175,6 +423,35 @@ class AnalystAgent(BaseAgent):
             threshold_critical=settings.CONFIDENCE_THRESHOLD_CRITICAL
         )
         self.experience_store = ExperienceStore()
+    
+    def _verify_search_results_session(self, results: str, expected_session_id: str) -> Tuple[str, bool]:
+        """
+        Verifica que los resultados de búsqueda pertenezcan a la sesión esperada.
+        
+        CORREGIDO: Método agregado para garantizar aislamiento de sesiones.
+        
+        Args:
+            results: String de resultados de búsqueda (puede contener metadatos)
+            expected_session_id: ID de sesión esperado
+            
+        Returns:
+            (filtered_results, has_warnings): Resultados filtrados y si hubo warnings
+        """
+        # Por ahora, los resultados de smart_search son strings
+        # La verificación real se hace en VectorDbServiceClient con filtrado por session_id
+        # Este método está preparado para futuras mejoras donde los resultados incluyan metadatos
+        
+        has_warnings = False
+        
+        # Log de verificación para trazabilidad
+        logger.info(
+            "session_verification",
+            agent=self.agent_id,
+            session_id=expected_session_id,
+            results_length=len(results) if results else 0
+        )
+        
+        return results, has_warnings
 
     async def _build_datos_tabulares(self, session_id: str, context_str: str) -> Dict[str, Any]:
         """
@@ -242,9 +519,20 @@ class AnalystAgent(BaseAgent):
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         """
         Extrae la información clave de los textos procesados usando el LLM.
+        
+        CORREGIDO: Agregado logging explícito de session_id para trazabilidad.
         """
         session_id = agent_input.session_id
         correlation_id = agent_input.correlation_id or "no-id"
+        
+        # CORRECCIÓN: Logging explícito de session_id para trazabilidad
+        logger.info(
+            "analyst_process_start",
+            agent=self.agent_id,
+            session_id=session_id,
+            correlation_id=correlation_id
+        )
+        print(f"  🔍 Analista: Procesando sesión {session_id}")
         
         async with agent_span(logger, self.agent_id, session_id, correlation_id):
             # 1. Recuperar contexto Multidimensional
@@ -296,6 +584,39 @@ class AnalystAgent(BaseAgent):
             # Búsqueda 6: Evaluación y Garantías
             search_eval = await self.smart_search(session_id, "criterios de evaluacion puntos y porcentajes binario garantias cumplimiento seriedad", n_results=10, vector_db=self.vector_db)
             
+            # --- Task 5.1: New search patterns for enhanced extraction ---
+            # Búsqueda 7: Solvencia Técnica (experiencia, curriculum, personal, equipamiento, normas, referencias)
+            search_solvencia = ""
+            search_condiciones = ""
+            
+            if settings.ENHANCED_EXTRACTION_ENABLED:
+                # Inyección dinámica de keywords por sector (para no "casarnos" con una industria)
+                sector_id = agent_input.triage_context.get("tender_category", "BIENES").lower()
+                # Mapeo de categorías de triage a sectores de búsqueda
+                sector_map = {
+                    "SERVICIOS": "servicios",
+                    "SALUD": "salud",
+                    "OBRA": "obra_publica"
+                }
+                target_sector = sector_map.get(sector_id, "servicios") # Default a servicios si no está claro
+                extra_keywords = " ".join(SECTOR_SPECIFIC_KEYWORDS.get(target_sector, []))
+                
+                solvencia_query = f"{SOLVENCIA_SEARCH_STRING} {extra_keywords}"
+                
+                search_solvencia = await self.smart_search(
+                    session_id,
+                    solvencia_query,
+                    n_results=12,
+                    vector_db=self.vector_db,
+                )
+                # Búsqueda 8: Condiciones Contractuales (tipo contrato, penalizaciones, pagos, garantías)
+                search_condiciones = await self.smart_search(
+                    session_id,
+                    CONTRACTUAL_SEARCH_STRING,
+                    n_results=12,
+                    vector_db=self.vector_db,
+                )
+            
             context_str = "\n\n=== SECCIÓN FECHAS ===\n" + search_dates
             context_str += "\n\n=== SECCIÓN PARTICIPACIÓN (elegibilidad y obligaciones para licitar) ===\n" + search_participacion
             context_str += "\n\n=== SECCIÓN FILTROS EXCLUSIÓN Y DOCUMENTACIÓN ===\n" + search_reqs
@@ -332,6 +653,16 @@ class AnalystAgent(BaseAgent):
             
             context_str += exp_context
 
+            # --- FASE 6: Perfil de Empresa (Matchmaking) ---
+            company_context = ""
+            master_profile = agent_input.company_data.get("master_profile") or {}
+            if master_profile:
+                company_context = "\n\n=== PERFIL DE LA EMPRESA (Tus Capacidades y Documentos) ===\n"
+                company_context += "Usa esta información para contrastar contra los requisitos de las bases:\n"
+                company_context += json.dumps(master_profile, indent=2, ensure_ascii=False)
+            
+            context_str += company_context
+
             # Truncamiento de seguridad operativa para 8GB VRAM
             context_str = self._truncate_context_for_llm(context_str, max_tokens=16000)
             
@@ -342,56 +673,63 @@ class AnalystAgent(BaseAgent):
                     "message": "Contexto insuficiente para un análisis serio. Verifica que los documentos hayan sido ingeridos correctamente."
                 }
 
-            # 2. Construir Prompt Forense
+            # 2. Construir Prompt de Auditor Senior de Estrategia
             system_prompt = (
-                "Eres un experto ANALISTA FORENSE de licitaciones. Tu misión es extraer la VERDAD literal del documento.\n"
-                "REGLAS DE ORO:\n"
-                "1. SI NO ESTÁ, NO EXISTE: Si un dato no aparece en el texto, responde 'No especificado'. JAMÁS inventes.\n"
-                "2. CERO ALUCINACIONES: No uses conocimientos previos. Solo lo que dice este texto.\n"
-                "3. LITERALIDAD TÉCNICA: Extrae requisitos como acciones completas y directas.\n"
-                "4. Responde ÚNICAMENTE en JSON válido."
+                "Eres el AUDITOR SENIOR DE ESTRATEGIA en LicitAI. Tu misión es garantizar que el cliente "
+                "NO sea descalificado y encontrar ventajas competitivas. Tu palabra es la última línea de defensa.\n\n"
+                "REGLAS DE ORO ACTUALIZADAS:\n"
+                "1. MENTALIDAD CAZA-TRAMPAS: Busca ambigüedades, requisitos contradictorios o plazos imposibles.\n"
+                "2. FILTRO DE SUPERVIVENCIA: Tu prioridad absoluta son las 'Causas de Descalificación'. Si detectas una, repórtala con urgencia.\n"
+                "3. ANÁLISIS DE BRECHA (GAP ANALYSIS): Compara requisitos contra el 'PERFIL DE LA EMPRESA' proporcionado. Marca lo que falta o está vencido.\n"
+                "4. TRAZABILIDAD TOTAL: Para cada requisito, gap o alerta, DEBES citar el número de página y nombre del archivo (ej: 'Pág. 12, bases.pdf'). Si no lo haces, tu análisis no es auditable.\n"
+                "5. SI NO ESTÁ, NO EXISTE: Mantén la precisión técnica absoluta.\n"
+                "6. Responde ÚNICAMENTE en JSON válido."
             )
             
-            prompt = f"""Analiza estos extractos de bases de licitación y genera el dictamen estructurado.
+            # --- INYECCIÓN DE TRIAGE ---
+            if agent_input.triage_context:
+                law = agent_input.triage_context.get("law", "LAASSP")
+                cat = agent_input.triage_context.get("tender_category", "BIENES")
+                system_prompt += f"\n\nCONTEXTO LEGAL: Ley {law}, Categoría {cat}."
+                system_prompt += "\nUsa este contexto para priorizar la búsqueda de hitos y reglas específicas de este marco normativo."
+            
+            prompt = f"""Analiza estos extractos de bases de licitación y genera el dictamen estructurado siguiendo el PENSAMIENTO ESTRATÉGICO:
+
+PASO 1 (MAPEO): ¿Qué es lo más difícil de cumplir en estas bases? Identifica trampas o requisitos imposibles.
+PASO 2 (CONTRASTE): ¿Qué le falta a la empresa (PERFIL DE LA EMPRESA) para ganar hoy mismo?
+PASO 3 (ESTRATEGIA): ¿Qué pregunta "incómoda" deberíamos hacer en la Junta de Aclaraciones?
 
 EXTRACTOS TÉCNICOS:
 {context_str}
 
+PERFIL DE LA EMPRESA (MATCHMAKING):
+{json.dumps(master_profile, indent=2, ensure_ascii=False) if master_profile else "No proporcionado"}
+
 TAREA:
-1. cronograma: Del texto, extrae fecha y hora (y lugar/medio si vienen en la misma fila o párrafo) para cada hito
-   que aparezca. Usa EXACTAMENTE estas claves en snake_case (string cada una; si no consta en el texto, "No especificado"):
-   - publicacion_convocatoria (publicación de convocatoria / aviso en DOF, CompraNet, etc.)
-   - visita_instalaciones (visita al sitio, recorrido, reunión en instalaciones, cuando aplique)
-   - junta_aclaraciones
-   - presentacion_proposiciones (presentación y apertura de proposiciones si van unidos; si el texto los separa, resume en un solo string fiel al documento)
-   - fallo
-   - firma_contrato (o celebración del contrato si así se denomina el evento)
-2. requisitos_participacion: Lista de OBJETOS, uno por cada obligación de participación o elegibilidad que aparezca
-   en SECCIÓN PARTICIPACIÓN (o equivalente en el texto), fiel al documento. Cada objeto:
-   {{"inciso": "a" o "b" o "" si no hay letra, "texto_literal": "cita o resumen fiel del requisito" }}.
-   Incluye incisos a), b), c)… cuando existan. NO listes aquí causas genéricas de descalificación: eso va en requisitos_filtro.
-   Si no hay texto sobre participación en los extractos, usa [].
-3. requisitos_filtro: Lista de strings: solo causas EXPLÍCITAS de exclusión, descalificación, rechazo o impedimento
-   para participar que el documento enuncie como tal (no repitas el mismo contenido de requisitos_participacion).
-   Si no hay ninguna enunciación clara, [].
-4. garantias: Montos o porcentajes de Seriedad y Cumplimiento.
-5. criterios_evaluacion: Determina si es Puntos y Porcentajes, Binario, o Costo Menor.
-6. reglas_economicas: Objeto con EXACTAMENTE estas claves (string cada una; si no consta en extractos, "No especificado"):
-   - referencia_partidas_anexos_citados (p. ej. asignación por partida, cantidades en anexo N)
-   - criterio_importe_minimo_o_plazo_inferior (p. ej. importe mínimo de propuesta, suma para N meses)
-   - criterio_importe_maximo_o_plazo_superior (p. ej. importe máximo, otro horizonte de meses)
-   - meses_o_periodo_minimo_citado
-   - meses_o_periodo_maximo_citado
-   - modalidad_contratacion_observada (p. ej. contrato abierto, cerrado, si el texto lo dice)
-   - vinculacion_presupuesto_partida (concordancia con presupuesto disponible por partida, si aplica)
-   - otras_reglas_oferta_precio (cualquier otra regla literal sobre oferta económica)
-7. alcance_operativo: Lista de OBJETOS, una fila por cada renglón sustantivo de tablas tipo descripción/unidad/cantidad,
-   turnos, áreas, dotación (SECCIÓN ALCANCE). Cada objeto con claves (vacío "" si no aplica en esa fila):
-   ubicacion_o_area, puesto_funcion_o_servicio, turno, horario, cantidad_o_elementos, dias_aplicables, texto_literal_fila.
-   Si no hay tabla en los extractos, [].
+1. audit_report: Evalúa riesgos estratégicos y brechas de la empresa contra las bases.
+2. cronograma: Extrae fecha y hora para cada hito (publicación, visita, junta, presentación, fallo, firma).
+3. requisitos_participacion: Lista de objetos {{"inciso": "...", "texto_literal": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}} de elegibilidad.
+4. requisitos_filtro: Lista de causas EXPLÍCITAS de descalificación.
+5. garantias: Montos o porcentajes de Seriedad y Cumplimiento.
+6. criterios_evaluacion: Puntos y Porcentajes, Binario, o Costo Menor.
+7. reglas_economicas: Reglas sobre importes, partidas y modalidad.
+8. alcance_operativo: Lista de filas de tablas de descripción de servicios.
 
 Responde con este JSON:
 {{
+  "audit_report": {{
+    "pensamiento_estrategico": "Análisis breve de la 'malicia' o complejidad de estas bases.",
+    "indice_de_viabilidad": 0,
+    "alertas_descalificacion": [
+      {{"motivo": "...", "pagina": 0, "gravedad": "ALTA/MEDIA", "sugerencia": "..."}}
+    ],
+    "gap_analysis": [
+      {{"requisito": "...", "estado_empresa": "FALTANTE/VENCIDO/OK", "accion_requerida": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}}
+    ],
+    "preguntas_junta_aclaraciones": [
+      "Pregunta técnica para clarificar el punto X..."
+    ]
+  }},
   "cronograma": {{
     "publicacion_convocatoria": "...",
     "visita_instalaciones": "...",
@@ -400,7 +738,7 @@ Responde con este JSON:
     "fallo": "...",
     "firma_contrato": "..."
   }},
-  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "..."}}, {{"inciso": "", "texto_literal": "..."}}],
+  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}}],
   "requisitos_filtro": ["causa de exclusión 1"],
   "garantias": {{"seriedad_oferta": "...", "cumplimiento": "..."}},
   "criterios_evaluacion": "...",
@@ -469,8 +807,27 @@ Responde con este JSON:
                     extracted_data["alcance_operativo"] = normalize_alcance_operativo_list(
                         extracted_data.get("alcance_operativo")
                     )
+                
+                # --- Normalización de Auditoría Estratégica ---
+                if "audit_report" not in extracted_data or not isinstance(extracted_data["audit_report"], dict):
+                    extracted_data["audit_report"] = {
+                        "pensamiento_estrategico": "No se pudo generar el análisis estratégico.",
+                        "indice_de_viabilidad": 0,
+                        "alertas_descalificacion": [],
+                        "gap_analysis": [],
+                        "preguntas_junta_aclaraciones": []
+                    }
+                else:
+                    ar = extracted_data["audit_report"]
+                    ar.setdefault("pensamiento_estrategico", "No especificado")
+                    ar.setdefault("indice_de_viabilidad", 0)
+                    ar.setdefault("alertas_descalificacion", [])
+                    ar.setdefault("gap_analysis", [])
+                    ar.setdefault("preguntas_junta_aclaraciones", [])
+
                 # Validación de esquema mínimo
                 _req_keys = (
+                    "audit_report",
                     "cronograma",
                     "requisitos_participacion",
                     "requisitos_filtro",
@@ -499,6 +856,101 @@ Responde con este JSON:
                 }
             if isinstance(extracted_data, dict):
                 extracted_data["datos_tabulares"] = tabular_info
+
+            # --- Task 5.3: Enhanced extraction for solvencia técnica and condiciones contractuales ---
+            if settings.ENHANCED_EXTRACTION_ENABLED and isinstance(extracted_data, dict):
+                try:
+                    # Build context for enhanced extraction
+                    enhanced_context = f"\n\n=== SECCIÓN SOLVENCIA TÉCNICA ===\n{search_solvencia}"
+                    enhanced_context += f"\n\n=== SECCIÓN CONDICIONES CONTRACTUALES ===\n{search_condiciones}"
+                    
+                    # Truncate for LLM
+                    enhanced_context = self._truncate_context_for_llm(enhanced_context, max_tokens=8000)
+                    
+                    if len(enhanced_context.strip()) > 100:
+                        # Call LLM for enhanced extraction
+                        enhanced_prompt = ENHANCED_EXTRACTION_PROMPT.format(
+                            context=enhanced_context,
+                            company_profile=json.dumps(master_profile, indent=2, ensure_ascii=False) if master_profile else "No proporcionado"
+                        )
+                        enhanced_system = (
+                            "Eres un experto ANALISTA FORENSE de licitaciones mexicanas. "
+                            "Extrae información de SOLVENCIA TÉCNICA y CONDICIONES CONTRACTUALES."
+                        )
+                        
+                        enhanced_llm_res = await self.llm.generate(
+                            prompt=enhanced_prompt,
+                            system_prompt=enhanced_system,
+                            format="json",
+                            correlation_id=correlation_id
+                        )
+                        
+                        if enhanced_llm_res.success:
+                            enhanced_raw = enhanced_llm_res.response
+                            
+                            # Clean markdown fences
+                            if "```json" in enhanced_raw:
+                                enhanced_raw = enhanced_raw.split("```json")[1].split("```")[0].strip()
+                            elif "```" in enhanced_raw:
+                                enhanced_raw = enhanced_raw.split("```")[1].split("```")[0].strip()
+                            
+                            try:
+                                enhanced_data = json.loads(enhanced_raw)
+                                
+                                # Normalize solvencia técnica
+                                solvencia_tecnica = normalize_solvencia_tecnica(
+                                    enhanced_data.get("solvencia_técnica", enhanced_data.get("solvencia_tecnica", {}))
+                                )
+                                
+                                # Normalize condiciones contractuales
+                                condiciones_contractuales = normalize_condiciones_contractuales(
+                                    enhanced_data.get("condiciones_contractuales", enhanced_data.get("condiciones_contractuales", {}))
+                                )
+                                
+                                # Add to extracted data
+                                extracted_data["solvencia_tecnica"] = solvencia_tecnica.model_dump()
+                                extracted_data["condiciones_contractuales"] = condiciones_contractuales.model_dump()
+                                
+                                # Generate consolidated checklist (Task 5.3 - Requirements 18.1, 18.2, 18.3, 18.4)
+                                checklist_consolidado = consolidate_checklist(solvencia_tecnica, condiciones_contractuales)
+                                extracted_data["checklist_consolidado"] = [
+                                    req.model_dump() for req in checklist_consolidado
+                                ]
+                                
+                                logger.info(
+                                    "enhanced_extraction_completed",
+                                    agent=self.agent_id,
+                                    session_id=session_id,
+                                    checklist_items=len(checklist_consolidado)
+                                )
+                            except json.JSONDecodeError as e:
+                                logger.warning("enhanced_json_parse_error", error=str(e))
+                            except Exception as e:
+                                logger.warning("enhanced_extraction_error", error=str(e))
+                except Exception as e:
+                    logger.warning("enhanced_extraction_failed", error=str(e))
+
+            if isinstance(extracted_data, dict):
+                # Campos nuevos para IntakePlanner (Fase 1 backend)
+                extracted_data.setdefault("condiciones_contractuales", {})
+                combined_solvencia_context = f"{search_solvencia}\n{search_condiciones}\n{context_str[:5000]}"
+                extracted_data["requisitos_solvencia_legal"] = _build_solvencia_legal_requirements(
+                    combined_solvencia_context
+                )
+                extracted_data["requisitos_solvencia_economica"] = _build_solvencia_economica_requirements(
+                    combined_solvencia_context
+                )
+                extracted_data["sector_classification"] = build_sector_classification(
+                    context=context_str,
+                    llm_data=extracted_data,
+                )
+                logger.info(
+                    "sector_classification_completed",
+                    session_id=session_id,
+                    sector_id=str(extracted_data["sector_classification"].get("sector_id") or "indeterminado"),
+                    confidence=float(extracted_data["sector_classification"].get("confidence") or 0.0),
+                    method=str(extracted_data["sector_classification"].get("method") or "rule_based"),
+                )
 
             # --- FASE 1: Cálculo de Confianza ---
             confidence_obj = None

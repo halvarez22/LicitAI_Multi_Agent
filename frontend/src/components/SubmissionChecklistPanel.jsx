@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import { API_BASE } from '../apiBase.js';
-import { CalendarClock, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { CalendarClock, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 
 /**
  * Panel de hitos del procedimiento (SubmissionChecklist) — Sprint 1.
@@ -11,6 +11,8 @@ export default function SubmissionChecklistPanel({ sessionId, onAskAboutHito, sy
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [data, setData] = useState(null);
+    /** Acordeón: abierto/cerrado. Por defecto cerrado para no saturar la columna izquierda. */
+    const [expanded, setExpanded] = useState(false);
     /** Borradores de evidencia por hito (solo antes de marcar completado). */
     const [evidenciaDraft, setEvidenciaDraft] = useState({});
 
@@ -67,6 +69,11 @@ export default function SubmissionChecklistPanel({ sessionId, onAskAboutHito, sy
 
     if (!sessionId) return null;
 
+    // Resumen para cabecera cerrada
+    const totalHitos = data?.hitos?.length ?? 0;
+    const hitosCompletados = data?.hitos?.filter(h => h.estado === 'completado').length ?? 0;
+    const hitosVencidos = data?.hitos?.filter(h => h.estado === 'vencido').length ?? 0;
+
     return (
         <div
             className="glass-panel"
@@ -77,8 +84,31 @@ export default function SubmissionChecklistPanel({ sessionId, onAskAboutHito, sy
                 background: 'rgba(0,0,0,0.2)',
             }}
         >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '10px' }}>
-                <h3
+            {/* ── CABECERA ACORDEÓN ── */}
+            <button
+                type="button"
+                aria-expanded={expanded}
+                aria-controls="hitos-panel"
+                onClick={() => setExpanded(v => !v)}
+                style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                    marginBottom: expanded ? '10px' : 0,
+                    borderRadius: '8px',
+                    outline: 'none',
+                }}
+                onFocus={e => e.currentTarget.style.boxShadow = '0 0 0 2px var(--primary)'}
+                onBlur={e  => e.currentTarget.style.boxShadow = 'none'}
+            >
+                {/* Icono + título */}
+                <span
                     style={{
                         fontSize: '11px',
                         fontWeight: 900,
@@ -88,36 +118,56 @@ export default function SubmissionChecklistPanel({ sessionId, onAskAboutHito, sy
                         display: 'flex',
                         alignItems: 'center',
                         gap: '6px',
-                        margin: 0,
                     }}
                 >
                     <CalendarClock size={14} color="var(--primary)" />
                     Hitos del procedimiento
-                </h3>
-                {data && (
-                    <span
-                        style={{
-                            fontSize: '10px',
-                            fontWeight: 800,
-                            color: 'var(--primary)',
-                            background: 'rgba(0,212,255,0.1)',
-                            padding: '4px 8px',
-                            borderRadius: '8px',
-                        }}
-                    >
-                        {data.porcentaje_completado ?? 0}% listo
-                    </span>
-                )}
-            </div>
+                </span>
 
-            {loading && (
-                <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>Cargando checklist…</p>
-            )}
-            {!loading && error && !data && (
-                <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>{error}</p>
-            )}
-            {!loading && data?.hitos?.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '280px', overflowY: 'auto' }}>
+                {/* Derecha: resumen + chevron */}
+                <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    {data && (
+                        <span
+                            style={{
+                                fontSize: '10px',
+                                fontWeight: 800,
+                                color: hitosVencidos > 0 ? '#f87171' : 'var(--primary)',
+                                background: hitosVencidos > 0 ? 'rgba(248,113,113,0.12)' : 'rgba(0,212,255,0.1)',
+                                padding: '3px 8px',
+                                borderRadius: '8px',
+                                transition: 'all 0.2s',
+                            }}
+                        >
+                            {hitosVencidos > 0
+                                ? `⚠ ${hitosVencidos} vencido${hitosVencidos > 1 ? 's' : ''} · ${data.porcentaje_completado ?? 0}%`
+                                : `${hitosCompletados}/${totalHitos} · ${data.porcentaje_completado ?? 0}%`
+                            }
+                        </span>
+                    )}
+                    {loading
+                        ? <RefreshCw size={14} color="var(--text-muted)" className="animate-spin" />
+                        : (expanded
+                            ? <ChevronUp  size={14} color="var(--text-muted)" />
+                            : <ChevronDown size={14} color="var(--text-muted)" />
+                          )
+                    }
+                </span>
+            </button>
+
+            {/* ── CUERPO COLAPSABLE ── */}
+            <div
+                id="hitos-panel"
+                hidden={!expanded}
+                style={expanded ? {} : { display: 'none' }}
+            >
+                {loading && (
+                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '8px 0 0' }}>Cargando checklist…</p>
+                )}
+                {!loading && error && !data && (
+                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '8px 0 0' }}>{error}</p>
+                )}
+                {!loading && data?.hitos?.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '420px', overflowY: 'auto' }}>
                     {data.hitos.map((h) => (
                         <div
                             key={h.id}
@@ -243,22 +293,29 @@ export default function SubmissionChecklistPanel({ sessionId, onAskAboutHito, sy
                         </div>
                     ))}
                 </div>
-            )}
-            <button
-                type="button"
-                onClick={fetchChecklist}
-                disabled={loading}
-                style={{
-                    marginTop: '10px',
-                    fontSize: '10px',
-                    color: 'var(--primary)',
-                    background: 'none',
-                    border: 'none',
-                    cursor: loading ? 'wait' : 'pointer',
-                }}
-            >
-                Actualizar checklist
-            </button>
+                )}
+
+                {/* Botón refresh — visible solo cuando expandido */}
+                <button
+                    type="button"
+                    onClick={fetchChecklist}
+                    disabled={loading}
+                    style={{
+                        marginTop: '10px',
+                        fontSize: '10px',
+                        color: 'var(--primary)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: loading ? 'wait' : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                    }}
+                >
+                    <RefreshCw size={10} />
+                    Actualizar checklist
+                </button>
+            </div>{/* fin #hitos-panel */}
         </div>
     );
 }

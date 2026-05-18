@@ -416,4 +416,6 @@ def process_audit_results_backend(
     orch_dec = results_data.get("orchestrator_decision")
     if isinstance(orch_dec, dict) and orch_dec.get("waiting_hints"):
         base["economicWaitingHints"] = orch_dec["waiting_hints"]
+    if results_data.get("fast_track_document_candidates"):
+        base["fastTrackDocumentCandidates"] = results_data["fast_track_document_candidates"]
     return apply_infrastructure_ux_overrides(base)

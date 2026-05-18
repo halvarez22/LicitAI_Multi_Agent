@@ -1,0 +1,61 @@
+Proceso de análisis de bases para generar el checklist de requisitos
+
+1. Lectura estructural del documento
+Identificar el tipo de procedimiento (licitación pública, invitación restringida, adjudicación directa)
+Identificar la convocante, el número de licitación y el objeto del contrato
+Mapear el índice completo para saber qué secciones existen y cuáles tienen requisitos exigibles
+2. Extracción de requisitos de participación (solvencia legal)
+Acta constitutiva y poder notarial del representante legal
+RFC y situación fiscal vigente
+Alta en el padrón de proveedores (si aplica)
+Declaraciones de no inhabilitación, no conflicto de interés, no deudas fiscales
+Identificación oficial del representante
+Comprobante de domicilio fiscal
+3. Extracción de requisitos de solvencia técnica
+Experiencia mínima en contratos similares (años, montos, número de contratos)
+Currículum de la empresa y del personal clave
+Plantilla de personal técnico con cédulas o certificaciones
+Equipamiento o infraestructura requerida
+Normas o certificaciones que debe cumplir el licitante (ISO, NOM, etc.)
+Contratos o cartas de referencia de trabajos previos
+4. Extracción de requisitos de solvencia económica
+Capital contable mínimo requerido
+Estados financieros auditados (últimos 1, 2 o 3 ejercicios)
+Declaración anual de ISR
+Línea de crédito o capacidad financiera
+Presupuesto base de licitación y techo máximo
+5. Análisis de la propuesta técnica
+Estructura exacta que debe tener (índice obligatorio, secciones, orden)
+Formatos oficiales que deben llenarse (identificar cada anexo)
+Especificaciones técnicas mínimas que debe cumplir lo ofertado
+Metodología o plan de trabajo requerido
+Calendario de ejecución o entregables
+Garantías técnicas exigidas
+6. Análisis de la propuesta económica
+Formato de cotización obligatorio (catálogo de conceptos, partidas)
+Moneda, IVA incluido o desglosado
+Vigencia de la propuesta
+Desglose de costos requerido (unitarios, directos, indirectos, utilidad, financiamiento)
+Garantía de seriedad de la propuesta (monto, tipo: fianza, cheque, carta de crédito)
+7. Identificación de causales de descalificación
+Leer explícitamente la sección de descalificación
+Extraer cada condición que invalida automáticamente una propuesta
+Marcarlas como requisitos críticos en el checklist
+8. Revisión de plazos y fechas clave
+Fecha límite para registro o manifestación de interés
+Fecha de junta de aclaraciones
+Fecha y hora límite de entrega de propuestas
+Fecha de apertura técnica y económica
+Fecha estimada de fallo
+9. Revisión de condiciones contractuales relevantes
+Tipo de contrato (precio fijo, precio alzado, por administración)
+Penalizaciones y deducciones
+Condiciones de pago (anticipos, estimaciones, finiquito)
+Garantía de cumplimiento (monto y tipo)
+Garantía de vicios ocultos
+10. Consolidación del checklist
+Agrupar todos los requisitos encontrados por categoría
+Marcar cada uno como: obligatorio / deseable / condicional
+Marcar los que tienen causal de descalificación si no se cumplen
+Asociar cada requisito al número de página o cláusula de las bases donde se menciona
+Generar el checklist final ordenado por prioridad de entrega

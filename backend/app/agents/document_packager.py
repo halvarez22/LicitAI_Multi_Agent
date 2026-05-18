@@ -54,6 +54,8 @@ class DocumentPackagerAgent(BaseAgent):
         caratulas = []
 
         for key, info in estructura.items():
+            if not isinstance(info, dict):
+                continue
             sobre_dir = os.path.join(output_base, info["nombre_carpeta"])
             os.makedirs(sobre_dir, exist_ok=True)
 

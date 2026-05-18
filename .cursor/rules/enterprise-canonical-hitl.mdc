@@ -1,0 +1,19 @@
+---
+description: Estándar enterprise — verdad canónica, HITL, cascada de precedencia y procedencia visible (replicable en todo el portafolio).
+alwaysApply: true
+---
+
+# Estándar ENTERPRISE_CANONICO_HITL
+
+Al diseñar o implementar funcionalidades que involucren **datos de negocio**, **decisiones automáticas** o **multi-agente**, aplicar siempre:
+
+1. **Verdad canónica** — Esquema versionado; normalizar fuentes heterogéneas; merge **idempotente**; señales de calidad (placeholders, ceros, etc.).
+2. **Gobernanza de validaciones** — `error_type` estable; mensajes UX centralizados (no texto técnico crudo al usuario); política dinámica donde aplique; reglas críticas no relajables documentadas.
+3. **HITL transaccional** — El usuario corrige en el canal principal (chat/UI); persistir overrides **auditables** (`source`, texto/frase original); **revalidar** tras cambios.
+4. **Cascada de precedencia explícita** — Una sola capa ordenada: **Usuario directo > documento normalizado > catálogo maestro > inferencia LLM/RAG**.
+5. **Procedencia visible** — Exponer por ítem un bloque tipo `provenance_ui` (API + UI); **misma semántica visual** en chat y paneles (badges/tooltips coherentes).
+6. **Operación** — Variables críticas nombradas; healthchecks; smoke E2E; playbook con rollback (ver `docs/ESTANDAR_ENTERPRISE_CANONICO_HITL.md` y `DEPLOY_HARDENING_PLAYBOOK.md`).
+
+**Documento normativo completo:** `docs/ESTANDAR_ENTERPRISE_CANONICO_HITL.md`
+
+**Principio:** Si el sistema no puede explicar de dónde salió un número o una decisión, el diseño no está cerrado.

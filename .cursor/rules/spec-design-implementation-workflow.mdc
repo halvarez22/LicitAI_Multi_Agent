@@ -1,0 +1,32 @@
+# Flujo de trabajo obligatorio: Spec -> Diseño -> Implementación
+
+Al iniciar cualquier cambio de producto/arquitectura/bugfix con impacto funcional:
+
+1. Definir o actualizar primero el **spec de requisitos**.
+2. Definir después el **diseño técnico** alineado al spec.
+3. Implementar código **solo** cuando spec y diseño estén cerrados.
+
+## Criterios mínimos por fase
+
+- **Spec**:
+  - Comportamiento actual (defecto o gap)
+  - Comportamiento esperado
+  - Comportamiento preservado (no regresión)
+  - Criterios de aceptación
+
+- **Diseño técnico**:
+  - Contratos de datos
+  - Archivos/componentes impactados
+  - Reglas de precedencia y trazabilidad
+  - Plan de pruebas y rollback
+
+- **Implementación**:
+  - Cambios por tarea del `tasks.md`
+  - Pruebas unitarias/integración relevantes
+  - Verificación E2E de flujo principal
+
+## Política operativa
+
+- Si hay divergencia entre spec y runtime, prevalece el spec aprobado.
+- No mezclar decisiones de producto en fase de implementación sin volver a spec/diseño.
+- Todo cambio debe conservar explicabilidad y trazabilidad (HITL/auditoría).

@@ -56,12 +56,23 @@ const LicitacionesGrid = ({ onSelectSession }) => {
     };
 
     const handleDelete = async (id) => {
-        if (!window.confirm("¿Seguro que deseas eliminar esta licitación y todos sus documentos?")) return;
+        console.log("Intentando eliminar licitación ID:", id);
+        if (!window.confirm("¿Seguro que deseas eliminar esta licitación y todos sus documentos?")) {
+            console.log("Eliminación cancelada por usuario");
+            return;
+        }
+        
         try {
-            await axios.delete(`${API_BASE}/sessions/${id}`);
-            fetchLicitaciones();
+            const res = await axios.delete(`${API_BASE}/sessions/${id}`);
+            console.log("Respuesta de eliminación:", res.data);
+            if (res.data.success) {
+                fetchLicitaciones();
+            } else {
+                alert("No se pudo eliminar: " + (res.data.message || "Error desconocido"));
+            }
         } catch (err) {
-            alert("Error al eliminar.");
+            console.error("Error al eliminar licitación:", err);
+            alert("Error al eliminar: " + (err.response?.data?.detail || err.message));
         }
     };
 
@@ -71,6 +82,11 @@ const LicitacionesGrid = ({ onSelectSession }) => {
     return (
         <div className="landing-container" style={{ padding: '60px 40px', maxWidth: '1280px', margin: '0 auto', animation: 'fadeIn 0.6s ease-out' }}>
             <div style={{ textAlign: 'center', marginBottom: '40px' }}>
+                <img 
+                    src="/images/logo_licitAI.png" 
+                    alt="LicitAI Logo" 
+                    style={{ height: '120px', marginBottom: '24px', objectFit: 'contain' }} 
+                />
                 <h1 style={{ 
                     fontSize: '48px', 
                     fontWeight: 900, 
@@ -81,7 +97,7 @@ const LicitacionesGrid = ({ onSelectSession }) => {
                     WebkitTextFillColor: 'transparent',
                     letterSpacing: '-1.5px'
                 }}>
-                    Qlicitaciones <span style={{ color: 'var(--primary)', WebkitTextFillColor: 'var(--primary)' }}>Empresas</span>
+                    Crea una <span style={{ color: 'var(--primary)', WebkitTextFillColor: 'var(--primary)' }}>{view === 'empresas' ? 'Empresa' : 'Licitación'}</span>
                 </h1>
                 
                 {/* Tab Switcher Estilo Moderno */}

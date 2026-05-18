@@ -1,8 +1,9 @@
+from app.core.logging_config import get_logger
 import logging, re, json
 from typing import List, Dict, Any, Optional
 from app.services.llm_service import LLMServiceClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Vocabulario Cerrado de Slots (Data points obligatorios en licitaciones)
 SLOT_VOCABULARY = {

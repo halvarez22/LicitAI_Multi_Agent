@@ -7,11 +7,26 @@ import {
 import axios from 'axios';
 import { API_BASE } from '../apiBase.js';
 
+/** Valores UI cuando el backend no envía dato (no son extractos oficiales de las bases). */
+const FALLBACK_LUGAR_TEXTO = 'Ver Guía PDF';
+const FALLBACK_HORARIO_ENTREGA = '09:00 - 15:00';
+const FALLBACK_LIMITE_TEXTO = 'Consultar bases';
+
+function IndicativoEtiqueta() {
+    return (
+        <span style={{ fontSize: '9px', fontWeight: 600, opacity: 0.75, marginLeft: '6px', color: '#94a3b8' }}>
+            (indicativo — confirmar en bases)
+        </span>
+    );
+}
+
 /** Panel de entrega: las rutas de descarga usan session_id para alinear con /data/outputs en el backend. */
 const DeliveryPanel = ({ sessionId, sessionName, results }) => {
     const [structure, setStructure] = useState([]);
     const [loading, setLoading] = useState(true);
     const [downloading, setDownloading] = useState(null);
+    /** Backend: carpeta /data/outputs resuelta con al menos un archivo (habilita ZIP aunque el árbol filtrado esté vacío). */
+    const [zipAvailable, setZipAvailable] = useState(false);
 
     // PUENTE DE DATOS: Si no hay resultados de generación, usamos los de auditoría (causales)
     const rawChecklist = results?.formats?.checklists?.sobre || 
@@ -22,9 +37,11 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                           (results?.causales ? results.causales.filter(c => c.isRisk).map(c => typeof c.texto === 'object' ? (c.texto.descripcion || c.texto.nombre) : c.texto) : []);
 
     const [selectedFile, setSelectedFile] = useState(null);
+    const [hoveredProvKey, setHoveredProvKey] = useState(null);
 
     const fetchStructure = async () => {
         if (!sessionId || sessionId === 'null') {
+            setZipAvailable(false);
             setLoading(false);
             return;
         }
@@ -33,6 +50,7 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
             const res = await axios.get(`${API_BASE}/downloads/list`, { params: { session_id: sessionId } });
             if (res.data.success) {
                 setStructure(res.data.data);
+                setZipAvailable(res.data.zip_available === true);
                 if (res.data.data.length > 0 && res.data.data[0].files.length > 0) {
                     setSelectedFile(res.data.data[0].files[0]);
                 }
@@ -43,6 +61,7 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                 console.error("Error fetching downloads", err);
             }
             setStructure([]);
+            setZipAvailable(false);
         } finally {
             setLoading(false);
         }
@@ -74,7 +93,14 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
         }
     };
 
+    const hasDownloadableFiles = structure.some((folder) => Array.isArray(folder.files) && folder.files.length > 0);
+    const canDownloadFullZip = hasDownloadableFiles || zipAvailable;
+
     const handleDownloadZip = async () => {
+        if (!canDownloadFullZip) {
+            alert("Aun no hay expediente generado para esta sesion. Completa la generacion antes de descargar.");
+            return;
+        }
         setDownloading('ZIP');
         try {
             const response = await axios.get(`${API_BASE}/downloads/zip`, {
@@ -89,7 +115,11 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
             link.click();
             link.remove();
         } catch (err) {
-            alert("Error al descargar el paquete completo");
+            if (err?.response?.status === 409) {
+                alert("La sesion existe, pero aun no hay expediente generado para descargar.");
+            } else {
+                alert("Error al descargar el paquete completo");
+            }
         } finally {
             setDownloading(null);
         }
@@ -99,9 +129,17 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
     const deliveryData = results?.delivery?.data || {};
     const packagerData = results?.packager?.data?.estructura_sobres || {};
     const economicResumen = results?.economic_writer?.data?.resumen_economico || null;
+    const economicItems = results?.economic?.data?.items || results?.economic?.items || [];
 
     const checklistGeneral = deliveryData.checklist || [];
     const alertasLogistica = deliveryData.alertas || [];
+
+    const lugarValor = deliveryData.direccion_fisica || FALLBACK_LUGAR_TEXTO;
+    const horarioValor = deliveryData.horario || FALLBACK_HORARIO_ENTREGA;
+    const limiteValor = deliveryData.fecha_limite || FALLBACK_LIMITE_TEXTO;
+    const lugarEsFallback = !deliveryData.direccion_fisica;
+    const horarioEsFallback = !deliveryData.horario;
+    const limiteEsFallback = !deliveryData.fecha_limite;
 
     return (
         <div className="delivery-panel" style={{ 
@@ -120,11 +158,14 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                 </div>
                 <button 
                     onClick={handleDownloadZip}
-                    disabled={downloading === 'ZIP'}
+                    disabled={downloading === 'ZIP' || !canDownloadFullZip}
+                    title={!canDownloadFullZip ? 'No hay expediente generado aun para descargar' : 'Descargar expediente completo'}
                     style={{ 
                         display: 'flex', alignItems: 'center', gap: '8px',
                         padding: '10px 20px', borderRadius: '12px', background: 'var(--primary)',
-                        color: 'white', border: 'none', fontWeight: 700, cursor: 'pointer',
+                        color: 'white', border: 'none', fontWeight: 700,
+                        cursor: (downloading === 'ZIP' || !canDownloadFullZip) ? 'not-allowed' : 'pointer',
+                        opacity: (downloading === 'ZIP' || !canDownloadFullZip) ? 0.65 : 1,
                         boxShadow: '0 4px 15px var(--primary-glow)'
                     }}
                 >
@@ -155,7 +196,11 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                             <Loader2 size={32} className="animate-spin" color="var(--primary)" />
                         </div>
                     ) : structure.length === 0 ? (
-                        <p style={{ fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>No se han encontrado archivos. Ejecuta la Generacción de Documentos.</p>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center', padding: '20px' }}>
+                            {zipAvailable
+                                ? 'El árbol no muestra documentos filtrados (.docx / .pdf / .xlsx), pero hay salida en disco: usa «DESCARGAR EXPEDIENTE COMPLETO» arriba.'
+                                : 'No se han encontrado archivos. Ejecuta la Generación de Documentos.'}
+                        </p>
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                             {structure.map((folder, idx) => {
@@ -235,12 +280,24 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                                 </>
                             ) : (
                                 <>
-                                    <div style={{ color: 'var(--text-secondary)' }}><b>Lugar:</b> {deliveryData.direccion_fisica || 'Ver Guía PDF'}</div>
-                                    <div style={{ color: 'var(--text-secondary)' }}><b>Horario:</b> {deliveryData.horario || '09:00 - 15:00'}</div>
+                                    <div style={{ color: 'var(--text-secondary)' }}>
+                                        <b>Lugar:</b> {lugarValor}
+                                        {lugarEsFallback ? <IndicativoEtiqueta /> : null}
+                                    </div>
+                                    <div style={{ color: 'var(--text-secondary)' }}>
+                                        <b>Horario:</b> {horarioValor}
+                                        {horarioEsFallback ? <IndicativoEtiqueta /> : null}
+                                    </div>
                                 </>
                             )}
-                             <div style={{ color: '#ffb366', fontWeight: 700 }}>⚠️ Límite: {deliveryData.fecha_limite || 'Consultar bases'}</div>
+                            <div style={{ color: '#ffb366', fontWeight: 700 }}>
+                                ⚠️ Límite: {limiteValor}
+                                {limiteEsFallback ? <IndicativoEtiqueta /> : null}
+                            </div>
                         </div>
+                        <p style={{ margin: '12px 0 0 0', fontSize: '10px', lineHeight: 1.45, color: 'rgba(148,163,184,0.95)' }}>
+                            Los datos de modalidad mostrados aquí no sustituyen la convocatoria oficial: verifica siempre en bases y documentos emitidos por el convocante.
+                        </p>
                     </div>
 
                     {/* Resumen Económico (SI EXISTE) */}
@@ -251,6 +308,103 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                                  <span>TOTAL PROPUESTA:</span>
                                  <span>${economicResumen.total?.toLocaleString('es-MX', {minimumFractionDigits: 2})} {economicResumen.moneda}</span>
                              </div>
+                        </div>
+                    )}
+                    {Array.isArray(economicItems) && economicItems.length > 0 && (
+                        <div style={{ background: 'rgba(56, 189, 248, 0.06)', padding: '15px', borderRadius: '12px', border: '1px solid rgba(56, 189, 248, 0.22)', marginBottom: '24px' }}>
+                            <h5 style={{ fontSize: '10px', color: '#7dd3fc', marginBottom: '10px', fontWeight: 900 }}>
+                                DETALLE DE PRECIOS Y FUENTE
+                            </h5>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '240px', overflowY: 'auto', paddingRight: '4px' }}>
+                                {economicItems.slice(0, 25).map((it, idx) => {
+                                    const pu = Number(it?.precio_unitario || 0);
+                                    const prov = it?.provenance_ui || {};
+                                    const sourceLabel = prov?.source_label || 'Catálogo/Inferencia';
+                                    const sourceIcon = prov?.source_icon || '⚪';
+                                    const detail = prov?.detail || 'Sin detalle de procedencia.';
+                                    const rowKey = `${it?.concepto_id || it?.concepto || 'item'}-${idx}`;
+                                    const isHovered = hoveredProvKey === rowKey;
+                                    const isChat = prov?.source_key === 'chat';
+                                    return (
+                                        <div
+                                            key={rowKey}
+                                            style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: '1fr auto',
+                                                gap: '10px',
+                                                alignItems: 'center',
+                                                background: 'rgba(0,0,0,0.22)',
+                                                border: '1px solid rgba(255,255,255,0.07)',
+                                                borderRadius: '10px',
+                                                padding: '8px 10px',
+                                            }}
+                                        >
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontSize: '12px', color: '#e5e7eb', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                    {it?.concepto || `Concepto ${idx + 1}`}
+                                                </div>
+                                                <div
+                                                    style={{
+                                                        fontSize: '11px',
+                                                        color: '#9ca3af',
+                                                        marginTop: '2px',
+                                                        transition: 'all 220ms ease',
+                                                        transform: isChat ? (isHovered ? 'scale(1.02)' : 'scale(1)') : 'none',
+                                                        textShadow: isChat ? (isHovered ? '0 0 8px rgba(34,197,94,0.55)' : '0 0 0 transparent') : 'none',
+                                                    }}
+                                                >
+                                                    ${pu.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </div>
+                                            </div>
+                                            <div
+                                                style={{
+                                                    position: 'relative',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '6px',
+                                                    borderRadius: '999px',
+                                                    border: isHovered ? '1px solid rgba(125,211,252,0.7)' : '1px solid rgba(255,255,255,0.18)',
+                                                    padding: '4px 8px',
+                                                    fontSize: '10px',
+                                                    color: '#cbd5e1',
+                                                    background: isHovered ? 'rgba(125,211,252,0.12)' : 'rgba(255,255,255,0.04)',
+                                                    whiteSpace: 'nowrap',
+                                                    transition: 'all 220ms ease',
+                                                    boxShadow: isHovered ? '0 0 10px rgba(125,211,252,0.22)' : 'none',
+                                                }}
+                                                onMouseEnter={() => setHoveredProvKey(rowKey)}
+                                                onMouseLeave={() => setHoveredProvKey(null)}
+                                            >
+                                                <span>{sourceIcon}</span>
+                                                <span>{sourceLabel}</span>
+                                                <Info size={11} />
+                                                {isHovered && (
+                                                    <div
+                                                        style={{
+                                                            position: 'absolute',
+                                                            top: 'calc(100% + 8px)',
+                                                            right: 0,
+                                                            width: 'min(320px, 60vw)',
+                                                            zIndex: 15,
+                                                            background: 'rgba(15, 23, 42, 0.96)',
+                                                            border: '1px solid rgba(125,211,252,0.35)',
+                                                            borderRadius: '10px',
+                                                            padding: '8px 10px',
+                                                            boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+                                                            whiteSpace: 'normal',
+                                                            textAlign: 'left',
+                                                            lineHeight: 1.45,
+                                                            color: '#e2e8f0',
+                                                        }}
+                                                    >
+                                                        {detail}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         </div>
                     )}
 

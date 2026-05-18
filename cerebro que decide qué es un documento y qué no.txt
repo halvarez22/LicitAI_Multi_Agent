@@ -1,0 +1,47 @@
+DocumentCandidateListService
+es el cerebro que decide qué es un documento y qué no
+
+Listed directory agents
+Listed directory services
+Viewed document_candidate_list_service.py:1-128
+Viewed tender_router_service.py:1-363
+
+He analizado el pipeline completo de detección de documentos (lo que internamente llamamos el "Peritaje de Entregables"). Es un proceso sofisticado de varias etapas que va mucho más allá de una simple búsqueda de palabras clave.
+
+Aquí tienes el reporte detallado del flujo de trabajo:
+
+### 📄 Reporte: Proceso de Detección y Clasificación de Documentos
+
+El sistema utiliza un enfoque de **"Triage Normativo + Extracción Determinista"** para asegurar que no se omita ningún documento obligatorio y que la clasificación sea precisa.
+
+#### 1. Triage Normativo (El "Cerebro" Legal)
+Antes de buscar documentos, el sistema realiza un **Triage** inicial. 
+*   **Qué hace**: Analiza las primeras páginas de las bases usando **Gemini 1.5 Flash** para identificar el marco legal (ej. LAASSP Federal, Ley de Querétaro, LOPSRM).
+*   **Por qué importa**: Dependiendo de la ley, el sistema carga una "Matriz de Obligatorios" (Must-Haves). Por ejemplo, si detecta la Ley de Querétaro, activa automáticamente la búsqueda de la *Opinión de Cumplimiento Estatal* y la *Garantía de Seriedad*.
+
+#### 2. Extracción con Taxonomía Forzada
+Una vez que el sistema sabe qué ley aplica, el **Agente de Compliance** recorre todos los documentos buscando requisitos específicos.
+*   **Etiquetado**: A cada hallazgo se le asigna una etiqueta taxonómica (ej. `LEG_ACTA_CONSTITUTIVA`, `FIS_SAT_OPINION`, `TEC_PROPUESTA_DETALLADA`).
+*   **Anclaje**: Si el triage dice que es una licitación de "Obra", el sistema "fuerza" al agente a buscar programas de obra y análisis de precios unitarios, evitando que se pierdan entre el texto.
+
+#### 3. Clasificación de Acción (Generar vs. Presentar)
+Aquí es donde el sistema decide qué trabajo le toca a LicitAI y qué le toca al usuario:
+*   **`generar`**: Documentos que la App creará desde cero (Propuesta Técnica, Formatos Administrativos, Cartas Manifiesto).
+*   **`presentar_fisico`**: Documentos existentes que el usuario debe subir (Acta Constitutiva, Poderes, Constancia del SAT 32-D).
+*   **`informativo`**: Datos de las bases que son importantes pero no requieren un documento de respuesta (ej. Horarios de la Junta de Aclaraciones).
+
+#### 4. Depuración y Filtrado de Ruido (Calibration Layer)
+Para evitar "alucinaciones" o listas infinitas de basura, aplicamos un servicio de **Limpieza de Candidatos**:
+*   **Filtro de Ruido**: Se eliminan automáticamente ítems como "Avisos de Privacidad", "Glosarios" o "Calendarios" que no implican un entregable real.
+*   **Detección de "No Aplica"**: Si el texto dice explícitamente que un anexo es opcional o no aplica para la partida, el sistema lo marca como tal.
+*   **Puerta de Calidad**: Si la confianza de detección es baja (< 70%), el sistema marca el documento con una bandera amarilla para que tú lo valides manualmente.
+
+#### 5. Consolidación en la Lista de Candidatos
+Finalmente, todos los hallazgos se agrupan en el panel de **"Documentos detectados"** que ves en la UI. Este panel es el "contrato" de la propuesta: si está ahí, se incluirá en el paquete final.
+
+---
+
+> [!TIP]
+> **Dato Curioso**: El sistema tiene un "Mapa de Alias". Si las bases llaman a la identificación oficial como "Anexo III" o "Cédula de Identidad", el motor de ruteo sabe que ambos se refieren a la etiqueta `LEG_IDENTIDAD_CANDIDATO` y los agrupa automáticamente para no pedirte lo mismo dos veces.
+
+**Estado Actual**: El motor está operando en su versión **v5.24**, optimizado para licitaciones federales y estatales de México (con énfasis reciente en Querétaro y Guanajuato/ISAPEG).

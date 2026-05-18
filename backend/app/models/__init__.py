@@ -7,6 +7,7 @@ from .company import Company
 from .feedback import ExtractionFeedback
 from .outcome import LicitacionOutcome
 from .session_line_item import SessionLineItem
+from .normative_policy import NormativePolicy
 
 __all__ = [
     "Base",
@@ -17,4 +18,5 @@ __all__ = [
     "ExtractionFeedback",
     "LicitacionOutcome",
     "SessionLineItem",
+    "NormativePolicy",
 ]

@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { API_BASE } from '../apiBase.js';
-import { FileWarning, FileCheck2, RefreshCw, AlertTriangle, Copy } from 'lucide-react';
+import { FileWarning, FileCheck2, RefreshCw, AlertTriangle, Copy, ChevronDown, ChevronRight } from 'lucide-react';
 
 /**
  * Panel Sprint 2: Actas y Aclaraciones.
  * Flujo: seleccionar PDF ya subido -> procesar acta -> revisar borrador/estado -> regenerar carta 33 Bis.
  */
 export default function PostClarificationPanel({ sessionId, sources = [], onAskAboutActa, syncKey }) {
+    const [expanded, setExpanded] = useState(false);
     const [loading, setLoading] = useState(false);
     const [processing, setProcessing] = useState(false);
     const [regenerating, setRegenerating] = useState(false);
@@ -21,6 +22,16 @@ export default function PostClarificationPanel({ sessionId, sources = [], onAskA
         () => (Array.isArray(sources) ? sources.filter((s) => /\.pdf$/i.test(s?.name || '')) : []),
         [sources]
     );
+
+    const headerSummary = useMemo(() => {
+        if (!ctx) {
+            return pdfSources.length === 0
+                ? 'Sin PDF en fuentes · sube un acta'
+                : 'Sin acta procesada · expande para procesar';
+        }
+        const draft = ctx.carta_33_bis_draft ? ' · borrador listo' : '';
+        return `Estado: ${ctx.estado || 'N/D'} · confianza ${Number(ctx.confianza_extraccion || 0).toFixed(2)}${draft}`;
+    }, [ctx, pdfSources.length]);
 
     useEffect(() => {
         if (!docId && pdfSources.length > 0) setDocId(pdfSources[0].id);
@@ -108,6 +119,17 @@ export default function PostClarificationPanel({ sessionId, sources = [], onAskA
         }
     };
 
+    const toggleExpanded = () => setExpanded((v) => !v);
+
+    const onAccordionKeyDown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleExpanded();
+        }
+    };
+
+    const bodyId = 'post-clarification-panel-body';
+
     return (
         <div
             className="glass-panel"
@@ -118,29 +140,63 @@ export default function PostClarificationPanel({ sessionId, sources = [], onAskA
                 background: 'rgba(0,0,0,0.2)',
             }}
         >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <h3
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px', marginBottom: expanded ? '10px' : 0 }}>
+                <div
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={expanded}
+                    aria-controls={bodyId}
+                    onClick={toggleExpanded}
+                    onKeyDown={onAccordionKeyDown}
                     style={{
-                        fontSize: '11px',
-                        fontWeight: 900,
-                        color: 'var(--text-muted)',
-                        textTransform: 'uppercase',
-                        letterSpacing: '1px',
-                        margin: 0,
+                        flex: 1,
+                        minWidth: 0,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '8px',
+                        borderRadius: '8px',
+                        padding: '4px 6px',
+                        margin: '-4px -6px',
                     }}
                 >
-                    Actas y aclaraciones
-                </h3>
+                    {expanded ? (
+                        <ChevronDown size={16} color="var(--primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
+                    ) : (
+                        <ChevronRight size={16} color="var(--primary)" style={{ flexShrink: 0, marginTop: '2px' }} />
+                    )}
+                    <div style={{ minWidth: 0 }}>
+                        <h3
+                            style={{
+                                fontSize: '11px',
+                                fontWeight: 900,
+                                color: 'var(--text-muted)',
+                                textTransform: 'uppercase',
+                                letterSpacing: '1px',
+                                margin: 0,
+                            }}
+                        >
+                            Actas y aclaraciones
+                        </h3>
+                        <p style={{ margin: '4px 0 0 0', fontSize: '10px', color: 'rgba(226,232,240,0.72)', lineHeight: 1.35 }}>
+                            {headerSummary}
+                        </p>
+                    </div>
+                </div>
                 <button
                     type="button"
-                    onClick={fetchContext}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        fetchContext();
+                    }}
                     disabled={loading}
                     style={{
                         background: 'none',
                         border: 'none',
                         color: 'var(--primary)',
                         cursor: loading ? 'wait' : 'pointer',
-                        padding: 0,
+                        padding: '4px',
+                        flexShrink: 0,
                     }}
                     title="Actualizar estado"
                 >
@@ -148,212 +204,215 @@ export default function PostClarificationPanel({ sessionId, sources = [], onAskA
                 </button>
             </div>
 
-            <div style={{ display: 'grid', gap: '8px' }}>
-                {pdfSources.length === 0 && (
-                    <div
-                        style={{
-                            fontSize: '10px',
-                            color: '#fbbf24',
-                            background: 'rgba(251,191,36,0.08)',
-                            border: '1px solid rgba(251,191,36,0.35)',
-                            padding: '8px',
-                            borderRadius: '8px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '6px',
-                        }}
-                    >
-                        <AlertTriangle size={12} />
-                        No hay PDF válido en fuentes. Sube o reprocesa un acta de junta para continuar.
-                    </div>
-                )}
-                <select
-                    value={docId}
-                    onChange={(e) => setDocId(e.target.value)}
-                    style={{
-                        background: 'rgba(0,0,0,0.35)',
-                        color: '#e2e8f0',
-                        border: '1px solid rgba(255,255,255,0.12)',
-                        borderRadius: '8px',
-                        padding: '8px',
-                        fontSize: '11px',
-                    }}
-                >
-                    {pdfSources.length === 0 && <option value="">Sin PDF disponible</option>}
-                    {pdfSources.map((s) => (
-                        <option key={s.id} value={s.id}>
-                            {s.name}
-                        </option>
-                    ))}
-                </select>
-
-                <select
-                    value={tipoJunta}
-                    onChange={(e) => setTipoJunta(e.target.value)}
-                    style={{
-                        background: 'rgba(0,0,0,0.35)',
-                        color: '#e2e8f0',
-                        border: '1px solid rgba(255,255,255,0.12)',
-                        borderRadius: '8px',
-                        padding: '8px',
-                        fontSize: '11px',
-                    }}
-                >
-                    <option value="primera">Primera junta</option>
-                    <option value="segunda">Segunda junta</option>
-                </select>
-
-                <button
-                    type="button"
-                    onClick={processActa}
-                    disabled={processing || !sessionId || !docId}
-                    style={{
-                        fontSize: '11px',
-                        fontWeight: 800,
-                        padding: '8px 10px',
-                        borderRadius: '8px',
-                        border: '1px solid var(--primary)',
-                        background: 'rgba(0,212,255,0.12)',
-                        color: '#e2e8f0',
-                        cursor: processing || !docId ? 'not-allowed' : 'pointer',
-                    }}
-                >
-                    {processing ? 'Procesando acta...' : 'Procesar acta'}
-                </button>
-            </div>
-
-            {error && (
-                <p style={{ marginTop: '8px', fontSize: '10px', color: '#fca5a5' }}>
-                    {error}
-                </p>
-            )}
-
-            {ctx && (
-                <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
-                    {showHumanReviewBadge && (
+            {expanded && (
+                <div id={bodyId} style={{ display: 'grid', gap: '8px' }}>
+                    {pdfSources.length === 0 && (
                         <div
                             style={{
                                 fontSize: '10px',
                                 color: '#fbbf24',
                                 background: 'rgba(251,191,36,0.08)',
                                 border: '1px solid rgba(251,191,36,0.35)',
+                                padding: '8px',
                                 borderRadius: '8px',
-                                padding: '6px 8px',
-                                fontWeight: 700,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
                             }}
                         >
-                            Requiere revisión humana obligatoria (fallback de baja confianza).
-                        </div>
-                    )}
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                        Estado: <strong style={{ color: '#e2e8f0' }}>{ctx.estado || 'N/D'}</strong> · Confianza: <strong style={{ color: '#e2e8f0' }}>{Number(ctx.confianza_extraccion || 0).toFixed(2)}</strong>
-                    </div>
-                    {fallback && (
-                        <div style={{ fontSize: '10px', color: '#fbbf24', display: 'flex', alignItems: 'center', gap: '4px' }}>
                             <AlertTriangle size={12} />
-                            Baja confianza: se aplicó fallback de plantilla. Revisión humana obligatoria.
+                            No hay PDF válido en fuentes. Sube o reprocesa un acta de junta para continuar.
                         </div>
                     )}
-                    {ctx?.preguntas_aclaracion?.length > 0 && (
-                        <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                            <div style={{ fontWeight: 700, marginBottom: '4px', color: '#e2e8f0' }}>
-                                Preguntas Anexo 10 ({ctx.preguntas_aclaracion.length})
+                    <select
+                        value={docId}
+                        onChange={(e) => setDocId(e.target.value)}
+                        style={{
+                            background: 'rgba(0,0,0,0.35)',
+                            color: '#e2e8f0',
+                            border: '1px solid rgba(255,255,255,0.12)',
+                            borderRadius: '8px',
+                            padding: '8px',
+                            fontSize: '11px',
+                        }}
+                    >
+                        {pdfSources.length === 0 && <option value="">Sin PDF disponible</option>}
+                        {pdfSources.map((s) => (
+                            <option key={s.id} value={s.id}>
+                                {s.name}
+                            </option>
+                        ))}
+                    </select>
+
+                    <select
+                        value={tipoJunta}
+                        onChange={(e) => setTipoJunta(e.target.value)}
+                        style={{
+                            background: 'rgba(0,0,0,0.35)',
+                            color: '#e2e8f0',
+                            border: '1px solid rgba(255,255,255,0.12)',
+                            borderRadius: '8px',
+                            padding: '8px',
+                            fontSize: '11px',
+                        }}
+                    >
+                        <option value="primera">Primera junta</option>
+                        <option value="segunda">Segunda junta</option>
+                    </select>
+
+                    <button
+                        type="button"
+                        onClick={processActa}
+                        disabled={processing || !sessionId || !docId}
+                        style={{
+                            fontSize: '11px',
+                            fontWeight: 800,
+                            padding: '8px 10px',
+                            borderRadius: '8px',
+                            border: '1px solid var(--primary)',
+                            background: 'rgba(0,212,255,0.12)',
+                            color: '#e2e8f0',
+                            cursor: processing || !docId ? 'not-allowed' : 'pointer',
+                        }}
+                    >
+                        {processing ? 'Procesando acta...' : 'Procesar acta'}
+                    </button>
+
+                    {error && (
+                        <p style={{ marginTop: '8px', fontSize: '10px', color: '#fca5a5' }}>
+                            {error}
+                        </p>
+                    )}
+
+                    {ctx && (
+                        <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
+                            {showHumanReviewBadge && (
+                                <div
+                                    style={{
+                                        fontSize: '10px',
+                                        color: '#fbbf24',
+                                        background: 'rgba(251,191,36,0.08)',
+                                        border: '1px solid rgba(251,191,36,0.35)',
+                                        borderRadius: '8px',
+                                        padding: '6px 8px',
+                                        fontWeight: 700,
+                                    }}
+                                >
+                                    Requiere revisión humana obligatoria (fallback de baja confianza).
+                                </div>
+                            )}
+                            <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                                Estado: <strong style={{ color: '#e2e8f0' }}>{ctx.estado || 'N/D'}</strong> · Confianza:{' '}
+                                <strong style={{ color: '#e2e8f0' }}>{Number(ctx.confianza_extraccion || 0).toFixed(2)}</strong>
                             </div>
-                            <ul style={{ margin: 0, paddingLeft: '16px' }}>
-                                {ctx.preguntas_aclaracion.slice(0, 4).map((q, i) => (
-                                    <li key={i} style={{ marginBottom: '2px' }}>
-                                        [{q.tipo}] {q.pregunta}
-                                    </li>
-                                ))}
-                            </ul>
+                            {fallback && (
+                                <div style={{ fontSize: '10px', color: '#fbbf24', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    <AlertTriangle size={12} />
+                                    Baja confianza: se aplicó fallback de plantilla. Revisión humana obligatoria.
+                                </div>
+                            )}
+                            {ctx?.preguntas_aclaracion?.length > 0 && (
+                                <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                                    <div style={{ fontWeight: 700, marginBottom: '4px', color: '#e2e8f0' }}>
+                                        Preguntas Anexo 10 ({ctx.preguntas_aclaracion.length})
+                                    </div>
+                                    <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                                        {ctx.preguntas_aclaracion.slice(0, 4).map((q, i) => (
+                                            <li key={i} style={{ marginBottom: '2px' }}>
+                                                [{q.tipo}] {q.pregunta}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                            {ctx?.carta_33_bis_draft && (
+                                <div style={{ display: 'grid', gap: '6px' }}>
+                                    <textarea
+                                        readOnly
+                                        value={ctx.carta_33_bis_draft}
+                                        style={{
+                                            width: '100%',
+                                            minHeight: '120px',
+                                            resize: 'vertical',
+                                            background: 'rgba(0,0,0,0.35)',
+                                            border: '1px solid rgba(255,255,255,0.12)',
+                                            borderRadius: '8px',
+                                            color: '#e2e8f0',
+                                            fontSize: '10px',
+                                            padding: '8px',
+                                            boxSizing: 'border-box',
+                                        }}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={copyDraft}
+                                        style={{
+                                            justifySelf: 'start',
+                                            fontSize: '10px',
+                                            padding: '6px 8px',
+                                            borderRadius: '8px',
+                                            border: '1px solid rgba(255,255,255,0.12)',
+                                            background: 'rgba(0,0,0,0.3)',
+                                            color: copied ? '#4ade80' : 'var(--text-muted)',
+                                            cursor: 'pointer',
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '5px',
+                                        }}
+                                    >
+                                        <Copy size={12} />
+                                        {copied ? 'Copiado' : 'Copiar borrador'}
+                                    </button>
+                                </div>
+                            )}
+                            <div style={{ display: 'flex', gap: '8px', justifyContent: 'space-between' }}>
+                                <button
+                                    type="button"
+                                    onClick={regenerateCarta}
+                                    disabled={regenerating}
+                                    style={{
+                                        fontSize: '10px',
+                                        padding: '6px 8px',
+                                        borderRadius: '8px',
+                                        border: '1px solid rgba(255,255,255,0.12)',
+                                        background: 'rgba(0,0,0,0.3)',
+                                        color: 'var(--text-muted)',
+                                        cursor: regenerating ? 'wait' : 'pointer',
+                                    }}
+                                >
+                                    {regenerating ? 'Regenerando...' : 'Regenerar carta 33 Bis'}
+                                </button>
+                                {typeof onAskAboutActa === 'function' && (
+                                    <button
+                                        type="button"
+                                        onClick={() => onAskAboutActa(ctx)}
+                                        style={{
+                                            fontSize: '10px',
+                                            padding: '6px 8px',
+                                            borderRadius: '8px',
+                                            border: '1px solid rgba(255,255,255,0.12)',
+                                            background: 'rgba(0,0,0,0.3)',
+                                            color: 'var(--text-muted)',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        Preguntar en chat
+                                    </button>
+                                )}
+                            </div>
+                            <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
+                                {ctx?.carta_33_bis_docx_path ? (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                        <FileCheck2 size={12} /> Borrador docx: {ctx.carta_33_bis_docx_path}
+                                    </span>
+                                ) : (
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                        <FileWarning size={12} /> Aún no hay docx generado.
+                                    </span>
+                                )}
+                            </div>
                         </div>
                     )}
-                    {ctx?.carta_33_bis_draft && (
-                        <div style={{ display: 'grid', gap: '6px' }}>
-                            <textarea
-                                readOnly
-                                value={ctx.carta_33_bis_draft}
-                                style={{
-                                    width: '100%',
-                                    minHeight: '120px',
-                                    resize: 'vertical',
-                                    background: 'rgba(0,0,0,0.35)',
-                                    border: '1px solid rgba(255,255,255,0.12)',
-                                    borderRadius: '8px',
-                                    color: '#e2e8f0',
-                                    fontSize: '10px',
-                                    padding: '8px',
-                                    boxSizing: 'border-box',
-                                }}
-                            />
-                            <button
-                                type="button"
-                                onClick={copyDraft}
-                                style={{
-                                    justifySelf: 'start',
-                                    fontSize: '10px',
-                                    padding: '6px 8px',
-                                    borderRadius: '8px',
-                                    border: '1px solid rgba(255,255,255,0.12)',
-                                    background: 'rgba(0,0,0,0.3)',
-                                    color: copied ? '#4ade80' : 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '5px',
-                                }}
-                            >
-                                <Copy size={12} />
-                                {copied ? 'Copiado' : 'Copiar borrador'}
-                            </button>
-                        </div>
-                    )}
-                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'space-between' }}>
-                        <button
-                            type="button"
-                            onClick={regenerateCarta}
-                            disabled={regenerating}
-                            style={{
-                                fontSize: '10px',
-                                padding: '6px 8px',
-                                borderRadius: '8px',
-                                border: '1px solid rgba(255,255,255,0.12)',
-                                background: 'rgba(0,0,0,0.3)',
-                                color: 'var(--text-muted)',
-                                cursor: regenerating ? 'wait' : 'pointer',
-                            }}
-                        >
-                            {regenerating ? 'Regenerando...' : 'Regenerar carta 33 Bis'}
-                        </button>
-                        {typeof onAskAboutActa === 'function' && (
-                            <button
-                                type="button"
-                                onClick={() => onAskAboutActa(ctx)}
-                                style={{
-                                    fontSize: '10px',
-                                    padding: '6px 8px',
-                                    borderRadius: '8px',
-                                    border: '1px solid rgba(255,255,255,0.12)',
-                                    background: 'rgba(0,0,0,0.3)',
-                                    color: 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                }}
-                            >
-                                Preguntar en chat
-                            </button>
-                        )}
-                    </div>
-                    <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
-                        {ctx?.carta_33_bis_docx_path ? (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                <FileCheck2 size={12} /> Borrador docx: {ctx.carta_33_bis_docx_path}
-                            </span>
-                        ) : (
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                <FileWarning size={12} /> Aún no hay docx generado.
-                            </span>
-                        )}
-                    </div>
                 </div>
             )}
         </div>

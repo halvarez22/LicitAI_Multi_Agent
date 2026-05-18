@@ -81,8 +81,17 @@ services:
     ports:
       - "8001:8000"
     # workers=1 es CRÍTICO: mantiene el asyncio.Semaphore de VRAM en un solo proceso.
-    # Sin --reload (modo producción estable).
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    # Con ENVIRONMENT=development: --reload recarga el código al guardar (volumen ./backend:/app).
+    # En producción: ENVIRONMENT=production (u otro distinto de development) → sin --reload.
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$$ENVIRONMENT" = "development" ]; then
+          exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --reload --reload-dir /app/app
+        else
+          exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+        fi
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -94,8 +103,12 @@ services:
       - REDIS_URL=redis://queue-redis:6379
       - REDIS_HOST=queue-redis
       - MEMORY_BACKEND=postgres
-      - OLLAMA_MODEL=licitai-coder
+      - OLLAMA_MODEL=llama3.1:8b
       - OLLAMA_NUM_CTX=12288
+      # Chat RAG (Ollama /api/chat): tono más natural sin tocar extracción JSON (generate sigue en T=0).
+      - LICITAI_CHAT_TEMPERATURE=${LICITAI_CHAT_TEMPERATURE:-0.15}
+      - LICITAI_CHAT_NUM_CTX=${LICITAI_CHAT_NUM_CTX:-16384}
+      - OLLAMA_CHAT_NUM_PREDICT=${OLLAMA_CHAT_NUM_PREDICT:-2048}
       - ENVIRONMENT=development
       - LOG_LEVEL=INFO
       - EXPERIENCE_LAYER_ENABLED=true
@@ -105,13 +118,19 @@ services:
       - EXPERIENCE_DEBUG=true
       - COMPLIANCE_BLOCK_EXTRA_RETRIES=3
       - COMPLIANCE_BLOCK_RETRY_DELAY_SEC=5
-      - COMPLIANCE_CHUNK_CHARS=3000
-      - COMPLIANCE_CHUNK_OVERLAP=300
+      - COMPLIANCE_CHUNK_CHARS=2000
+      - COMPLIANCE_CHUNK_OVERLAP=200
       - COMPLIANCE_BLOCK_EMPTY_TIMEOUT_SEC=120
       - COMPLIANCE_ADAPTIVE_CHUNKING=true
-      - COMPLIANCE_CHUNK_MIN=3000
-      - COMPLIANCE_CHUNK_MAX=8000
+      - COMPLIANCE_CHUNK_MIN=2000
+      - COMPLIANCE_CHUNK_MAX=5000
       - COMPLIANCE_MAX_CONCURRENT_CHUNKS=1
+      # Bloques Hito A/B: true fijo en compose para que el contenedor no quede en false si el .env del host no pasa la var.
+      # Producción: definir explícitamente false aquí o usar override por entorno.
+      - LICITAI_ENABLE_BLOCK_RESOLUTION=true
+      - LICITAI_BLOCK_RESOLUTION_MIN_ITEMS=${LICITAI_BLOCK_RESOLUTION_MIN_ITEMS:-2}
+      # Go/No-Go: fusionar evidencia de documentos de sesión con master_profile (ver app.config.settings).
+      - ENABLE_EVIDENCE_PROFILE_BRIDGE=${ENABLE_EVIDENCE_PROFILE_BRIDGE:-true}
     volumes:
       - C:/data:/data
       - ./logs:/app/logs

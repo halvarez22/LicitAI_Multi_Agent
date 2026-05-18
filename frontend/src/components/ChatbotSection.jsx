@@ -9,10 +9,12 @@ const ChatbotSection = ({ sessionId }) => {
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
 
-    const handleSend = async () => {
-        if (!input.trim()) return;
-        const userMsg = input;
-        setInput('');
+    const handleSend = async (overrideInput = null) => {
+        const messageToSend = overrideInput || input;
+        if (!messageToSend.trim()) return;
+        
+        const userMsg = messageToSend;
+        if (!overrideInput) setInput('');
         setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
         setLoading(true);
 
@@ -21,7 +23,8 @@ const ChatbotSection = ({ sessionId }) => {
             setMessages(prev => [...prev, {
                 role: 'assistant',
                 content: resp.reply,
-                citations: resp.citations
+                citations: resp.citations,
+                suggested_actions: resp.suggested_actions
             }]);
         } catch (e) {
             setTimeout(() => {
@@ -63,7 +66,15 @@ const ChatbotSection = ({ sessionId }) => {
                             border: msg.role !== 'user' ? '1px solid var(--glass-border)' : 'none',
                             boxShadow: msg.role === 'user' ? '0 4px 15px rgba(168,85,247,0.3)' : 'none'
                         }}>
-                            <p style={{ lineHeight: '1.6' }}>{msg.content}</p>
+                            <div style={{ lineHeight: '1.6', whiteSpace: 'pre-wrap' }}>
+                                {msg.content.includes('|') && msg.content.includes('---') ? (
+                                    <div style={{ fontFamily: 'monospace', fontSize: '12px', overflowX: 'auto', background: 'rgba(0,0,0,0.4)', padding: '10px', borderRadius: '8px', marginTop: '10px' }}>
+                                        {msg.content}
+                                    </div>
+                                ) : (
+                                    msg.content
+                                )}
+                            </div>
                             {msg.citations && msg.citations.map((cita, idx) => (
                                 <div key={idx} style={{ marginTop: '16px', padding: '10px 12px', background: 'rgba(0,0,0,0.4)', borderRadius: '8px', fontSize: '13px', display: 'flex', gap: '8px', alignItems: 'center', borderLeft: '3px solid var(--primary-color)' }}>
                                     <FileText size={16} color="var(--primary-color)" />
@@ -71,6 +82,24 @@ const ChatbotSection = ({ sessionId }) => {
                                     <b>{cita.documento} (Pág. {cita.pagina})</b>
                                 </div>
                             ))}
+                            {msg.suggested_actions && msg.suggested_actions.length > 0 && (
+                                <div style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                    {msg.suggested_actions.map((action, idx) => (
+                                        <button
+                                            key={idx}
+                                            className={action.style === 'secondary' ? 'btn-secondary' : 'btn-primary'}
+                                            onClick={() => {
+                                                setInput(action.payload);
+                                                // Pequeño hack para disparar el envío tras el setInput
+                                                setTimeout(() => handleSend(action.payload), 50);
+                                            }}
+                                            style={{ padding: '6px 12px', fontSize: '12px', borderRadius: '20px' }}
+                                        >
+                                            {action.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 ))}

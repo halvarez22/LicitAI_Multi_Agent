@@ -1,0 +1,52 @@
+{
+  "policy_version": "fill-gate-policy-v1.2b",
+  "ignore_rules": [
+    {
+      "error_type": "required_field_missing",
+      "field_key": "representante_legal",
+      "when_master_profile": {
+        "tipo_persona": "fisica"
+      }
+    },
+    {
+      "error_type": "source_confidence_insufficient",
+      "stage": "formats",
+      "template_id": "anexo_7"
+    },
+    {
+      "error_type": "source_confidence_insufficient",
+      "stage": "economic",
+      "template_id": "anexo_economico",
+      "when_signal": {
+        "consistency_pass": true,
+        "arithmetic_match": true
+      }
+    },
+    {
+      "error_type": "source_confidence_insufficient",
+      "stage": "economic",
+      "template_id": "tabla_precios",
+      "when_signal": {
+        "consistency_pass": true,
+        "arithmetic_match": true
+      }
+    },
+    {
+      "error_type": "cross_field_inconsistency",
+      "field_key": "economic_totals",
+      "stage": "economic",
+      "template_id": "anexo_economico",
+      "when_signal": {
+        "arithmetic_match": true
+      }
+    }
+  ],
+  "severity_overrides": [
+    {
+      "error_type": "source_confidence_insufficient",
+      "field_key": "rfc",
+      "severity": "warn",
+      "min_provenance_confidence": 0.4
+    }
+  ]
+}

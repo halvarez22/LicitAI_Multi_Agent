@@ -17,6 +17,11 @@ class MemoryAdapterFactory:
         cls._instance = None
 
     @classmethod
+    def get_instance(cls) -> Optional[MemoryRepository]:
+        """Alias para create_adapter usado en servicios legados."""
+        return cls.create_adapter()
+
+    @classmethod
     def create_adapter(cls) -> Optional[MemoryRepository]:
         if cls._instance is None:
             backend = (settings.MEMORY_BACKEND or os.getenv("MEMORY_BACKEND", "postgres")).lower()

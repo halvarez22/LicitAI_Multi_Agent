@@ -107,6 +107,27 @@ async def resolve_outputs_root(session_id: str) -> Optional[str]:
     return None
 
 
+async def _session_exists(session_id: str) -> bool:
+    """Valida si la sesión existe en persistencia aunque no tenga salidas en disco."""
+    if not session_id or not session_id.strip():
+        return False
+    raw = session_id.strip()
+    sid = _nfc(raw)
+    candidates = [raw, sid, _slugify_like_create(sid)]
+
+    repo = await get_connected_memory()
+    try:
+        for key in candidates:
+            if not key:
+                continue
+            state = await repo.get_session(key)
+            if isinstance(state, dict) and state:
+                return True
+    finally:
+        await repo.disconnect()
+    return False
+
+
 def _walk_output_structure(session_path: str):
     descriptions = {}
     meta_path = os.path.join(session_path, "descriptions.json")
@@ -144,20 +165,47 @@ def _walk_output_structure(session_path: str):
     return structure
 
 
+def _has_files_for_zip(session_path: str) -> bool:
+    """True si hay al menos un archivo real bajo la salida (el ZIP incluye todo el árbol)."""
+    for _, _, files in os.walk(session_path):
+        for name in files:
+            if name.startswith("~$") or name.startswith("."):
+                continue
+            return True
+    return False
+
+
+def _list_response(session_path: Optional[str]) -> dict:
+    """
+    Payload de /downloads/list: árbol filtrado para UI + banderas para habilitar ZIP
+    aunque el árbol quede vacío (p. ej. solo JSON/manifiestos fuera del filtro .docx).
+    """
+    if not session_path:
+        return {
+            "success": True,
+            "data": [],
+            "output_dir_resolved": False,
+            "zip_available": False,
+        }
+    structure = _walk_output_structure(session_path)
+    return {
+        "success": True,
+        "data": structure,
+        "output_dir_resolved": True,
+        "zip_available": _has_files_for_zip(session_path),
+    }
+
+
 @router.get("/list")
 async def list_generated_files_query(session_id: str = Query(..., min_length=1)):
     session_path = await resolve_outputs_root(session_id)
-    if not session_path:
-        return {"success": True, "data": []}
-    return {"success": True, "data": _walk_output_structure(session_path)}
+    return _list_response(session_path)
 
 
 @router.get("/list/{session_id:path}")
 async def list_generated_files_path(session_id: str):
     session_path = await resolve_outputs_root(session_id)
-    if not session_path:
-        return {"success": True, "data": []}
-    return {"success": True, "data": _walk_output_structure(session_path)}
+    return _list_response(session_path)
 
 
 @router.get("/file")
@@ -209,6 +257,11 @@ def _zip_streaming_response(session_path: str, filename_hint: str):
 async def download_all_zip_query(session_id: str = Query(..., min_length=1)):
     session_path = await resolve_outputs_root(session_id)
     if not session_path:
+        if await _session_exists(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail="La sesión existe, pero aún no hay expediente generado para descargar.",
+            )
         raise HTTPException(status_code=404, detail="Sesión no encontrada")
     return _zip_streaming_response(session_path, os.path.basename(session_path.rstrip(os.sep)))
 
@@ -217,5 +270,10 @@ async def download_all_zip_query(session_id: str = Query(..., min_length=1)):
 async def download_all_zip_path(session_id: str):
     session_path = await resolve_outputs_root(session_id)
     if not session_path:
+        if await _session_exists(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail="La sesión existe, pero aún no hay expediente generado para descargar.",
+            )
         raise HTTPException(status_code=404, detail="Sesión no encontrada")
     return _zip_streaming_response(session_path, session_id)

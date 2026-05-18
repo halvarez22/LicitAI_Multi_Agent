@@ -11,6 +11,8 @@ from app.contracts.session_contracts import SessionStateMigrator
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.contracts.orchestrator_contracts import OrchestratorState
 from app.config.settings import settings
+from app.services.document_candidate_list_service import build_candidate_document_list
+from app.services.tender_router_service import TenderRouterService
 from app.orchestration.pipeline_configurator import PipelineConfigurator, PipelineConfig, ActionType, ConditionType
 
 # Logger estructurado
@@ -56,6 +58,189 @@ def _economic_waiting_hints_from_output(res: Any) -> Optional[Dict[str, Any]]:
         "contexto_bases_analista": data.get("contexto_bases_analista"),
         "missing_price_count": len(missing) if isinstance(missing, list) else 0,
     }
+
+
+def _document_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[str, Any]]:
+    """
+    Extrae hints de gate documental cuando TechnicalWriter/Formats bloquean por calidad.
+    """
+    if res is None:
+        return None
+    data = res.get("data") if isinstance(res, dict) else getattr(res, "data", None)
+    if not isinstance(data, dict):
+        return None
+    gate = data.get("document_quality_gate")
+    if not isinstance(gate, dict):
+        return None
+    return {
+        "reason": str(gate.get("reason") or ""),
+        "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
+    }
+
+
+def _document_fill_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[str, Any]]:
+    """
+    Extrae hints del gate de llenado documental cuando writers bloquean por calidad final.
+    """
+    if res is None:
+        return None
+    data = res.get("data") if isinstance(res, dict) else getattr(res, "data", None)
+    if not isinstance(data, dict):
+        return None
+    gate = data.get("document_fill_quality_gate")
+    if not isinstance(gate, dict):
+        return None
+    return {
+        "validation_passed": bool(gate.get("validation_passed", True)),
+        "blocking_count": int(gate.get("blocking_count", 0) or 0),
+        "warning_count": int(gate.get("warning_count", 0) or 0),
+        "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
+    }
+
+
+async def _ensure_economic_snapshot_ready(
+    context_manager: MCPContextManager,
+    session_id: str,
+    agent_input: AgentInput,
+    session_state: Dict[str, Any],
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """
+    Tarea 4: Verifica que el snapshot económico esté listo para generación de documentos.
+
+    Flujo:
+    1. Si no existe snapshot → retorna error MISSING_ECONOMIC_PROPOSAL.
+    2. Si snapshot tiene total_base >= 0.01 o allow_zero_total_base_ack → listo.
+    3. Si snapshot está desactualizado (total_base ~0) → re-ejecuta EconomicAgent con overrides.
+    4. Si EconomicAgent retorna SUCCESS → listo.
+    5. Si EconomicAgent retorna WAITING_FOR_DATA → retorna error con lista de precios pendientes.
+
+    Retorna (ready: bool, error_payload: Optional[Dict])
+    """
+    tasks = list(session_state.get("tasks_completed") or [])
+    snapshot: Optional[Dict[str, Any]] = None
+    for task in reversed(tasks):
+        if task.get("task") == "economic_proposal":
+            snapshot = task.get("result") if isinstance(task.get("result"), dict) else None
+            break
+
+    if not snapshot:
+        logger.warning(
+            "orchestrator_economic_snapshot_missing",
+            session_id=session_id,
+        )
+        return False, {
+            "status": "error",
+            "stop_reason": "MISSING_ECONOMIC_PROPOSAL",
+            "message": (
+                "No se encontró una propuesta económica calculada. "
+                "Regresa al chat y captura los precios antes de generar documentos."
+            ),
+        }
+
+    user_inputs = (session_state.get("economic_user_inputs") or {})
+    allow_zero = bool(user_inputs.get("allow_zero_total_base_ack"))
+    total_base = float(snapshot.get("total_base") or 0.0)
+    snap_status = str(snapshot.get("status") or "")
+
+    if snap_status == "complete" and (total_base >= 0.01 or allow_zero):
+        return True, None  # Snapshot listo, no hay nada que hacer
+
+    # Snapshot desactualizado: intentar re-sincronizar primero con el refresher
+    # (más rápido que re-ejecutar el LLM completo)
+    try:
+        from app.economic_validation.service import refresh_economic_validations_for_session
+        await refresh_economic_validations_for_session(context_manager.memory, session_id)
+        # Releer snapshot tras el refresh
+        fresh_session = await context_manager.memory.get_session(session_id) or {}
+        fresh_tasks = list(fresh_session.get("tasks_completed") or [])
+        for task in reversed(fresh_tasks):
+            if task.get("task") == "economic_proposal":
+                refreshed = task.get("result") if isinstance(task.get("result"), dict) else {}
+                new_total = float(refreshed.get("total_base") or 0.0)
+                new_status = str(refreshed.get("status") or "")
+                if new_status == "complete" and (new_total >= 0.01 or allow_zero):
+                    logger.info(
+                        "orchestrator_economic_snapshot_refreshed_ok",
+                        session_id=session_id,
+                        total_base=new_total,
+                    )
+                    return True, None
+                break
+    except Exception as _refresh_err:
+        logger.warning(
+            "orchestrator_economic_snapshot_refresh_failed",
+            session_id=session_id,
+            error=str(_refresh_err),
+        )
+
+    # Refresh no fue suficiente: re-ejecutar EconomicAgent completo
+    logger.info(
+        "orchestrator_economic_snapshot_stale_rerunning_agent",
+        session_id=session_id,
+        total_base=total_base,
+        snap_status=snap_status,
+    )
+    try:
+        from app.agents.economic import EconomicAgent
+        econ_input = AgentInput(
+            session_id=session_id,
+            company_id=agent_input.company_id,
+            company_data=dict(agent_input.company_data or {}),
+            correlation_id=agent_input.correlation_id,
+            job_id=agent_input.job_id,
+        )
+        econ_result = await EconomicAgent(context_manager).process(econ_input)
+
+        if econ_result.status == AgentStatus.SUCCESS:
+            logger.info(
+                "orchestrator_economic_agent_rerun_success",
+                session_id=session_id,
+            )
+            return True, None
+
+        # EconomicAgent retornó WAITING_FOR_DATA: hay precios pendientes
+        missing = []
+        if isinstance(econ_result.data, dict):
+            missing = list(econ_result.data.get("missing") or [])
+        pending_count = len(missing)
+        logger.info(
+            "orchestrator_economic_agent_rerun_waiting",
+            session_id=session_id,
+            pending_count=pending_count,
+        )
+        return False, {
+            "status": "waiting_for_data",
+            "stop_reason": "ECONOMIC_PRICES_INCOMPLETE",
+            "message": (
+                econ_result.message
+                or f"Faltan {pending_count} precio(s) por capturar antes de generar documentos. "
+                   "Regresa al chat y proporciona los precios solicitados."
+            ),
+            "data": econ_result.data,
+        }
+
+    except Exception as _econ_err:
+        logger.error(
+            "orchestrator_economic_agent_rerun_error",
+            session_id=session_id,
+            error=str(_econ_err),
+        )
+        return False, {
+            "status": "error",
+            "stop_reason": "ECONOMIC_AGENT_ERROR",
+            "message": (
+                "Ocurrió un error al recalcular la propuesta económica. "
+                "Intenta de nuevo o contacta soporte."
+            ),
+        }
+
+
+def _extract_output_data(res: Any) -> Dict[str, Any]:
+    if isinstance(res, dict):
+        data = res.get("data")
+        return data if isinstance(data, dict) else res
+    data = getattr(res, "data", None)
+    return data if isinstance(data, dict) else {}
 
 
 def _aggregate_health_from_results(results: Dict[str, Any]) -> str:
@@ -113,6 +298,19 @@ def _default_generation_jobs() -> List[Dict[str, Any]]:
     ]
 
 
+def _generation_progress_for_step(step: str) -> Tuple[int, int, str, str]:
+    """Mapa estable de progreso por etapa para UI durante generación."""
+    mapping: Dict[str, Tuple[int, int, str, str]] = {
+        "datagap": (91, 92, "Validando datos mínimos para generar propuesta…", "Validación de datos completada."),
+        "technical": (93, 94, "Generando propuesta técnica…", "Propuesta técnica completada."),
+        "formats": (95, 96, "Generando formatos administrativos…", "Formatos administrativos completados."),
+        "economic_writer": (97, 98, "Generando propuesta económica…", "Propuesta económica completada."),
+        "packager": (98, 99, "Empaquetando expediente en sobres oficiales…", "Expediente empaquetado correctamente."),
+        "delivery": (99, 99, "Preparando guía logística y entregables finales…", "Guía de entrega completada."),
+    }
+    return mapping.get(step, (92, 99, f"Ejecutando etapa {step}…", f"Etapa {step} completada."))
+
+
 def _prepare_generation_queue(
     session_state: Dict[str, Any], resume_generation: bool, mode: str
 ) -> Optional[Dict[str, Any]]:
@@ -154,22 +352,93 @@ def _set_gen_job_status(gen_state: Optional[Dict[str, Any]], job_id: str, status
     for j in gen_state.get("jobs") or []:
         if j.get("id") == job_id:
             j["status"] = status
-            break
+            return
 
 
 def _response_with_generation_state(
     base: Dict[str, Any], session_state: Dict[str, Any], mode: str
 ) -> Dict[str, Any]:
+    out = dict(base)
     if mode in ("generation_only", "generation") and session_state.get("generation_state") is not None:
-        out = dict(base)
         out["generation_state"] = session_state["generation_state"]
-        return out
-    return base
+    
+    # Asegurar que los candidatos fluyan hacia el dictamen incluso en estados parciales
+    candidates = base.get("fast_track_document_candidates") or session_state.get("document_candidates_v1")
+    if candidates:
+        out["fast_track_document_candidates"] = candidates
+        
+    return out
+
+
+async def _safe_save_session(
+    memory: Any,
+    session_id: str,
+    updates: Dict[str, Any],
+) -> None:
+    """Guarda campos específicos en session_state sin sobreescribir tasks_completed.
+
+    Lee el estado fresco desde la BD, aplica solo los campos indicados en `updates`,
+    y guarda. Esto evita la race condition donde el orquestador sobreescribe
+    tasks_completed que los agentes guardaron vía record_task_completion.
+
+    Args:
+        memory: Adaptador de memoria (PostgresMemoryAdapter).
+        session_id: ID de la sesión.
+        updates: Dict con los campos a actualizar (nunca incluir tasks_completed aquí).
+    """
+    fresh = await memory.get_session(session_id) or {}
+    for key, value in updates.items():
+        if key == "tasks_completed":
+            continue
+        
+        # DEBUG LOG: Monitorear cambios en la cola de preguntas
+        if key == "pending_questions":
+            q_list = value or []
+            logger.info("safe_save_pending_questions", 
+                        session_id=session_id, 
+                        count=len(q_list),
+                        first_id=q_list[0].get("question_id") if q_list else "empty")
+            
+        fresh[key] = value
+    await memory.save_session(session_id, fresh)
+
+
+def _extract_documentos(agent_result: Any) -> List[Dict[str, Any]]:
+    """Extrae la lista de documentos generados desde el output de un agente escritor.
+
+    Soporta tanto AgentOutput (con .data) como dict legacy.
+    Retorna lista vacía si el agente no completó o no generó documentos.
+
+    Args:
+        agent_result: Output del agente (AgentOutput o dict).
+
+    Returns:
+        Lista de dicts con campos nombre, ruta, status.
+    """
+    if agent_result is None:
+        return []
+    data: Dict[str, Any] = {}
+    if hasattr(agent_result, "data") and isinstance(agent_result.data, dict):
+        data = agent_result.data
+    elif isinstance(agent_result, dict):
+        data = agent_result.get("data", agent_result)
+    return data.get("documentos", []) if isinstance(data, dict) else []
+
+
+def _coerce_compliance_data(result: Any) -> Dict[str, Any]:
+    """Obtiene data de compliance desde AgentOutput o dict legacy."""
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        data = result.get("data")
+    else:
+        data = getattr(result, "data", None)
+    return data if isinstance(data, dict) else {}
 
 
 class OrchestratorAgent(BaseAgent):
     """
-    Agente 0: Orquestador (Supervisor).
+    Agente 0: Orquestador Supervisor.
     Coordina y asigna tareas a los agentes especializados evaluando los resultados.
     """
     def __init__(self, context_manager: MCPContextManager):
@@ -181,7 +450,42 @@ class OrchestratorAgent(BaseAgent):
         )
         self.available_agents = {}
         self.context_manager = context_manager
-        
+
+    async def _proactive_injection_checkpoint(self, session_id: str) -> None:
+        """Asegura que las preguntas del Planner (si existen) estén al inicio de la cola."""
+        try:
+            fresh = await self.context_manager.memory.get_session(session_id)
+            if not fresh: return
+            
+            plan = fresh.get("intake_plan", {})
+            planner_questions = list(plan.get("questions") or [])
+            if not planner_questions or bool(settings.INTAKE_PLANNER_SHADOW_MODE):
+                return
+                
+            existing_pending = list(fresh.get("pending_questions") or [])
+            
+            def _get_q_key(q):
+                return str(q.get("question_id") or q.get("field") or q.get("field_target") or "")
+
+            # HITO: Purgar de la cola actual cualquier pregunta que el Planner haya movido al checklist corporativo
+            corp_checklist = list(plan.get("checklist_corporativo") or [])
+            corp_keys = {_get_q_key(c) for c in corp_checklist if _get_q_key(c)}
+            
+            existing_pending = [q for q in existing_pending if _get_q_key(q) not in corp_keys]
+
+            existing_keys = {_get_q_key(q) for q in existing_pending if _get_q_key(q)}
+            # Solo añadir las que no estén ya en la cola (para no duplicar)
+            # Pero las ponemos al INICIO (unshift)
+            new_to_add = [q for q in planner_questions if _get_q_key(q) not in existing_keys]
+            
+            merged = new_to_add + existing_pending
+            
+            # Guardamos siempre porque pudo haber purgas de checklist_corporativo
+            await _safe_save_session(self.context_manager.memory, session_id, {"pending_questions": merged})
+            logger.info("proactive_injection_success", session_id=session_id, added=len(new_to_add), purged_corp=len(corp_keys))
+        except Exception as e:
+            logger.warning("proactive_injection_failed", session_id=session_id, error=str(e))
+
     def _profile_document(self, input_data: Dict, session_state: Dict) -> Dict[str, Any]:
         """Perfilado ligero de complejidad y foco del documento."""
         all_reqs_count = 0
@@ -308,18 +612,32 @@ class OrchestratorAgent(BaseAgent):
 
         async with agent_span(logger, self.agent_id, session_id, correlation_id):
             mode = agent_input.mode
+            session_state: Dict[str, Any] = {}
             raw_session_state = await self.context_manager.memory.get_session(session_id)
             if not raw_session_state:
                 await self.context_manager.initialize_session(session_id, input_data)
                 session_state = await self.context_manager.memory.get_session(session_id)
             else:
                 session_state, _ = SessionStateMigrator.migrate(session_id, raw_session_state)
+                # --- HARD RESET (Hito A1): Limpiar cola y artefactos si es un análisis fresco ---
+                if mode == "full" and not agent_input.resume_generation:
+                    logger.info("orchestrator_hard_reset_session_artifacts", session_id=session_id)
+                    reset_fields = {
+                        "pending_questions": [],
+                        "document_inventory": {"items": []},
+                        "document_candidates_v1": [],
+                        "intake_plan": {},
+                        "economic_user_inputs": {},
+                    }
+                    session_state.update(reset_fields)
+                    await _safe_save_session(self.context_manager.memory, session_id, reset_fields)
             
             context = await self.context_manager.get_global_context(session_id)
             tasks_completed = context.get("session_state", {}).get("tasks_completed", [])
             execution_results = {}
             next_steps = []
             telemetry: Dict[str, Any] = {"stages": {}, "llm_calls_estimate": 0}
+            fast_track_candidates: Optional[Dict[str, Any]] = None
 
             doc_profile = self._profile_document(input_data, session_state)
             pipeline_config = PipelineConfigurator.configure(doc_profile, mode=mode)
@@ -328,10 +646,12 @@ class OrchestratorAgent(BaseAgent):
             # para no volver a ejecutar ~15 min de Map-Reduce antes de generar documentos.
             stages_executed, stages_skipped, rules_triggered = [], [], []
             completed_stages = set()
-            reuse_prior_stages = agent_input.resume_generation or mode in (
-                "generation_only",
-                "generation",
+            reuse_prior_stages = agent_input.resume_generation or (
+                mode in ("generation_only", "generation") and agent_input.resume_generation
             )
+            # Si no es resume_generation, forzamos la ejecución de análisis incluso en modo full
+            if not agent_input.resume_generation and mode in ("full", "analysis_only"):
+                reuse_prior_stages = False
             if reuse_prior_stages:
                 for task in tasks_completed:
                     task_name = task.get("task", "")
@@ -344,6 +664,192 @@ class OrchestratorAgent(BaseAgent):
                             session_id=session_id,
                             mode=mode,
                         )
+
+            # --- VALIDACIÓN PREREQUISITO 1: generation_only/generation requiere company_id ---
+            # Sin empresa no hay master_profile → los agentes de generación no pueden
+            # producir documentos con datos corporativos correctos (RFC, razón social, etc.)
+            if mode in ("generation_only", "generation") and not agent_input.company_id:
+                logger.error(
+                    "generation_missing_company_id",
+                    session_id=session_id,
+                    mode=mode,
+                )
+                decision = OrchestratorState(
+                    stop_reason="MISSING_COMPANY_ID",
+                    aggregate_health="failed",
+                    next_steps=[],
+                    correlation_id=correlation_id,
+                ).model_dump()
+                await _safe_save_session(
+                    self.context_manager.memory, session_id,
+                    {"last_orchestrator_decision": decision}
+                )
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "message": (
+                        "No se puede generar documentos sin seleccionar una empresa. "
+                        "Por favor selecciona tu empresa en el menú superior antes de generar la propuesta."
+                    ),
+                    "orchestrator_decision": decision,
+                }
+
+            # --- VALIDACIÓN PREREQUISITO 2: generation_only requiere compliance previo ---
+            # Sin datos de compliance no hay lista maestra → los agentes de generación
+            # no pueden producir documentos correctos. Req 1.3, 1.5
+            if mode in ("generation_only", "generation") and "compliance" not in completed_stages:
+                logger.error(
+                    "generation_missing_prior_compliance",
+                    session_id=session_id,
+                    mode=mode,
+                    completed_stages=list(completed_stages),
+                )
+                decision = OrchestratorState(
+                    stop_reason="MISSING_PRIOR_ANALYSIS",
+                    aggregate_health="failed",
+                    next_steps=[],
+                    correlation_id=correlation_id,
+                ).model_dump()
+                await _safe_save_session(
+                    self.context_manager.memory, session_id,
+                    {"last_orchestrator_decision": decision}
+                )
+                return {
+                    "status": "error",
+                    "session_id": session_id,
+                    "message": (
+                        "No se puede generar documentos sin un análisis de compliance previo. "
+                        "Ejecuta primero 'Analizar Bases' para indexar los requisitos de la licitación."
+                    ),
+                    "orchestrator_decision": decision,
+                }
+
+            # ── FIX LOGO: Enriquecer company_data con perfil fresco de la DB ──────────
+            # El frontend envía company_data con docs como entero (conteo) y master_profile
+            # potencialmente desactualizado. Los agentes de generación necesitan:
+            #   - master_profile.logo  → ruta en disco del logotipo
+            #   - docs["LOGOTIPO"]["path"] → fallback si logo no está en master_profile
+            # Solución: leer company fresco de la DB y fusionar con el company_data del request.
+            if agent_input.company_id and mode in ("generation_only", "generation", "full"):
+                try:
+                    _fresh_company = await self.context_manager.memory.get_company(
+                        agent_input.company_id
+                    )
+                    if _fresh_company and isinstance(_fresh_company, dict):
+                        _fresh_profile = _fresh_company.get("master_profile") or {}
+                        _fresh_docs = _fresh_company.get("docs") or {}
+
+                        # Inyectar logo en master_profile si no viene del frontend
+                        _current_profile = dict(agent_input.company_data.get("master_profile") or {})
+                        if not _current_profile.get("logo"):
+                            # Prioridad 1: master_profile.logo de la DB
+                            if _fresh_profile.get("logo"):
+                                _current_profile["logo"] = _fresh_profile["logo"]
+                            # Prioridad 2: docs["LOGOTIPO"]["path"] de la DB
+                            elif isinstance(_fresh_docs.get("LOGOTIPO"), dict):
+                                _logo_path = _fresh_docs["LOGOTIPO"].get("path")
+                                if _logo_path:
+                                    _current_profile["logo"] = _logo_path
+
+                        # Fusionar campos faltantes del master_profile fresco
+                        for _field in (
+                            "razon_social", "rfc", "representante_legal",
+                            "domicilio_fiscal", "tipo", "logo",
+                        ):
+                            if not _current_profile.get(_field) and _fresh_profile.get(_field):
+                                _current_profile[_field] = _fresh_profile[_field]
+
+                        # Actualizar agent_input con el perfil enriquecido y docs reales
+                        agent_input = agent_input.model_copy(
+                            update={
+                                "company_data": {
+                                    **agent_input.company_data,
+                                    "master_profile": _current_profile,
+                                    "docs": _fresh_docs,  # docs real (dict), no el conteo del frontend
+                                }
+                            }
+                        )
+                        logger.info(
+                            "orchestrator_company_enriched",
+                            session_id=session_id,
+                            company_id=agent_input.company_id,
+                            has_logo=bool(_current_profile.get("logo")),
+                            logo_path=str(_current_profile.get("logo") or "")[:80],
+                        )
+                except Exception as _enrich_err:
+                    # No bloquear el pipeline si el enriquecimiento falla
+                    logger.warning(
+                        "orchestrator_company_enrich_failed",
+                        session_id=session_id,
+                        company_id=agent_input.company_id,
+                        error=str(_enrich_err),
+                    )
+
+            # --- TRIAGE NORMATIVO (PIPELINE PASO 1) ---
+            triage_context = session_state.get("triage_context")
+            if triage_context:
+                agent_input.triage_context = triage_context
+
+            # Triage guardado antes de taxonomy_allowlist / must_have_policy: completar y persistir
+            # para que Compliance reciba matriz y allowlist (evita legfis/anchor en cero silencioso).
+            if triage_context and mode in ("full", "analysis_only"):
+                law = triage_context.get("law", "LAASSP")
+                cat = triage_context.get("tender_category", "BIENES")
+                triage_dirty = False
+                if not triage_context.get("taxonomy_allowlist"):
+                    triage_context["taxonomy_allowlist"] = await TenderRouterService.get_taxonomy_allowlist(
+                        law, cat
+                    )
+                    triage_dirty = True
+                if not triage_context.get("must_have_policy"):
+                    triage_context["must_have_policy"] = await TenderRouterService.get_must_have_policy(law, cat)
+                    triage_dirty = True
+                if not triage_context.get("must_have"):
+                    triage_context["must_have"] = await TenderRouterService.get_must_have_list(law, cat)
+                    triage_dirty = True
+                if not triage_context.get("critical_rules"):
+                    triage_context["critical_rules"] = await TenderRouterService.get_critical_rules(law)
+                    triage_dirty = True
+                if triage_dirty:
+                    await _safe_save_session(
+                        self.context_manager.memory, session_id, {"triage_context": triage_context}
+                    )
+                    agent_input.triage_context = triage_context
+                    logger.info(
+                        "orchestrator_triage_enriched_legacy",
+                        session_id=session_id,
+                        law=law,
+                        category=cat,
+                    )
+
+            if not triage_context and mode in ("full", "analysis_only"):
+                from app.services.vector_service import VectorDbServiceClient
+                _notify_job_progress(agent_input.job_id, "triage", 25, "Ejecutando triage normativo...")
+                vdb = VectorDbServiceClient()
+                triage_context = await TenderRouterService.get_triage(session_id, vdb)
+                
+                # Inyectar matriz de obligatorios y reglas
+                triage_context["must_have"] = await TenderRouterService.get_must_have_list(
+                    triage_context.get("law", "LAASSP"), 
+                    triage_context.get("tender_category", "BIENES")
+                )
+                triage_context["must_have_policy"] = await TenderRouterService.get_must_have_policy(
+                    triage_context.get("law", "LAASSP"),
+                    triage_context.get("tender_category", "BIENES")
+                )
+                triage_context["critical_rules"] = await TenderRouterService.get_critical_rules(
+                    triage_context.get("law", "LAASSP")
+                )
+                triage_context["taxonomy_allowlist"] = await TenderRouterService.get_taxonomy_allowlist(
+                    triage_context.get("law", "LAASSP"),
+                    triage_context.get("tender_category", "BIENES"),
+                )
+
+                await _safe_save_session(self.context_manager.memory, session_id, {"triage_context": triage_context})
+                logger.info("orchestrator_triage_stored", session_id=session_id, triage=triage_context)
+                
+                # Actualizar agent_input para los siguientes agentes
+                agent_input.triage_context = triage_context
 
             # --- ANALISIS CON BACKTRACKING ---
             bt_iterations = 0
@@ -471,6 +977,54 @@ class OrchestratorAgent(BaseAgent):
                     input_data["compliance_master_list"] = res_data.get("data", {})
                     logger.info("resume_data_reconstructed", stage="compliance", session_id=session_id)
 
+                if settings.FAST_TRACK_DOC_CANDIDATES_ENABLED:
+                    try:
+                        # Extraer datos de cumplimiento de forma robusta
+                        comp_res = execution_results.get("compliance", {})
+                        comp_data = comp_res.get("data", {}) if isinstance(comp_res, dict) else (getattr(comp_res, "data", {}) if comp_res else {})
+                        
+                        if comp_data and (comp_data.get("administrativo") or comp_data.get("tecnico") or comp_data.get("formatos")):
+                            logger.info("building_fast_track_candidates", session_id=session_id)
+                            fast_track_candidates = build_candidate_document_list(
+                                compliance_master_list=comp_data,
+                                require_human_confirmation=bool(settings.FAST_TRACK_REQUIRE_HUMAN_CONFIRM),
+                                low_conf_threshold=float(settings.FAST_TRACK_LOW_CONF_THRESHOLD),
+                            )
+                            input_data["fast_track_document_candidates"] = fast_track_candidates
+
+                            # --- CCC: Capa de Consolidación de Compliance (Universal) ---
+                            # Agrupa los ítems granulares en entregables accionables (~25)
+                            # sin asumir nombres de Anexo específicos de ninguna licitación.
+                            consolidated: dict = {}
+                            try:
+                                from app.services.compliance_consolidation_service import ComplianceConsolidator
+                                consolidated = await ComplianceConsolidator().consolidate(
+                                    raw_items=comp_data,
+                                    session_id=session_id,
+                                )
+                                meta = consolidated.get("_meta", {})
+                                logger.info(
+                                    "compliance_consolidated",
+                                    session_id=session_id,
+                                    raw=meta.get("total_raw_items", 0),
+                                    consolidados=meta.get("total_consolidados", 0),
+                                    latencia_ms=meta.get("latencia_ms", 0),
+                                )
+                            except Exception as _ccc_exc:
+                                logger.warning("compliance_consolidation_failed", session_id=session_id, error=str(_ccc_exc))
+
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                {
+                                    "document_candidates_v1": fast_track_candidates,       # Backward compat
+                                    "document_candidates_final": fast_track_candidates,
+                                    "document_candidates_consolidated": consolidated,        # CCC: lista limpia
+                                },
+                            )
+                    except Exception as _ft_exc:
+                        logger.warning("fast_track_document_candidates_failed", session_id=session_id, error=str(_ft_exc))
+
                 # ComplianceGate determinista (12.1): corta pipeline antes de evaluación económica.
                 from app.agents.compliance_gate import ComplianceGate
                 gate_payload = {
@@ -499,12 +1053,20 @@ class OrchestratorAgent(BaseAgent):
                     ).model_dump()
                     session_state["last_orchestrator_decision"] = decision
                     session_state["last_orchestrator_metadata"] = final_metadata
-                    await self.context_manager.memory.save_session(session_id, session_state)
+                    await _safe_save_session(
+                        self.context_manager.memory, session_id,
+                        {
+                            "last_orchestrator_decision": decision,
+                            "last_orchestrator_metadata": final_metadata,
+                            "compliance_gate_result": gate_result_dict,
+                        }
+                    )
                     self._persist_latest_job_metadata(session_id, "hard_disqualification", final_metadata, decision)
                     return {
                         "status": "hard_disqualification",
                         "session_id": session_id,
                         "message": "Pipeline detenido por causas deterministas de descalificación (12.1).",
+                        "fast_track_document_candidates": fast_track_candidates,
                         "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
                         "orchestrator_decision": decision,
                         "metadata": final_metadata,
@@ -515,12 +1077,14 @@ class OrchestratorAgent(BaseAgent):
                 comp_st = _result_status_value(comp_res)
                 if comp_res is not None and comp_st == AgentStatus.ERROR.value:
                     decision = OrchestratorState(stop_reason="COMPLIANCE_ERROR", aggregate_health="failed", next_steps=next_steps, correlation_id=correlation_id).model_dump()
-                    # Si es error, guardamos sesión antes de salir
-                    session_state["last_orchestrator_decision"] = decision
-                    await self.context_manager.memory.save_session(session_id, session_state)
+                    await _safe_save_session(
+                        self.context_manager.memory, session_id,
+                        {"last_orchestrator_decision": decision}
+                    )
                     return {
                         "status": "success",
                         "session_id": session_id,
+                        "fast_track_document_candidates": fast_track_candidates,
                         "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
                         "orchestrator_decision": decision,
                         "metadata": {"telemetry": telemetry}
@@ -547,6 +1111,286 @@ class OrchestratorAgent(BaseAgent):
                         continue
                     break
                 else: break
+
+            # --- GoNoGoAgent: Semáforo de decisión antes del EconomicAgent ---
+            intake_plan_data: Optional[Dict[str, Any]] = None
+            go_no_go_override = session_state.get("go_no_go_override") or {}
+            _already_authorized = go_no_go_override.get("authorized_by") == "user"
+            # Solo saltar Go/No-Go en modos de generación cuando ya fue autorizado
+            # En analysis_only y full siempre ejecutar para mostrar el panel al usuario
+            _skip_go_no_go = mode in ("generation_only", "generation") and _already_authorized
+
+            if not _skip_go_no_go:
+                try:
+                    from app.agents.go_no_go import GoNoGoAgent
+                    effective_profile = agent_input.company_data.get("master_profile") or {}
+                    go_no_go_baseline_master_profile: Dict[str, Any] = {}
+                    if settings.ENABLE_EVIDENCE_PROFILE_BRIDGE:
+                        go_no_go_baseline_master_profile = dict(effective_profile)
+
+                    if settings.ENABLE_EVIDENCE_PROFILE_BRIDGE:
+                        try:
+                            from app.services.evidence_profile_service import (
+                                build_conflict_pending_questions,
+                                build_evidence_profile_from_documents,
+                                build_effective_profile,
+                                detect_profile_conflicts,
+                            )
+
+                            session_docs = await self.context_manager.memory.get_documents(session_id)
+                            evidence_profile = build_evidence_profile_from_documents(session_docs or [])
+                            user_overrides = session_state.get("evidence_profile_overrides") or {}
+                            conflicts = detect_profile_conflicts(
+                                master_profile=effective_profile,
+                                evidence_profile=evidence_profile,
+                                evidence_profile_overrides=user_overrides,
+                            )
+                            effective_profile, profile_provenance = build_effective_profile(
+                                master_profile=effective_profile,
+                                evidence_profile=evidence_profile,
+                                user_overrides=user_overrides,
+                            )
+                            updates: Dict[str, Any] = {
+                                "evidence_profile": evidence_profile,
+                                "effective_profile_provenance": profile_provenance,
+                                "evidence_profile_conflicts": conflicts,
+                            }
+                            fresh_session = await self.context_manager.memory.get_session(session_id) or {}
+                            old_pending = list(fresh_session.get("pending_questions") or [])
+                            existing_pending = [
+                                q for q in old_pending
+                                if str(q.get("type") or "") != "evidence_profile_conflict"
+                            ]
+                            had_conflict_pending = any(
+                                str(q.get("type") or "") == "evidence_profile_conflict" for q in old_pending
+                            )
+                            if conflicts:
+                                existing_pending.extend(build_conflict_pending_questions(conflicts))
+                            if conflicts or had_conflict_pending:
+                                updates["pending_questions"] = existing_pending
+                                if conflicts and existing_pending:
+                                    updates["current_question_index"] = 0
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                updates,
+                            )
+                        except Exception as _ev_exc:
+                            logger.warning(
+                                "evidence_profile_bridge_failed",
+                                session_id=session_id,
+                                error=str(_ev_exc),
+                            )
+
+                    _t0_gng = _now_utc_iso()
+                    _notify_job_progress(
+                        agent_input.job_id, "go_no_go", 85,
+                        "Evaluando viabilidad de participación (Semáforo Go/No-Go)…",
+                    )
+                    _gng_company_data: Dict[str, Any] = {
+                        **agent_input.company_data,
+                        "master_profile": effective_profile,
+                    }
+                    if settings.ENABLE_EVIDENCE_PROFILE_BRIDGE:
+                        _gng_company_data["go_no_go_baseline_master_profile"] = (
+                            go_no_go_baseline_master_profile
+                        )
+                    gng_input = agent_input.model_copy(
+                        update={"company_data": _gng_company_data}
+                    )
+                    gng_res = await GoNoGoAgent(self.context_manager).process(gng_input)
+                    _finalize_stage_telemetry(telemetry, "go_no_go", _t0_gng)
+                    execution_results["go_no_go"] = gng_res
+
+                    gng_data = gng_res.data if hasattr(gng_res, "data") else (gng_res.get("data") if isinstance(gng_res, dict) else {})
+                    semaforo = (gng_data or {}).get("semaforo", "GREEN")
+
+                    # --- NUEVO: Generar Inventario Documental antes del Planner (Proactividad) ---
+                    if settings.DOCUMENT_INVENTORY_SERVICE_ENABLED:
+                        try:
+                            from app.services.document_inventory_service import DocumentInventoryService
+                            _notify_job_progress(
+                                agent_input.job_id, "orchestration", 86,
+                                "Sincronizando inventario documental de las bases…",
+                            )
+                            _doc_inv = await DocumentInventoryService.build_for_session(
+                                session_id,
+                                use_llm=bool(settings.DOCUMENT_INVENTORY_SERVICE_USE_LLM),
+                                correlation_id=correlation_id,
+                            )
+                            _doc_inv_dump = _doc_inv.model_dump(mode="json")
+                            input_data["document_inventory"] = _doc_inv_dump
+                            # Actualizar session_state local para que el planner lo vea
+                            session_state["document_inventory"] = _doc_inv_dump
+                            
+                            # Persistencia inmediata en sesión
+                            await _safe_save_session(
+                                self.context_manager.memory, session_id,
+                                {"document_inventory": _doc_inv_dump}
+                            )
+                        except Exception as _svc_exc:
+                            logger.warning("document_inventory_early_service_failed", session_id=session_id, error=str(_svc_exc))
+
+                    # Intake Planner (shadow): consolida preguntas priorizadas sin reemplazar pending_questions legacy
+                    if settings.INTAKE_PLANNER_ENABLED:
+                        try:
+                            from app.agents.intake_planner import IntakePlannerAgent
+
+                            # Hidratación forzada: consultar el master_profile real desde la BD
+                            # para garantizar que el planner vea los datos actuales de la empresa.
+                            _company_id = agent_input.company_id or session_state.get("company_id")
+                            _db_master_profile: Dict[str, Any] = {}
+                            if _company_id:
+                                try:
+                                    _company_db = await self.context_manager.memory.get_company(_company_id)
+                                    _db_master_profile = (_company_db.get("master_profile") or {}) if _company_db else {}
+                                except Exception as _mp_exc:
+                                    logger.warning("intake_planner_master_profile_fetch_failed", session_id=session_id, error=str(_mp_exc))
+
+                            # Fusionar: DB tiene prioridad sobre el input del agente
+                            _input_master_profile = (agent_input.company_data or {}).get("master_profile") or {}
+                            _master_profile_final = {**_input_master_profile, **_db_master_profile}
+
+                            planner_input = agent_input.model_copy(
+                                update={
+                                    "company_data": {
+                                        "master_profile": _master_profile_final,
+                                        "results": {
+                                            "analysis": execution_results.get("analysis", {}),
+                                            "compliance": execution_results.get("compliance", {}),
+                                            "go_no_go": execution_results.get("go_no_go", {}),
+                                        },
+                                        "session_state": session_state,
+                                    }
+                                }
+                            )
+                            planner_res = await IntakePlannerAgent(self.context_manager).process(planner_input)
+                            execution_results["intake_planner"] = planner_res
+                            intake_plan_data = _extract_output_data(planner_res)
+
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                {
+                                    "intake_plan": intake_plan_data,
+                                    "intake_plan_version": str(intake_plan_data.get("plan_version") or "1.0.0"),
+                                    "intake_last_updated_at": _now_utc_iso(),
+                                    "intake_shadow_mode": bool(settings.INTAKE_PLANNER_SHADOW_MODE),
+                                },
+                            )
+                        except Exception as _planner_exc:
+                            logger.warning(
+                                "intake_planner_failed",
+                                session_id=session_id,
+                                error=str(_planner_exc),
+                            )
+
+                    if semaforo in ("RED", "YELLOW"):
+                        decision = OrchestratorState(
+                            stop_reason="GO_NO_GO_PENDING",
+                            aggregate_health="partial",
+                            next_steps=next_steps,
+                            correlation_id=correlation_id,
+                        ).model_dump()
+                        # Refrescar session_state desde BD para no sobreescribir tasks_completed
+                        # que record_task_completion guardó durante el compliance (Req 1.5)
+                        await _safe_save_session(
+                            self.context_manager.memory, session_id,
+                            {
+                                "last_orchestrator_decision": decision, 
+                                "go_no_go_result": gng_data,
+                                "intake_plan": intake_plan_data
+                            }
+                        )
+                        fresh_state = await self.context_manager.memory.get_session(session_id) or {}
+                        session_state = fresh_state
+                        _notify_job_progress(
+                            agent_input.job_id, "go_no_go", 87,
+                            f"Semáforo {semaforo}: se detectaron brechas críticas. Esperando decisión del usuario.",
+                        )
+                        try:
+                            return {
+                                "status": "go_no_go_pending",
+                                "session_id": session_id,
+                                "go_no_go_result": gng_data,
+                                "intake_plan": intake_plan_data,
+                                "fast_track_document_candidates": fast_track_candidates,
+                                "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
+                                "orchestrator_decision": decision,
+                                "metadata": {"telemetry": telemetry},
+                            }
+                        finally:
+                            # PERSISTENCIA CRÍTICA: Asegurar que los candidatos se guarden en la sesión para el Chatbot
+                            if fast_track_candidates and session_id:
+                                try:
+                                    await _safe_save_session(
+                                        self.context_manager.memory, session_id,
+                                        {"document_candidates_v1": fast_track_candidates}
+                                    )
+                                except Exception as _save_exc:
+                                    logger.warning("orchestrator_persist_candidates_failed", error=str(_save_exc))
+                            
+                            # --- POST-PROCESO PROACTIVO (Final de Carrera) ---
+                            await self._proactive_injection_checkpoint(session_id)
+                except Exception as _gng_exc:
+                    logger.error(
+                        "go_no_go_agent_failed",
+                        session_id=session_id,
+                        error=str(_gng_exc),
+                    )
+                    # Fallback: continuar pipeline como GREEN para no bloquear por fallo de la nueva capa
+
+            # Si se omitió Go/No-Go por autorización previa, aún generar intake plan en shadow
+            if _skip_go_no_go and settings.INTAKE_PLANNER_ENABLED:
+                try:
+                    from app.agents.intake_planner import IntakePlannerAgent
+
+                    # Hidratación forzada (mismo patrón que el bloque principal)
+                    _company_id2 = agent_input.company_id or session_state.get("company_id")
+                    _db_master_profile2: Dict[str, Any] = {}
+                    if _company_id2:
+                        try:
+                            _company_db2 = await self.context_manager.memory.get_company(_company_id2)
+                            _db_master_profile2 = (_company_db2.get("master_profile") or {}) if _company_db2 else {}
+                        except Exception:
+                            pass
+                    _input_mp2 = (agent_input.company_data or {}).get("master_profile") or {}
+                    _master_profile_final2 = {**_input_mp2, **_db_master_profile2}
+
+                    planner_input = agent_input.model_copy(
+                        update={
+                            "company_data": {
+                                "master_profile": _master_profile_final2,
+                                "results": {
+                                    "analysis": execution_results.get("analysis", {}),
+                                    "compliance": execution_results.get("compliance", {}),
+                                    "go_no_go": execution_results.get("go_no_go", {}),
+                                },
+                                "session_state": session_state,
+                            }
+                        }
+                    )
+                    planner_res = await IntakePlannerAgent(self.context_manager).process(planner_input)
+                    execution_results["intake_planner"] = planner_res
+                    intake_plan_data = _extract_output_data(planner_res)
+                    await _safe_save_session(
+                        self.context_manager.memory,
+                        session_id,
+                        {
+                            "intake_plan": intake_plan_data,
+                            "intake_plan_version": str(intake_plan_data.get("plan_version") or "1.0.0"),
+                            "intake_last_updated_at": _now_utc_iso(),
+                            "intake_shadow_mode": bool(settings.INTAKE_PLANNER_SHADOW_MODE),
+                        },
+                    )
+                    # HITO: Inyectar proactivamente las preguntas a la cola aunque se haya saltado el Go/No-Go
+                    await self._proactive_injection_checkpoint(session_id)
+                except Exception as _planner_exc2:
+                    logger.warning(
+                        "intake_planner_failed",
+                        session_id=session_id,
+                        error=str(_planner_exc2),
+                    )
 
             # Economic
             if self._should_execute_stage("economic", pipeline_config, stages_skipped) and "economic" not in completed_stages:
@@ -585,11 +1429,14 @@ class OrchestratorAgent(BaseAgent):
                             correlation_id=correlation_id,
                             waiting_hints=econ_hints,
                         ).model_dump()
-                        latest_session = await self.context_manager.memory.get_session(session_id) or {}
-                        latest_session["last_orchestrator_decision"] = decision
+                        _updates_5: Dict[str, Any] = {"last_orchestrator_decision": decision}
                         if econ_hints is not None:
-                            latest_session["last_economic_waiting_hints"] = econ_hints
-                        await self.context_manager.memory.save_session(session_id, latest_session)
+                            _updates_5["last_economic_waiting_hints"] = econ_hints
+                        await _safe_save_session(self.context_manager.memory, session_id, _updates_5)
+                        
+                        # --- POST-PROCESO PROACTIVO ---
+                        await self._proactive_injection_checkpoint(session_id)
+                        
                         _notify_job_progress(
                             agent_input.job_id,
                             "economic",
@@ -636,6 +1483,12 @@ class OrchestratorAgent(BaseAgent):
                     if skip_dg:
                         execution_results["datagap"] = {"status": "resumed"}
                     else:
+                        _notify_job_progress(
+                            agent_input.job_id,
+                            "generation.datagap",
+                            91,
+                            "Validando datos mínimos para generación…",
+                        )
                         res = await DataGapAgent(self.context_manager).process(agent_input)
                         execution_results["datagap"] = res
                         stages_executed.append("datagap")
@@ -648,10 +1501,14 @@ class OrchestratorAgent(BaseAgent):
                             ).model_dump()
                             if gen_state:
                                 _set_gen_job_status(gen_state, "datagap", "blocked")
-                            session_state["last_orchestrator_decision"] = decision
+                            _updates_6: Dict[str, Any] = {"last_orchestrator_decision": decision}
                             if gen_state:
-                                session_state["generation_state"] = gen_state
-                            await self.context_manager.memory.save_session(session_id, session_state)
+                                _updates_6["generation_state"] = gen_state
+                            await _safe_save_session(self.context_manager.memory, session_id, _updates_6)
+                            
+                            # --- POST-PROCESO PROACTIVO ---
+                            await self._proactive_injection_checkpoint(session_id)
+                            
                             return _response_with_generation_state(
                                 {
                                     "status": "waiting_for_data",
@@ -666,8 +1523,118 @@ class OrchestratorAgent(BaseAgent):
                                 session_state,
                                 mode,
                             )
+                        _notify_job_progress(
+                            agent_input.job_id,
+                            "generation.datagap",
+                            92,
+                            "Validación inicial completa; iniciando generación documental…",
+                        )
                         if gen_state:
                             _set_gen_job_status(gen_state, "datagap", "done")
+
+                if settings.DOCUMENT_INVENTORY_MERGE_ENABLED:
+                    try:
+                        from app.services.document_inventory_merge import (
+                            merge_inventory_into_compliance_list,
+                        )
+
+                        _cm = input_data.get("compliance_master_list") or {}
+                        if not any(_cm.get(k) for k in ("administrativo", "tecnico", "formatos")):
+                            comp_task = next(
+                                (
+                                    t
+                                    for t in reversed(
+                                        session_state.get("tasks_completed", []) or []
+                                    )
+                                    if t.get("task") == "stage_completed:compliance"
+                                ),
+                                {},
+                            )
+                            rd = comp_task.get("result") or {}
+                            if isinstance(rd, dict) and isinstance(rd.get("data"), dict):
+                                _cm = rd["data"]
+                        _merged = await merge_inventory_into_compliance_list(
+                            session_id=session_id,
+                            compliance_master_list=_cm,
+                            correlation_id=correlation_id,
+                        )
+                        input_data["compliance_master_list"] = _merged
+                        agent_input = agent_input.model_copy(
+                            update={
+                                "company_data": {
+                                    **(agent_input.company_data or {}),
+                                    "compliance_master_list": _merged,
+                                }
+                            }
+                        )
+                    except Exception as _inv_exc:
+                        logger.warning(
+                            "document_inventory_merge_failed",
+                            session_id=session_id,
+                            error=str(_inv_exc),
+                        )
+
+                # DocumentInventoryService movido a fase temprana (línea ~950) para alimentar al IntakePlanner
+
+                # ── TAREA 4: Verificar snapshot económico antes de invocar EconomicWriterAgent ──
+                # Si el snapshot tiene total_base ~0 (fue generado antes de que el usuario
+                # capturara precios en el chat), intentamos re-sincronizarlo. Si no es posible,
+                # detenemos el pipeline con un mensaje claro al usuario.
+                _fresh_session_for_econ = await self.context_manager.memory.get_session(session_id) or {}
+                _econ_ready, _econ_error = await _ensure_economic_snapshot_ready(
+                    self.context_manager,
+                    session_id,
+                    agent_input,
+                    _fresh_session_for_econ,
+                )
+                if not _econ_ready and _econ_error:
+                    _stop_reason = str(_econ_error.get("stop_reason") or "ECONOMIC_PRICES_INCOMPLETE")
+                    _econ_decision = OrchestratorState(
+                        stop_reason=_stop_reason,
+                        aggregate_health="partial",
+                        next_steps=next_steps,
+                        correlation_id=correlation_id,
+                    ).model_dump()
+                    if gen_state:
+                        _set_gen_job_status(gen_state, "economic_writer", "blocked")
+                    _updates_econ: Dict[str, Any] = {"last_orchestrator_decision": _econ_decision}
+                    if gen_state:
+                        _updates_econ["generation_state"] = gen_state
+                    await _safe_save_session(self.context_manager.memory, session_id, _updates_econ)
+                    await self._proactive_injection_checkpoint(session_id)
+                    return _response_with_generation_state(
+                        {
+                            "status": _econ_error.get("status", "waiting_for_data"),
+                            "session_id": session_id,
+                            "chatbot_message": _econ_error.get("message", ""),
+                            "results": {
+                                k: (v if isinstance(v, dict) else v.model_dump())
+                                for k, v in execution_results.items()
+                            },
+                            "orchestrator_decision": _econ_decision,
+                            "data": _econ_error.get("data"),
+                        },
+                        session_state,
+                        mode,
+                    )
+
+                # ── TAREA 4: Inyectar triage_context en agent_input para agentes de generación ──
+                # El triage_context se persiste en session_state durante la fase de análisis.
+                # En generation_only, agent_input.triage_context puede estar vacío porque el
+                # frontend no lo envía. Los agentes de generación (TechnicalWriter, Formats)
+                # necesitan el triage_context para adaptar el quality gate al tipo de licitación.
+                if not agent_input.triage_context:
+                    _triage_for_gen = session_state.get("triage_context")
+                    if _triage_for_gen and isinstance(_triage_for_gen, dict):
+                        agent_input = agent_input.model_copy(
+                            update={"triage_context": _triage_for_gen}
+                        )
+                        logger.info(
+                            "orchestrator_triage_injected_for_generation",
+                            session_id=session_id,
+                            tender_category=_triage_for_gen.get("tender_category"),
+                            law=_triage_for_gen.get("law"),
+                        )
 
                 for step, a_cls in [
                     ("technical", "TechnicalWriterAgent"),
@@ -695,6 +1662,30 @@ class OrchestratorAgent(BaseAgent):
                             else:
                                 from app.agents.delivery import DeliveryAgent as C
 
+                            # Enriquecer agent_input con documentos_generados acumulados
+                            # para DocumentPackagerAgent y DeliveryAgent (Req 5.1, 7.1)
+                            pct_start, pct_done, msg_start, msg_done = _generation_progress_for_step(step)
+                            _notify_job_progress(
+                                agent_input.job_id,
+                                f"generation.{step}",
+                                pct_start,
+                                msg_start,
+                            )
+                            if step in ("packager", "delivery"):
+                                documentos_generados = {
+                                    "tecnica": _extract_documentos(execution_results.get("technical")),
+                                    "administrativa": _extract_documentos(execution_results.get("formats")),
+                                    "economica": _extract_documentos(execution_results.get("economic_writer")),
+                                }
+                                agent_input = agent_input.model_copy(
+                                    update={
+                                        "company_data": {
+                                            **agent_input.company_data,
+                                            "documentos_generados": documentos_generados,
+                                        }
+                                    }
+                                )
+
                             res = await C(self.context_manager).process(agent_input)
                             execution_results[step] = res
 
@@ -705,18 +1696,30 @@ class OrchestratorAgent(BaseAgent):
                                     stage=step,
                                     session_id=session_id,
                                 )
+                                quality_hints = _document_quality_waiting_hints_from_output(res)
+                                fill_hints = _document_fill_quality_waiting_hints_from_output(res)
+                                waiting_hints = fill_hints or quality_hints
                                 decision = OrchestratorState(
                                     stop_reason=f"INCOMPLETE_{step.upper()}_DATA",
                                     aggregate_health="partial",
                                     next_steps=next_steps,
                                     correlation_id=correlation_id,
+                                    waiting_hints=waiting_hints,
                                 ).model_dump()
                                 if gen_state:
                                     _set_gen_job_status(gen_state, step, "blocked")
-                                session_state["last_orchestrator_decision"] = decision
+                                _updates_7: Dict[str, Any] = {"last_orchestrator_decision": decision}
+                                if quality_hints is not None:
+                                    _updates_7["last_document_quality_waiting_hints"] = quality_hints
+                                if fill_hints is not None:
+                                    _updates_7["last_document_fill_quality_waiting_hints"] = fill_hints
                                 if gen_state:
-                                    session_state["generation_state"] = gen_state
-                                await self.context_manager.memory.save_session(session_id, session_state)
+                                    _updates_7["generation_state"] = gen_state
+                                await _safe_save_session(self.context_manager.memory, session_id, _updates_7)
+                                
+                                # --- POST-PROCESO PROACTIVO ---
+                                await self._proactive_injection_checkpoint(session_id)
+                                
                                 return _response_with_generation_state(
                                     {
                                         "status": "waiting_for_data",
@@ -745,9 +1748,10 @@ class OrchestratorAgent(BaseAgent):
                                     aggregate_health="failed",
                                     correlation_id=correlation_id,
                                 ).model_dump()
+                                _updates_8: Dict[str, Any] = {"last_orchestrator_decision": decision}
                                 if gen_state:
-                                    session_state["generation_state"] = gen_state
-                                await self.context_manager.memory.save_session(session_id, session_state)
+                                    _updates_8["generation_state"] = gen_state
+                                await _safe_save_session(self.context_manager.memory, session_id, _updates_8)
                                 return _response_with_generation_state(
                                     {
                                         "status": "error",
@@ -761,6 +1765,12 @@ class OrchestratorAgent(BaseAgent):
 
                             if gen_state:
                                 _set_gen_job_status(gen_state, step, "done")
+                            _notify_job_progress(
+                                agent_input.job_id,
+                                f"generation.{step}",
+                                pct_done,
+                                msg_done,
+                            )
 
                             next_steps.append(f"{step}_OK")
 
@@ -793,10 +1803,10 @@ class OrchestratorAgent(BaseAgent):
                                         next_steps=next_steps,
                                         correlation_id=correlation_id,
                                     ).model_dump()
-                                    session_state["last_orchestrator_decision"] = decision
+                                    _updates_9: Dict[str, Any] = {"last_orchestrator_decision": decision}
                                     if gen_state:
-                                        session_state["generation_state"] = gen_state
-                                    await self.context_manager.memory.save_session(session_id, session_state)
+                                        _updates_9["generation_state"] = gen_state
+                                    await _safe_save_session(self.context_manager.memory, session_id, _updates_9)
                                     return _response_with_generation_state(
                                         {
                                             "status": "error",
@@ -833,9 +1843,14 @@ class OrchestratorAgent(BaseAgent):
                                 aggregate_health="failed",
                                 correlation_id=correlation_id,
                             ).model_dump()
+                            _updates_10: Dict[str, Any] = {"last_orchestrator_decision": decision}
                             if gen_state:
-                                session_state["generation_state"] = gen_state
-                            await self.context_manager.memory.save_session(session_id, session_state)
+                                _updates_10["generation_state"] = gen_state
+                            await _safe_save_session(self.context_manager.memory, session_id, _updates_10)
+                            
+                            # --- POST-PROCESO PROACTIVO ---
+                            await self._proactive_injection_checkpoint(session_id)
+                            
                             return _response_with_generation_state(
                                 {
                                     "status": "error",
@@ -847,10 +1862,43 @@ class OrchestratorAgent(BaseAgent):
                                 mode,
                             )
 
+                if (
+                    settings.DOCUMENT_INVENTORY_SERVICE_ENABLED
+                    and bool(getattr(settings, "DOCUMENT_INVENTORY_SYNC_ENABLED", True))
+                    and input_data.get("document_inventory")
+                ):
+                    try:
+                        from app.services.document_inventory_service import DocumentInventoryService
+
+                        _synced_inv = await DocumentInventoryService.sync_inventory_to_session_memory(
+                            self.context_manager.memory,
+                            session_id,
+                            input_data["document_inventory"],
+                        )
+                        _sync_dump = _synced_inv.model_dump(mode="json")
+                        input_data["document_inventory"] = _sync_dump
+                        session_state["document_inventory"] = _sync_dump
+                        agent_input = agent_input.model_copy(
+                            update={
+                                "company_data": {
+                                    **(agent_input.company_data or {}),
+                                    "document_inventory": _sync_dump,
+                                }
+                            }
+                        )
+                    except Exception as _sync_exc:
+                        logger.warning(
+                            "document_inventory_sync_failed",
+                            session_id=session_id,
+                            error=str(_sync_exc),
+                        )
+
                 if gen_state:
                     gen_state["status"] = "completed"
-                    session_state["generation_state"] = gen_state
-                    await self.context_manager.memory.save_session(session_id, session_state)
+                    await _safe_save_session(
+                        self.context_manager.memory, session_id,
+                        {"generation_state": gen_state}
+                    )
 
                 checklist = await self._generate_checklist(session_id, input_data, execution_results)
                 session_state["checklist"] = checklist
@@ -885,6 +1933,7 @@ class OrchestratorAgent(BaseAgent):
                 "confidence_summary": confidence_summary,
                 "backtracking": {"iterations": bt_iterations, "history": bt_history} if settings.BACKTRACKING_ENABLED else None,
                 "feedback_pending": (confidence_summary and confidence_summary.get("avg_confidence", 1.0) < settings.CONFIDENCE_THRESHOLD_DEFAULT) if settings.FEEDBACK_UI_ENABLED else False,
+                "fast_track_document_candidates": fast_track_candidates,
                 "telemetry": telemetry,
             }
             agg_health = _aggregate_health_from_results(execution_results)
@@ -894,15 +1943,17 @@ class OrchestratorAgent(BaseAgent):
                 next_steps=next_steps,
                 correlation_id=correlation_id,
             ).model_dump()
-            session_state["last_orchestrator_decision"] = decision
-            session_state["last_orchestrator_metadata"] = final_metadata
-            await self.context_manager.memory.save_session(session_id, session_state)
+            # Refrescar desde BD para preservar tasks_completed escritos por los agentes
+            await _safe_save_session(
+                self.context_manager.memory, session_id,
+                {"last_orchestrator_decision": decision, "last_orchestrator_metadata": final_metadata}
+            )
             self._persist_latest_job_metadata(session_id, "success", final_metadata, decision)
-
             return _response_with_generation_state(
                 {
                     "status": "success",
                     "session_id": session_id,
+                    "fast_track_document_candidates": fast_track_candidates,
                     "results": {
                         k: (v if isinstance(v, dict) else v.model_dump())
                         for k, v in execution_results.items()

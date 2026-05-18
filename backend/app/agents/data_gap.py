@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Dict, List, Optional
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
@@ -6,6 +7,9 @@ from app.services.vector_service import VectorDbServiceClient
 from app.services.resilient_llm import ResilientLLMClient
 from app.services.slot_inference import SlotInferenceService, INFERRED_TO_PROFILE_MAP
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class DataGapAgent(BaseAgent):
@@ -19,8 +23,36 @@ class DataGapAgent(BaseAgent):
        bases/convocatoria/pliego (para no mezclar datos del convocante con el oferente).
     """
 
+    # Campos críticos: su faltante bloquea generación documental.
+    BLOCKING_FIELDS = frozenset(
+        {
+            "rfc",
+            "razon_social",
+            "domicilio_fiscal",
+            "representante_legal",
+        }
+    )
+    # Campos no críticos: se intentan auto-rellenar desde RAG; si no hay hallazgo,
+    # se preguntan en HITL pero no bloquean la generación.
+    INFORMATIONAL_FIELDS = frozenset(
+        {
+            "cedula_representante",
+            "web",
+            "telefono",
+            "numero_empleados",
+            "email",
+            "anos_experiencia",
+        }
+    )
+
     # Mapa de campos → cómo buscarlos y cómo preguntarlos
     FIELD_DEFINITIONS = {
+        "razon_social": {
+            "label": "Razón social de la empresa",
+            "question": "¿Cuál es la **razón social** registrada de {razon_social}? (como en acta constitutiva o CIF)",
+            "rag_queries": ["razón social", "denominación social", "nombre de la empresa", "razon social"],
+            "document_hint": "Acta constitutiva o Constancia de Situación Fiscal",
+        },
         "rfc": {
             "label": "RFC de la empresa",
             "question": "¿Cuál es el **RFC** oficial de {razon_social}? (ej: ABC123456XYZ)",
@@ -116,6 +148,7 @@ class DataGapAgent(BaseAgent):
 
         auto_filled = []
         missing_fields = []
+        missing_blocking_fields: List[str] = []
 
         # --- Hito 5: Inferencia Dinámica de Slots desde Compliance ---
         # Compliance data transition handled in Orchestrator usually. 
@@ -156,13 +189,21 @@ class DataGapAgent(BaseAgent):
             profile_key = INFERRED_TO_PROFILE_MAP.get(s, s)
             mapped_inferred_slots.add(profile_key)
 
-        # Unimos las definiciones fijas con las inferidas (reconciliadas)
-        active_fields = list(self.FIELD_DEFINITIONS.keys())
-        for s in mapped_inferred_slots:
-            if s not in active_fields:
+        # Alcance anclado a la licitación: bloqueantes siempre + campos cuyo slot
+        # aparece en requisitos de compliance (inferencia por requisito). No se
+        # evalúa el checklist completo de FIELD_DEFINITIONS sin vínculo a bases.
+        active_fields: List[str] = []
+        seen: set[str] = set()
+        for fk in sorted(self.BLOCKING_FIELDS):
+            if fk not in seen:
+                active_fields.append(fk)
+                seen.add(fk)
+        for s in sorted(mapped_inferred_slots):
+            if s not in seen:
                 active_fields.append(s)
+                seen.add(s)
 
-        print(f"[DataGap] 🧩 Slots activos reconciliados (Hito 5.1): {active_fields}")
+        print(f"[DataGap] 🧩 Campos activos (bloqueantes + inferidos desde compliance): {active_fields}")
 
         for field_key in active_fields:
             # Obtener definición (si no existe, crear una genérica básica)
@@ -195,12 +236,26 @@ class DataGapAgent(BaseAgent):
                     razon_social=razon_social,
                     representante=representante
                 )
+                is_blocking = field_key in self.BLOCKING_FIELDS
                 missing_fields.append({
                     "field": field_key,
                     "label": field_def["label"],
                     "question": question,
-                    "document_hint": field_def["document_hint"]
+                    "document_hint": field_def["document_hint"],
+                    "type": "profile_field",
+                    "is_blocking": is_blocking,
                 })
+                if is_blocking:
+                    missing_blocking_fields.append(field_key)
+
+        # --- Invariantes de salida ---
+        # 1. Un campo no puede estar en auto_filled y missing simultáneamente
+        auto_filled_set = set(auto_filled)
+        missing_fields = [m for m in missing_fields if m["field"] not in auto_filled_set]
+
+        # 2. missing_blocking debe ser subconjunto de missing
+        missing_field_keys = {m["field"] for m in missing_fields}
+        missing_blocking_fields = [f for f in missing_blocking_fields if f in missing_field_keys]
 
         # Guardar campos auto-completados en la BD
         if auto_filled and company_id:
@@ -211,11 +266,23 @@ class DataGapAgent(BaseAgent):
         chatbot_message = self._build_chatbot_message(auto_filled, missing_fields)
 
         # Guardar pending_questions en la sesión para flujo de chat (ChatbotRAG / Intake)
-        status = AgentStatus.WAITING_FOR_DATA if missing_fields else AgentStatus.SUCCESS
+        # El bloqueo de generación se mantiene solo para campos críticos.
+        status = AgentStatus.WAITING_FOR_DATA if missing_blocking_fields else AgentStatus.SUCCESS
         if missing_fields:
             await self._save_pending_questions(session_id, missing_fields)
 
         print(f"[DataGap] 📊 Informe de Sanidad: {status.value} | Faltantes: {[m['field'] for m in missing_fields]}")
+
+        logger.info(
+            "datagap_analysis_complete",
+            session_id=session_id,
+            correlation_id=correlation_id,
+            status=status.value,
+            pending_questions_count=len(missing_fields),
+            missing_blocking_count=len(missing_blocking_fields),
+            missing_blocking_fields=missing_blocking_fields,
+            auto_filled_count=len(auto_filled),
+        )
 
         return AgentOutput(
             status=status,
@@ -224,6 +291,7 @@ class DataGapAgent(BaseAgent):
             data={
                 "auto_filled": auto_filled,
                 "missing": missing_fields,
+                "missing_blocking": missing_blocking_fields,
             },
             message=chatbot_message,
             correlation_id=correlation_id
@@ -293,12 +361,25 @@ class DataGapAgent(BaseAgent):
 
     async def _llm_extract_field_from_text(self, query: str, text_fragment: str, correlation_id: str = "") -> Optional[str]:
         """Pide al LLM un valor acotado a partir de un fragmento."""
+        q_low = (query or "").lower()
+        contextual_hint = ""
+        if any(k in q_low for k in ("años de experiencia", "experiencia")):
+            contextual_hint = (
+                "\nPistas para este campo: puede venir como frases tipo "
+                "'con 20 años de experiencia', 'desde 2006', 'trayectoria de X años'."
+            )
+        elif any(k in q_low for k in ("empleados", "plantilla laboral", "trabajadores", "personal")):
+            contextual_hint = (
+                "\nPistas para este campo: puede venir como 'plantilla de 50 personas', "
+                "'número de empleados: 50', tablas de organigrama o CV corporativo."
+            )
         extract_resp = await self.llm.generate(
             prompt=(
                 f"Del siguiente fragmento, extrae ÚNICAMENTE el valor de '{query}' "
                 "si está presente y corresponde al **proveedor u oferente** "
                 "(no uses datos de la entidad convocante ni del anexo de licitación salvo que "
                 "el fragmento sea claramente membrete o CIF del oferente).\n"
+                f"{contextual_hint}\n"
                 f"Texto:\n{text_fragment}\n\n"
                 "Responde SOLO con el valor encontrado (máximo 80 caracteres) o escribe: NO_ENCONTRADO"
             ),
@@ -322,7 +403,9 @@ class DataGapAgent(BaseAgent):
             coll = f"company_{company_id}"
             for query in queries:
                 try:
-                    results = self.vector_db.query_texts(coll, query, n_results=3)
+                    # Aumentado a 7 para evitar falsos negativos en detección de Gaps
+                    # Aumentado a 10 para mejorar captura de datos en tablas densas
+                    results = self.vector_db.query_texts(coll, query, n_results=10)
                     docs = results.get("documents", [])
                     if not docs:
                         continue
@@ -349,6 +432,98 @@ class DataGapAgent(BaseAgent):
                         return got
                 except Exception:
                     continue
+        return None
+
+    @staticmethod
+    def _regex_extract_cedula_clave(text: str) -> Optional[str]:
+        """
+        Intenta localizar la clave de elector u homólogo en texto de INE/OCR.
+        Devuelve el candidato en mayúsculas o None.
+        """
+        if not text or len(text) < 40:
+            return None
+        t = text.upper()
+        patterns = [
+            r"CLAVE\s+DE\s+ELECTOR\s*[:\s\n]*([A-ZÑ0-9]{16,22})\b",
+            r"CLAVE\s+ELECTOR\s*[:\s\n]*([A-ZÑ0-9]{16,22})\b",
+            r"CREDENCIAL\s+PARA\s+VOTAR[\s\S]{0,240}?([A-ZÑ0-9]{16,22})\b",
+        ]
+        best: Optional[str] = None
+        for pat in patterns:
+            for m in re.finditer(pat, t, re.I | re.MULTILINE):
+                g = m.group(1).strip().upper()
+                if len(g) >= 16:
+                    if not best or len(g) > len(best):
+                        best = g
+        return best
+
+    async def _try_extract_cedula_from_session_documents(
+        self, session_id: str, correlation_id: str = ""
+    ) -> Optional[str]:
+        """
+        Lee ``extracted_text`` persistido en documentos de la sesión (no solo vectores).
+        Excluye archivos que parecen bases/pliego.
+        """
+        try:
+            docs = await self.context_manager.memory.get_documents(session_id)
+        except Exception as e:
+            print(f"[DataGap] ⚠️ get_documents sesión: {e}")
+            return None
+        if not docs:
+            return None
+
+        ine_first: List[str] = []
+        otros: List[str] = []
+        for d in docs:
+            content = d.get("content") or {}
+            meta = d.get("metadata") or {}
+            fname = str(content.get("filename") or meta.get("filename") or "")
+            if self._filename_looks_like_bases(fname):
+                continue
+            text = (content.get("extracted_text") or "").strip()
+            if len(text) < 40:
+                continue
+            hit = self._regex_extract_cedula_clave(text)
+            if hit and self._is_data_valid("cedula_representante", hit):
+                return hit
+            blob = text[:14000]
+            low = fname.lower()
+            if any(k in low for k in ("ine", "credencial", "identif", "votar", "elector")):
+                ine_first.append(blob)
+            else:
+                otros.append(blob)
+
+        merged = "\n\n---\n\n".join(ine_first + otros)
+        if len(merged) < 80:
+            return None
+        q = "número de credencial para votar (clave de elector del INE o identificador equivalente)"
+        got = await self._llm_extract_field_from_text(q, merged[:12000], correlation_id)
+        if got and self._is_data_valid("cedula_representante", got):
+            return str(got).strip()
+        return None
+
+    async def try_extract_field_from_sources(
+        self,
+        session_id: str,
+        company_id: str,
+        field_key: str,
+        correlation_id: str = "",
+    ) -> Optional[str]:
+        """
+        Reintenta extraer un campo del perfil desde vectores (empresa + sesión) y,
+        para ``cedula_representante``, desde el texto completo guardado en documentos.
+        """
+        field_def = self.FIELD_DEFINITIONS.get(field_key)
+        if not field_def:
+            return None
+        queries = list(field_def.get("rag_queries") or [])
+        val = await self._search_in_rag(session_id, company_id, queries, correlation_id)
+        if val and self._is_data_valid(field_key, val):
+            return str(val).strip()
+        if field_key == "cedula_representante":
+            val2 = await self._try_extract_cedula_from_session_documents(session_id, correlation_id)
+            if val2:
+                return val2
         return None
 
     def _build_chatbot_message(self, auto_filled: List[str], missing_fields: List[Dict]) -> Optional[str]:

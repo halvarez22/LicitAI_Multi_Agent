@@ -1,0 +1,17 @@
+{
+  "case_id": "salud_case01",
+  "vertical": "salud",
+  "context_text": "En apego a la Ley de Adquisiciones y al calendario del acto de presentacion de proposiciones, se establecen condiciones administrativas. Para los bienes medicos ofertados se solicita registro sanitario vigente, carta de apoyo del fabricante, aviso de funcionamiento y cumplimiento documental aplicable ante COFEPRIS. Se verificara trazabilidad y cadena de frio cuando corresponda.",
+  "expected": {
+    "sector_id": "salud",
+    "allowed_sector_ids": [
+      "salud"
+    ],
+    "required_signal_codes": [
+      "SALUD_REG_SANITARIO",
+      "SALUD_CARTA_APOYO_FABRICANTE",
+      "SALUD_AVISO_FUNCIONAMIENTO"
+    ],
+    "min_evidence_items": 2
+  }
+}

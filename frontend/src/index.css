@@ -599,3 +599,44 @@ body {
   from { opacity: 0; transform: translateY(-5px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* --- BUTTONS & TOOLS --- */
+.icon-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  border-radius: 10px;
+  color: var(--text-muted);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  z-index: 10;
+}
+
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--primary);
+  transform: scale(1.1);
+}
+
+.icon-btn-danger:hover {
+  background: rgba(255, 71, 87, 0.15);
+  color: var(--error);
+  box-shadow: 0 0 15px var(--error-glow);
+}
+
+.icon-btn svg {
+  pointer-events: none;
+}
+
+/* Glass panel hover reinforcement */
+.glass-panel {
+  transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1) !important;
+}
+
+.glass-panel:hover {
+  border-color: var(--primary) !important;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.4) !important;
+}

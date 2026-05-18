@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
@@ -18,10 +18,11 @@ class AgentExecutionResponse(BaseModel):
     generation_state: Optional[Dict[str, Any]] = None
 
 class ChatbotResponse(BaseModel):
-    reply: str
-    citations: List[Dict[str, Any]]
-    confidence: str
+    reply: Optional[str] = ""
+    citations: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    confidence: Optional[str] = "Alta"
     expert_suggestion: Optional[str] = None
+    suggested_actions: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     data: Optional[Dict[str, Any]] = None
 
 class HealthResponse(BaseModel):

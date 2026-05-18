@@ -1,5 +1,14 @@
-import React, { useMemo } from 'react';
-import { Activity, ShieldCheck, FileSpreadsheet, CheckCircle, Info, AlertTriangle } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+    Activity,
+    ShieldCheck,
+    FileSpreadsheet,
+    CheckCircle,
+    Info,
+    AlertTriangle,
+    ChevronDown,
+    ChevronRight,
+} from 'lucide-react';
 
 /**
  * Infiere qué etapa del pipeline está activa según el texto de progreso del job (español).
@@ -29,6 +38,7 @@ function inferActiveStageFromProgress(auditProgress) {
  * @param {{ currentFile?: string, percent?: number }} [p.auditProgress]
  */
 const Dashboard = ({ sessionId, auditResults, isAnalyzing = false, auditProgress = null }) => {
+    const [orchestrationExpanded, setOrchestrationExpanded] = useState(false);
     const telem = auditResults?.pipelineTelemetry;
     const stages = Array.isArray(telem?.stagesCompleted) ? telem.stagesCompleted : null;
     const hasTelemetry = !!(telem && stages && stages.length > 0);
@@ -43,6 +53,15 @@ const Dashboard = ({ sessionId, auditResults, isAnalyzing = false, auditProgress
     const ragUx = auditResults?.uxKind === 'rag_index_missing';
     const hasDictamen = !!auditResults;
     const isFinishedCompliance = auditResults && auditResults.statusRaw === 'success';
+
+    /** Al iniciar análisis, desplegar orquestación; al terminar con dictamen cargado, colapsar (menos ruido en centro). */
+    useEffect(() => {
+        if (isAnalyzing) setOrchestrationExpanded(true);
+    }, [isAnalyzing]);
+
+    useEffect(() => {
+        if (!isAnalyzing && hasDictamen) setOrchestrationExpanded(false);
+    }, [isAnalyzing, hasDictamen]);
     const hasAnalysisSignal =
         hasDictamen &&
         ((auditResults.totalRequisitos ?? 0) > 0 || !!auditResults.extracted_data);
@@ -261,29 +280,94 @@ const Dashboard = ({ sessionId, auditResults, isAnalyzing = false, auditProgress
         },
     ];
 
+    const orchPanelBodyId = 'dashboard-orchestration-body';
+    const toggleOrchestration = () => setOrchestrationExpanded((v) => !v);
+    const onOrchestrationKeyDown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleOrchestration();
+        }
+    };
+
     return (
         <div style={{ padding: '20px' }}>
-            <div style={{ marginBottom: '32px' }}>
-                <h2 style={{ fontSize: '28px', fontWeight: 900, fontFamily: 'var(--font-heading)', background: 'linear-gradient(to right, #fff, #94a3b8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>Orquestación de Agentes</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '4px' }}>Control de flujo inteligente · Sesión: <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{sessionId}</span></p>
-                {hasTelemetry && (
-                    <p style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '8px', lineHeight: 1.45 }}>
-                        Telemetría{telemetryInferred ? ' (inferida del dictamen guardado)' : ''}: orquestador{' '}
-                        <strong style={{ color: '#e2e8f0' }}>{orchSt || '—'}</strong>
-                        {pausedStage ? (
-                            <> · pausa en <strong style={{ color: '#f59e0b' }}>{pausedStage}</strong></>
-                        ) : null}
-                        {stopReason ? (
-                            <> · <span style={{ opacity: 0.85 }}>{stopReason}</span></>
-                        ) : null}
-                        {telemetryInferred ? (
-                            <span style={{ display: 'block', marginTop: '6px', opacity: 0.92 }}>
-                                Tras «Actualizar análisis» con el backend actual, aquí verás telemetría enviada por el orquestador (sin inferencia).
-                            </span>
-                        ) : null}
-                    </p>
+            <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={orchestrationExpanded}
+                aria-controls={orchPanelBodyId}
+                onClick={toggleOrchestration}
+                onKeyDown={onOrchestrationKeyDown}
+                style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '12px',
+                    marginBottom: orchestrationExpanded ? '32px' : '12px',
+                    marginTop: '-8px',
+                    marginLeft: '-8px',
+                    marginRight: '-8px',
+                    cursor: 'pointer',
+                    borderRadius: '12px',
+                    padding: '8px',
+                }}
+            >
+                {orchestrationExpanded ? (
+                    <ChevronDown size={22} color="var(--primary)" style={{ flexShrink: 0, marginTop: '6px' }} />
+                ) : (
+                    <ChevronRight size={22} color="var(--primary)" style={{ flexShrink: 0, marginTop: '6px' }} />
                 )}
+                <div style={{ minWidth: 0 }}>
+                    <h2
+                        style={{
+                            fontSize: '28px',
+                            fontWeight: 900,
+                            fontFamily: 'var(--font-heading)',
+                            background: 'linear-gradient(to right, #fff, #94a3b8)',
+                            WebkitBackgroundClip: 'text',
+                            WebkitTextFillColor: 'transparent',
+                            margin: 0,
+                        }}
+                    >
+                        Orquestación de Agentes
+                    </h2>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginTop: '4px', marginBottom: 0 }}>
+                        Control de flujo inteligente · Sesión:{' '}
+                        <span style={{ color: 'var(--primary)', fontWeight: 700 }}>{sessionId}</span>
+                    </p>
+                    {!orchestrationExpanded && (
+                        <p style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '8px', lineHeight: 1.45, marginBottom: 0 }}>
+                            {isAnalyzing
+                                ? 'Análisis en curso…'
+                                : hasTelemetry
+                                  ? `Resumen: orquestador ${orchSt || '—'}${stopReason ? ` · ${stopReason}` : ''} · pulsa para expandir.`
+                                  : 'Pulsa para ver etapas de agentes y telemetría detallada.'}
+                        </p>
+                    )}
+                </div>
             </div>
+
+            {orchestrationExpanded && (
+                <div id={orchPanelBodyId}>
+                    {hasTelemetry && (
+                        <div style={{ marginBottom: '24px' }}>
+                            <p style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: 0, lineHeight: 1.45 }}>
+                                Telemetría{telemetryInferred ? ' (inferida del dictamen guardado)' : ''}: orquestador{' '}
+                                <strong style={{ color: '#e2e8f0' }}>{orchSt || '—'}</strong>
+                                {pausedStage ? (
+                                    <> · pausa en <strong style={{ color: '#f59e0b' }}>{pausedStage}</strong></>
+                                ) : null}
+                                {stopReason ? (
+                                    <> · <span style={{ opacity: 0.85 }}>{stopReason}</span></>
+                                ) : null}
+                                {telemetryInferred ? (
+                                    <span style={{ display: 'block', marginTop: '6px', opacity: 0.92 }}>
+                                        Tras «Actualizar análisis» con el backend actual, aquí verás telemetría enviada por el
+                                        orquestador (sin inferencia).
+                                    </span>
+                                ) : null}
+                            </p>
+                        </div>
+                    )}
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '20px' }}>
                 {agents.map((agent) => (
@@ -481,6 +565,8 @@ const Dashboard = ({ sessionId, auditResults, isAnalyzing = false, auditProgress
                                 : 'Los agentes consolidaron el conocimiento según el dictamen cargado. Revisa el panel lateral.'}
                         </p>
                     </div>
+                </div>
+            )}
                 </div>
             )}
         </div>

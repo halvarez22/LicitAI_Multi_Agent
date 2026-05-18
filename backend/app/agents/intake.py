@@ -1,4 +1,5 @@
 import logging
+from app.core.logging_config import get_logger
 from typing import Any, Dict, List, Optional
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
@@ -7,7 +8,7 @@ from app.services.vector_service import VectorDbServiceClient
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.agents.data_gap import DataGapAgent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class IntakeAgent(BaseAgent):
     """
@@ -41,8 +42,8 @@ class IntakeAgent(BaseAgent):
 
         # 2. Identificar el GAP actual (primero de la lista)
         current_gap = pending[0]
-        field_key = current_gap["field"]
-        label = current_gap["label"]
+        field_key = str(current_gap.get("field") or current_gap.get("field_target") or "unknown")
+        label = str(current_gap.get("label") or current_gap.get("question") or "dato")
 
         print(f"[Intake] Analizando respuesta para '{label}'...")
 

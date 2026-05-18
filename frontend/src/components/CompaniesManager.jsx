@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Search, Loader2, Building2, Trash2, FileText, Upload, CheckCircle2, User, Info, PlayCircle } from 'lucide-react';
+import { Plus, Search, Loader2, Building2, Trash2, FileText, Upload, CheckCircle2, User, Info, PlayCircle, Pencil, X } from 'lucide-react';
 
 import { API_BASE } from '../apiBase.js';
 
@@ -17,8 +17,12 @@ const CompaniesManager = () => {
     const [extractionProgress, setExtractionProgress] = useState(0);
     const [uploadingStatus, setUploadingStatus] = useState({}); // { docTitle: progress }
     const [notification, setNotification] = useState(null);
+    const [isEditingName, setIsEditingName] = useState(false);
+    const [editingNameValue, setEditingNameValue] = useState("");
     const fileInputRef = React.useRef(null);
     const uploadingForRef = React.useRef(null);
+    const uploadAbortRef = React.useRef(null);   // AbortController para uploads
+    const analyzeAbortRef = React.useRef(null);  // AbortController para análisis
 
     const fetchCompanies = async () => {
         setLoading(true);
@@ -48,6 +52,56 @@ const CompaniesManager = () => {
         fetchCompanies();
     }, []);
 
+    const isUploaded = (title) => {
+        const doc = selectedCompany?.uploadedDocs?.[title];
+        return doc && (doc.status === 'ANALYZED' || doc.status === 'UPLOADED' || doc.status === 'PROCESSING');
+    };
+
+    const isProcessing = (title) => {
+        const doc = selectedCompany?.uploadedDocs?.[title];
+        return doc && (doc.status === 'UPLOADED' || doc.status === 'PROCESSING');
+    };
+
+    // Polling effect: Si hay documentos procesándose en background, refrescar cada 5s
+    useEffect(() => {
+        let interval;
+        const hasPending = selectedCompany && Object.values(selectedCompany.uploadedDocs || {}).some(d => d.status === 'PROCESSING' || d.status === 'UPLOADED');
+        
+        if (hasPending && !isExtracting) {
+            console.log("🔄 [POLLING] Detectados docs en proceso, activando refresco cada 5s...");
+            interval = setInterval(async () => {
+                try {
+                    const res = await axios.get(`${API_BASE}/companies/${selectedCompany.id}`);
+                    if (res.data.success) {
+                        const updatedCo = res.data.data;
+                        const formatted = {
+                            id: updatedCo.id,
+                            name: updatedCo.name,
+                            type: updatedCo.type,
+                            updated_at: updatedCo.updated_at,
+                            docs: Object.keys(updatedCo.docs || {}).filter(k => k !== 'LOGOTIPO').length,
+                            uploadedDocs: updatedCo.docs || {},
+                            master_profile: updatedCo.master_profile || {}
+                        };
+                        
+                        // Solo actualizar si algo cambió para evitar re-renders infinitos
+                        if (JSON.stringify(formatted.uploadedDocs) !== JSON.stringify(selectedCompany.uploadedDocs) || 
+                            JSON.stringify(formatted.master_profile) !== JSON.stringify(selectedCompany.master_profile)) {
+                            setSelectedCompany(formatted);
+                            setCompanies(prev => prev.map(c => c.id === formatted.id ? formatted : c));
+                        }
+                    }
+                } catch (e) {
+                    console.error("Error en polling", e);
+                }
+            }, 5000);
+        }
+
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [selectedCompany, isExtracting]);
+
     const saveCompanies = async (newCo, isDelete=false) => {
         try {
             if (isDelete) {
@@ -64,6 +118,29 @@ const CompaniesManager = () => {
             fetchCompanies();
         } catch (e) {
             console.error("Error saving company", e);
+        }
+    };
+
+    const handleRename = async () => {
+        const trimmed = editingNameValue.trim();
+        if (!trimmed || !selectedCompany) return;
+        try {
+            const updated = { ...selectedCompany, name: trimmed };
+            await axios.post(`${API_BASE}/companies/`, {
+                id: updated.id,
+                name: trimmed,
+                type: updated.type,
+                docs_metadata: updated.uploadedDocs || {},
+                master_profile: updated.master_profile || {}
+            });
+            setSelectedCompany(prev => ({ ...prev, name: trimmed }));
+            setCompanies(prev => prev.map(c => c.id === selectedCompany.id ? { ...c, name: trimmed } : c));
+            setIsEditingName(false);
+            setNotification({ type: 'success', message: `Empresa renombrada a "${trimmed}" correctamente.` });
+            setTimeout(() => setNotification(null), 4000);
+        } catch (e) {
+            console.error("Error renombrando empresa", e);
+            alert("No se pudo renombrar la empresa.");
         }
     };
 
@@ -103,6 +180,9 @@ const CompaniesManager = () => {
         setUploadingStatus(prev => ({ ...prev, [target]: 0 }));
 
         const processUpload = async (previewBase64 = null) => {
+            const controller = new AbortController();
+            uploadAbortRef.current = controller;
+
             const formData = new FormData();
             formData.append('file', file);
             formData.append('docTitle', target);
@@ -113,6 +193,7 @@ const CompaniesManager = () => {
             try {
                 const res = await axios.post(`${API_BASE}/companies/${selectedCompany.id}/upload`, formData, {
                     headers: { 'Content-Type': 'multipart/form-data' },
+                    signal: controller.signal,
                     onUploadProgress: (progressEvent) => {
                         const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
                         setUploadingStatus(prev => ({ ...prev, [target]: percentCompleted }));
@@ -152,13 +233,20 @@ const CompaniesManager = () => {
                     throw new Error(res.data.message);
                 }
             } catch (error) {
-                console.error("Upload error", error);
-                alert("Error al subir el archivo.");
+                if (axios.isCancel(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
+                    console.log(`⛔ Upload cancelado por usuario: ${target}`);
+                    setNotification({ type: 'info', message: `Carga de "${target}" cancelada.` });
+                    setTimeout(() => setNotification(null), 3000);
+                } else {
+                    console.error("Upload error", error);
+                    alert("Error al subir el archivo.");
+                }
                 setUploadingStatus(prev => {
                     const newStatus = { ...prev };
                     delete newStatus[target];
                     return newStatus;
                 });
+                uploadAbortRef.current = null;
             }
         };
 
@@ -177,8 +265,7 @@ const CompaniesManager = () => {
 
     const filtered = companies.filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()));
     if (selectedCompany) {
-        const isUploaded = (title) => selectedCompany.uploadedDocs && selectedCompany.uploadedDocs[title];
-        
+
         const requiredDocTitles = (selectedCompany.type || 'moral') === 'moral' 
             ? ['Acta Constitutiva', 'CIF (SAT)'] 
             : ['INE / Identificación', 'CIF (SAT)'];
@@ -190,7 +277,12 @@ const CompaniesManager = () => {
             <div style={{ padding: '0 40px 100px 40px', maxWidth: '1200px', margin: '0 auto', animation: 'fadeIn 0.3s' }}>
                 <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
                 <button 
-                    onClick={() => setSelectedCompany(null)}
+                    onClick={() => {
+                        setSelectedCompany(null);
+                        setIsExtracting(false);
+                        setExtractionProgress(0);
+                        setUploadingStatus({});
+                    }}
                     style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '24px', fontWeight: 600 }}
                 >
                     &larr; Volver a Empresas
@@ -268,7 +360,38 @@ const CompaniesManager = () => {
                                         style={{ width: '45px', height: '45px', objectFit: 'contain' }} 
                                     />
                                 )}
-                                <h2 style={{ fontSize: '36px', fontWeight: 900, marginBottom: '0', letterSpacing: '-1.5px', textTransform: 'uppercase' }}>{selectedCompany.name}</h2>
+                                {isEditingName ? (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+                                        <input
+                                            autoFocus
+                                            type="text"
+                                            value={editingNameValue}
+                                            onChange={e => setEditingNameValue(e.target.value)}
+                                            onKeyDown={e => { if (e.key === 'Enter') handleRename(); if (e.key === 'Escape') setIsEditingName(false); }}
+                                            style={{
+                                                fontSize: '22px', fontWeight: 900, letterSpacing: '-1px',
+                                                textTransform: 'uppercase', background: 'rgba(255,255,255,0.07)',
+                                                border: '2px solid var(--primary)', borderRadius: '10px',
+                                                color: 'white', padding: '8px 14px', outline: 'none', flex: 1
+                                            }}
+                                        />
+                                        <button onClick={handleRename} className="btn-primary" style={{ padding: '8px 18px', fontSize: '13px', borderRadius: '8px', fontWeight: 800 }}>GUARDAR</button>
+                                        <button onClick={() => setIsEditingName(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px' }}><X size={20} /></button>
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                        <h2 style={{ fontSize: '36px', fontWeight: 900, marginBottom: '0', letterSpacing: '-1.5px', textTransform: 'uppercase' }}>{selectedCompany.name}</h2>
+                                        <button
+                                            title="Renombrar empresa"
+                                            onClick={() => { setEditingNameValue(selectedCompany.name); setIsEditingName(true); }}
+                                            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-glass)', borderRadius: '8px', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px 8px', transition: 'all 0.2s' }}
+                                            onMouseOver={e => { e.currentTarget.style.color = 'white'; e.currentTarget.style.borderColor = 'var(--primary)'; }}
+                                            onMouseOut={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.borderColor = 'var(--border-glass)'; }}
+                                        >
+                                            <Pencil size={16} />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
                                 <span style={{ 
@@ -348,14 +471,49 @@ const CompaniesManager = () => {
                                         <span style={{ position: 'absolute', top: '10px', right: '10px', fontSize: '9px', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', padding: '2px 6px', borderRadius: '4px', fontWeight: 900, border: '1px solid rgba(239, 68, 68, 0.2)' }}>OBLIGATORIO</span>
                                     )}
                                     {fileInfo && (
-                                        <span style={{ position: 'absolute', top: '10px', right: '10px', fontSize: '9px', background: 'rgba(16, 185, 129, 0.1)', color: 'var(--success)', padding: '2px 6px', borderRadius: '4px', fontWeight: 900, border: '1px solid rgba(16, 185, 129, 0.2)' }}>CARGADO</span>
+                                        <span style={{ 
+                                            position: 'absolute', 
+                                            top: '10px', 
+                                            right: '10px', 
+                                            fontSize: '9px', 
+                                            background: isProcessing(card.title) ? 'rgba(59, 130, 246, 0.1)' : 'rgba(16, 185, 129, 0.1)', 
+                                            color: isProcessing(card.title) ? 'var(--primary)' : 'var(--success)', 
+                                            padding: '2px 6px', 
+                                            borderRadius: '4px', 
+                                            fontWeight: 900, 
+                                            border: isProcessing(card.title) ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(16, 185, 129, 0.2)' 
+                                        }}>
+                                            {isProcessing(card.title) ? 'PROCESANDO...' : 'CARGADO'}
+                                        </span>
                                     )}
                                     {uploadingStatus[card.title] !== undefined ? (
                                         <div style={{ padding: '20px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
                                             <Loader2 className="animate-spin" color="var(--primary)" size={32} />
                                             <div style={{ fontWeight: 800, fontSize: '12px', color: 'var(--primary)' }}>
-                                                {uploadingStatus[card.title] < 100 ? `CARGANDO ${uploadingStatus[card.title]}%` : 'GUARDANDO...'}
+                                                {uploadingStatus[card.title] < 100 ? `CARGANDO ${uploadingStatus[card.title]}%` : 'ANALIZANDO...'}
                                             </div>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    if (uploadAbortRef.current) {
+                                                        uploadAbortRef.current.abort();
+                                                        uploadAbortRef.current = null;
+                                                    }
+                                                    setUploadingStatus(prev => {
+                                                        const s = { ...prev };
+                                                        delete s[card.title];
+                                                        return s;
+                                                    });
+                                                }}
+                                                style={{
+                                                    background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                                                    color: '#ef4444', borderRadius: '8px', padding: '6px 16px',
+                                                    fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+                                                }}
+                                            >
+                                                <X size={12} style={{ marginRight: '6px', display: 'inline' }} />
+                                                CANCELAR
+                                            </button>
                                         </div>
                                     ) : (
                                         <>
@@ -380,7 +538,11 @@ const CompaniesManager = () => {
                                                 {card.note && !fileInfo && <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '6px', fontStyle: 'italic' }}>{card.note}</div>}
                                             </div>
                                             <button 
-                                                onClick={() => handleFileUploadRequest(card.title)}
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleFileUploadRequest(card.title);
+                                                }}
                                                 className="icon-btn" 
                                                 style={{ width: '100%', padding: '8px', fontSize: '11px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border-glass)' }}
                                             >
@@ -429,6 +591,7 @@ const CompaniesManager = () => {
                                         { label: 'RAZÓN SOCIAL', value: selectedCompany.master_profile.razon_social },
                                         { label: 'REPRESENTANTE LEGAL', value: selectedCompany.master_profile.representante_legal },
                                         { label: 'PODERES', value: selectedCompany.master_profile.poderes },
+                                        { label: 'DIRECCIÓN FISCAL', value: selectedCompany.master_profile.domicilio_fiscal, span: 2 },
                                         { label: 'OBJETO SOCIAL', value: selectedCompany.master_profile.objeto_social, span: 2 }
                                     ].map((item, idx) => (
                                         <div key={idx} style={{ 
@@ -457,15 +620,25 @@ const CompaniesManager = () => {
                                     paddingLeft: '30px', paddingRight: '30px'
                                 }}
                                 onClick={async () => {
+                                    if (selectedCompany.master_profile && Object.keys(selectedCompany.master_profile).length > 0) {
+                                        if (!window.confirm("⚠️ ATENCIÓN: Esta empresa ya tiene un Expediente Maestro extraído y validado.\n\nSi continúas, la Inteligencia Artificial volverá a leer los documentos y REESCRIBIRÁ todos los datos actuales.\n\n¿Estás completamente seguro de que deseas reescribir el expediente?")) {
+                                            return;
+                                        }
+                                    }
                                     setIsExtracting(true);
                                     let progressItem = 0;
                                     const sim = setInterval(() => {
                                         progressItem += 2;
                                         setExtractionProgress(prev => prev >= 95 ? 95 : prev + 2);
                                     }, 200);
+                                    const controller = new AbortController();
+                                    analyzeAbortRef.current = controller;
 
                                     try {
-                                        const res = await axios.post(`${API_BASE}/companies/${selectedCompany.id}/analyze`);
+                                        const res = await axios.post(`${API_BASE}/companies/${selectedCompany.id}/analyze`, {}, {
+                                            signal: controller.signal
+                                        });
+                                        analyzeAbortRef.current = null;
                                         clearInterval(sim);
                                         setExtractionProgress(100);
 
@@ -485,18 +658,32 @@ const CompaniesManager = () => {
                                                 setCompanies(prev => prev.map(c => c.id === formatted.id ? formatted : c));
                                                 setIsExtracting(false);
                                                 setExtractionProgress(0);
-                                                setNotification({ type: 'success', message: '¡Perfil Maestro Actualizado!' });
-                                                setTimeout(() => setNotification(null), 3000);
+                                                const rr = res.data.rfc_resolution;
+                                                let msg = '¡Perfil Maestro Actualizado!';
+                                                if (rr && rr.changed_from_llm) {
+                                                    msg = `RFC de persona moral corregido automáticamente: ${String(rr.previous_llm_rfc || '—')} → ${String(rr.final_rfc || '')}. Si subes o sustituyes documentos, vuelve a pulsar «RE-ANALIZAR EXPEDIENTE».`;
+                                                } else if (updatedCo.type === 'moral' && formatted.master_profile?.rfc) {
+                                                    msg = '¡Perfil Maestro actualizado! Si cambias el expediente (nuevos PDF), usa de nuevo «RE-ANALIZAR EXPEDIENTE» para refrescar OCR y perfil.';
+                                                }
+                                                setNotification({ type: 'success', message: msg });
+                                                setTimeout(() => setNotification(null), rr && rr.changed_from_llm ? 9000 : 5000);
                                             }, 500);
                                         } else {
                                             throw new Error(res.data.message);
                                         }
                                     } catch (error) {
-                                        console.error("Analysis error", error);
                                         clearInterval(sim);
+                                        analyzeAbortRef.current = null;
+                                        if (axios.isCancel(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
+                                            console.log('⛔ Análisis cancelado por usuario');
+                                            setNotification({ type: 'info', message: 'Análisis cancelado. El documento no fue modificado.' });
+                                            setTimeout(() => setNotification(null), 4000);
+                                        } else {
+                                            console.error("Analysis error", error);
+                                            alert("Hubo un error al extraer la información.");
+                                        }
                                         setIsExtracting(false);
                                         setExtractionProgress(0);
-                                        alert("Hubo un error al extraer la información.");
                                     }
                                 }}
                             >
@@ -512,6 +699,28 @@ const CompaniesManager = () => {
                                     </>
                                 )}
                             </button>
+
+                            {isExtracting && (
+                                <button
+                                    onClick={() => {
+                                        if (analyzeAbortRef.current) {
+                                            analyzeAbortRef.current.abort();
+                                            analyzeAbortRef.current = null;
+                                        }
+                                        setIsExtracting(false);
+                                        setExtractionProgress(0);
+                                    }}
+                                    style={{
+                                        padding: '12px 32px', fontSize: '14px', borderRadius: '12px',
+                                        fontWeight: 800, background: 'rgba(239,68,68,0.1)',
+                                        border: '1px solid rgba(239,68,68,0.4)', color: '#ef4444',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    <X size={16} style={{ marginRight: '8px', display: 'inline', verticalAlign: 'middle' }} />
+                                    CANCELAR ANÁLISIS
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
@@ -597,7 +806,12 @@ const CompaniesManager = () => {
                     <div 
                         key={company.id} 
                         className="glass-panel"
-                        onClick={() => setSelectedCompany(company)}
+                        onClick={() => {
+                            setSelectedCompany(company);
+                            setIsExtracting(false);
+                            setExtractionProgress(0);
+                            setUploadingStatus({});
+                        }}
                         style={{ 
                             padding: '24px', 
                             borderRadius: '16px', 
@@ -736,8 +950,8 @@ const CompaniesManager = () => {
                     position: 'fixed',
                     bottom: '40px',
                     right: '40px',
-                    background: notification.type === 'success' ? 'var(--success)' : 'var(--error)',
-                    color: '#000',
+                    background: notification.type === 'success' ? 'var(--success)' : notification.type === 'info' ? 'var(--primary)' : 'var(--error)',
+                    color: '#fff',
                     padding: '16px 32px',
                     borderRadius: '12px',
                     fontWeight: 800,
@@ -748,7 +962,7 @@ const CompaniesManager = () => {
                     alignItems: 'center',
                     gap: '12px'
                 }}>
-                    <CheckCircle2 size={24} />
+                    {notification.type === 'info' ? <X size={24} /> : <CheckCircle2 size={24} />}
                     {notification.message}
                 </div>
             )}

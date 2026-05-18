@@ -10,8 +10,8 @@ import logging
 logger = get_logger("licitai.agents")
 router = APIRouter()
 
-from app.services.ocr_service import OCRServiceClient
 from app.services.vector_service import VectorDbServiceClient
+from app.services.document_ingestion_router import DocumentIngestionRouter
 import uuid
 from datetime import datetime, timezone
 import json
@@ -19,6 +19,16 @@ from app.config.settings import settings
 from typing import Any, Dict
 from app.services.job_service import update_job_status, redis_client
 from app.utils.pipeline_telemetry import build_pipeline_telemetry
+
+def _job_completion_message(final_status: str) -> str:
+    """Devuelve mensaje de cierre alineado al estado final del orquestador."""
+    if final_status == "go_no_go_pending":
+        return "Pipeline en pausa: pendiente autorización Go/No-Go."
+    if final_status == "waiting_for_data":
+        return "Pipeline en pausa: faltan datos para continuar."
+    if final_status == "error":
+        return "Pipeline finalizado con incidencias."
+    return "Análisis finalizado con éxito."
 
 def _chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> list[str]:
     chunks = []
@@ -79,98 +89,74 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
     try:
         update_job_status(job_id, "RUNNING", {"stage": "ingestion", "pct": 10, "message": "Iniciando ingesta de documentos"})
         
-        # ── PASO PREVIO: AUTO-INGESTA ───────────────────────────────────────────
+        # ── PASO PREVIO: AUTO-INGESTA (Camino B) ─────────────────────────────────
+        # Documentos UPLOADED sin pasar por POST /upload/process/{doc_id}: usa el
+        # DocumentIngestionRouter canónico — mismo comportamiento que el Camino A.
         docs = await memory.get_documents(request.session_id)
-        ocr_client = OCRServiceClient()
         vector_client = VectorDbServiceClient()
-        
+        _router = DocumentIngestionRouter()
+
         for d in docs:
             content = d.get("content", {})
-            if content.get("status") == "UPLOADED":
-                filename = content.get("filename") or ""
-                file_path = content.get("file_path")
-                ext = filename.lower().split(".")[-1] if filename else ""
+            if content.get("status") != "UPLOADED":
+                continue
 
-                if ext in ("xlsx", "xls"):
-                    update_job_status(
-                        job_id,
-                        "RUNNING",
-                        {"stage": "ingestion", "pct": 15, "message": f"Procesando Excel: {filename}"},
-                    )
-                    try:
-                        from app.services.document_excel_ingest import process_excel_document
+            filename = content.get("filename") or ""
+            file_path = content.get("file_path")
+            ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
-                        ocr_ctx, _rows = await process_excel_document(
-                            memory, request.session_id, d["id"], file_path, filename
-                        )
-                    except Exception as e:
-                        logger.error(f"Ingesta Excel fallida doc={d['id']}: {e}")
-                        content["status"] = "FAILED_EXTRACTION"
-                        await memory.save_document(
-                            d["id"], request.session_id, content, {"status": "FAILED_EXTRACTION"}
-                        )
-                        continue
+            update_job_status(
+                job_id,
+                "RUNNING",
+                {"stage": "ingestion", "pct": 15, "message": f"Procesando: {filename}"},
+            )
 
-                    raw_text = ocr_ctx.get("extracted_text", "")
-                    pages = ocr_ctx.get("pages", [])
-                    is_valid = ocr_ctx.get("success") is True and (
-                        len(raw_text.strip()) >= 20 or len(pages) > 0
-                    )
-                    if not is_valid:
-                        content["status"] = "FAILED_EXTRACTION"
-                        await memory.save_document(
-                            d["id"], request.session_id, content, {"status": "FAILED_EXTRACTION"}
-                        )
-                        continue
+            ocr_ctx = await _router.ingest(
+                file_path=file_path,
+                filename=filename,
+                session_id=request.session_id,
+                doc_id=d["id"],
+                memory=memory,
+            )
 
-                    chunk_size = 4000
-                    for page in pages:
-                        p_text = page.get("text", "")
-                        if p_text:
-                            chunks = _chunk_text(p_text, chunk_size=chunk_size, overlap=200)
-                            metadatas = [
-                                {
-                                    "source": filename,
-                                    "session_id": request.session_id,
-                                    "page": page.get("page"),
-                                    "doc_id": d["id"],
-                                }
-                                for _ in chunks
-                            ]
-                            vector_client.add_texts(request.session_id, chunks, metadatas)
+            if not ocr_ctx.get("success"):
+                logger.error(
+                    "background_ingestion_failed",
+                    doc_id=d["id"],
+                    session_id=request.session_id,
+                    error=ocr_ctx.get("error", "unknown"),
+                )
+                content["status"] = "ERROR"
+                await memory.save_document(
+                    d["id"], request.session_id, content, {"status": "ERROR"}
+                )
+                continue
 
-                    content["status"] = "ANALYZED"
-                    content["extracted_text"] = raw_text
-                    content["total_pages"] = ocr_ctx.get("total_pages", len(pages))
-                    await memory.save_document(
-                        d["id"], request.session_id, content, {"status": "ANALYZED"}
-                    )
-                    continue
+            raw_text = ocr_ctx.get("extracted_text", "")
+            pages = ocr_ctx.get("pages", [])
+            # Chunk size mayor para tabulares (Excel/CSV/DOCX) que para PDFs/texto
+            chunk_size = 4000 if ext in ("xlsx", "xls", "csv", "docx") else 800
+            for page in pages:
+                p_text = page.get("text", "")
+                if p_text:
+                    chunks = _chunk_text(p_text, chunk_size=chunk_size, overlap=200)
+                    metadatas = [
+                        {
+                            "source": filename,
+                            "session_id": request.session_id,
+                            "page": page.get("page"),
+                            "doc_id": d["id"],
+                        }
+                        for _ in chunks
+                    ]
+                    vector_client.add_texts(request.session_id, chunks, metadatas)
 
-                update_job_status(job_id, "RUNNING", {"stage": "ingestion", "pct": 15, "message": f"Procesando OCR: {filename}"})
-
-                ocr_ctx = await ocr_client.scan_document(file_path)
-                raw_text = ocr_ctx.get("extracted_text", "")
-
-                is_valid = ("error" not in ocr_ctx and ocr_ctx.get("success") is True and len(raw_text.strip()) >= 100)
-
-                if not is_valid:
-                    content["status"] = "FAILED_EXTRACTION"
-                    await memory.save_document(d["id"], request.session_id, content, {"status": "FAILED_EXTRACTION"})
-                    continue
-
-                pages = ocr_ctx.get("pages", [])
-                for page in pages:
-                    p_text = page.get("text", "")
-                    if p_text:
-                        chunks = _chunk_text(p_text)
-                        metadatas = [{"source": filename, "session_id": request.session_id, "page": page.get("page"), "doc_id": d["id"]} for _ in chunks]
-                        vector_client.add_texts(request.session_id, chunks, metadatas)
-
-                content["status"] = "ANALYZED"
-                content["extracted_text"] = raw_text
-                content["total_pages"] = ocr_ctx.get("total_pages", len(pages))
-                await memory.save_document(d["id"], request.session_id, content, {"status": "ANALYZED"})
+            content["status"] = "ANALYZED"
+            content["extracted_text"] = raw_text
+            content["total_pages"] = ocr_ctx.get("total_pages", len(pages))
+            await memory.save_document(
+                d["id"], request.session_id, content, {"status": "ANALYZED"}
+            )
 
         # ── PASO 2: EJECUCIÓN DEL ORQUESTADOR ────────────────────────────────────
         update_job_status(job_id, "RUNNING", {"stage": "orchestration", "pct": 30, "message": "Iniciando orquestación de agentes"})
@@ -197,17 +183,19 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             "session_id": request.session_id,
             "chatbot_message": resultado_dict.get("chatbot_message"),
             "agent_decision": resultado_dict.get("orchestrator_decision"),
+            "go_no_go_result": resultado_dict.get("go_no_go_result"),
             "data": resultado_dict.get("results"),
             "auto_filled": resultado_dict.get("auto_filled"),
             "missing_fields": resultado_dict.get("missing_fields"),
             "generation_state": resultado_dict.get("generation_state"),
+            "fast_track_document_candidates": resultado_dict.get("fast_track_document_candidates"),
             "metadata": resultado_dict.get("metadata"),
             "pipelineTelemetry": pipeline_telemetry,
         }
 
         # --- AUTO-PERSISTENCIA DEL DICTAMEN (INDUSTRIALIZACIÓN) ---
-        # Incluye waiting_for_data y error para que F5 conserve telemetría y hallazgos parciales.
-        persist_statuses = ("success", "partial", "waiting_for_data", "error")
+        # Incluye waiting_for_data, error y go_no_go_pending para conservar telemetría.
+        persist_statuses = ("success", "partial", "waiting_for_data", "error", "go_no_go_pending")
         if resultado_dict.get("status") in persist_statuses:
             try:
                 from app.utils.audit_processor import process_audit_results_backend
@@ -220,6 +208,7 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
                         "economic": resultado_dict.get("results", {}).get("economic", {}),
                         "error": resultado_dict.get("message", "") or "",
                         "orchestrator_decision": resultado_dict.get("orchestrator_decision"),
+                        "fast_track_document_candidates": resultado_dict.get("fast_track_document_candidates") or resultado_dict.get("fastTrackDocumentCandidates"),
                     },
                     pipeline_telemetry=pipeline_telemetry,
                 )
@@ -235,7 +224,17 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             except Exception as e:
                 logger.error(f"Error en auto-persistencia del dictamen: {e}")
         
-        update_job_status(job_id, "COMPLETED", {"stage": "done", "pct": 100, "message": "Análisis finalizado con éxito"}, result=final_data)
+        final_status = str(resultado_dict.get("status", "error"))
+        update_job_status(
+            job_id,
+            "COMPLETED",
+            {
+                "stage": "done",
+                "pct": 100,
+                "message": _job_completion_message(final_status),
+            },
+            result=final_data,
+        )
         logger.info(f"Job {job_id} completado con éxito")
 
     except Exception as e:

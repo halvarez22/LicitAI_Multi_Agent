@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from app.core.logging_config import get_logger
 import os
 import tempfile
 from datetime import datetime
@@ -14,7 +15,7 @@ from app.post_clarification.carta_33_bis_generator import (
 )
 from app.post_clarification.models import PostClarificationContextModel, TipoJunta
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SESSION_KEY = "post_clarification_context"
 

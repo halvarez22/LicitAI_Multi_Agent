@@ -1,3 +1,4 @@
+from app.core.logging_config import get_logger
 import httpx
 import os, logging
 import gc
@@ -6,8 +7,9 @@ import base64
 from io import BytesIO
 from typing import Dict, Any, Optional
 from pdf2image import pdfinfo_from_path, convert_from_path
+import fitz  # PyMuPDF
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 from app.utils.gpu_lock import VLM_SEMAPHORE, OllamaGuard
 
@@ -21,6 +23,75 @@ class VisionExtractorAgent:
     def __init__(self, ollama_url: Optional[str] = None):
         self.name = "VisionExtractorAgent"
         self.ollama_url = ollama_url or os.getenv("LLM_URL", os.getenv("OLLAMA_URL", "http://host.docker.internal:11434"))
+
+    def _get_total_pages_with_fallback(self, file_path: str) -> int:
+        """
+        Obtiene número de páginas sin depender únicamente de poppler.
+
+        Prioriza ``pdfinfo_from_path``; si falla (entorno sin poppler),
+        usa PyMuPDF como fallback determinista.
+        """
+        try:
+            info = pdfinfo_from_path(file_path)
+            return int(info["Pages"])
+        except Exception as exc:
+            logger.warning(
+                "[%s] pdfinfo_from_path falló; usando fallback PyMuPDF. error=%s",
+                self.name,
+                str(exc),
+            )
+            with fitz.open(file_path) as doc:
+                return int(doc.page_count)
+
+    async def _render_page_base64(self, file_path: str, page_num: int) -> Optional[str]:
+        """
+        Renderiza una página PDF a JPEG base64.
+
+        Estrategia:
+        1) pdf2image/convert_from_path (rápido cuando poppler existe).
+        2) Fallback PyMuPDF (sin dependencia de poppler).
+        """
+        try:
+            images = await asyncio.to_thread(
+                convert_from_path,
+                file_path,
+                dpi=120,
+                first_page=page_num,
+                last_page=page_num,
+                fmt="jpeg",
+            )
+            if images:
+                img = images[0]
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                data = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                del images
+                del img
+                gc.collect()
+                return data
+        except Exception as exc:
+            logger.warning(
+                "[%s] convert_from_path falló en página %s; fallback PyMuPDF. error=%s",
+                self.name,
+                page_num,
+                str(exc),
+            )
+
+        try:
+            # Fallback robusto para entornos host sin poppler.
+            with fitz.open(file_path) as doc:
+                page = doc.load_page(page_num - 1)
+                pix = page.get_pixmap(dpi=150, alpha=False)
+                data = base64.b64encode(pix.tobytes("jpeg")).decode("utf-8")
+                return data
+        except Exception as exc:
+            logger.error(
+                "[%s] Fallback PyMuPDF falló en página %s: %s",
+                self.name,
+                page_num,
+                str(exc),
+            )
+            return None
 
     async def extract(self, file_path: str) -> Dict[str, Any]:
         """
@@ -39,8 +110,7 @@ class VisionExtractorAgent:
             return {"error": "Archivo no encontrado", "success": False}
             
         try:
-            info = pdfinfo_from_path(file_path)
-            total_pages = int(info['Pages'])
+            total_pages = self._get_total_pages_with_fallback(file_path)
 
             # --- ESTRATEGIA DE PROCESAMIENTO POR PÁGINAS ---
             MAX_PAGES = int(os.getenv("VISION_MAX_PAGES", "0"))
@@ -56,27 +126,17 @@ class VisionExtractorAgent:
                 for start in range(1, process_limit + 1):
                     text = ""
                     try:
-                        images = await asyncio.to_thread(
-                            convert_from_path, 
-                            file_path, 
-                            dpi=120,
-                            first_page=start, 
-                            last_page=start, 
-                            fmt="jpeg"
-                        )
-                        
-                        if not images: continue
-                        img = images[0]
-                        buffered = BytesIO()
-                        img.save(buffered, format="JPEG")
-                        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                        del images
-                        del img
-                        gc.collect()
+                        img_str = await self._render_page_base64(file_path, start)
+                        if not img_str:
+                            continue
 
                         payload = {
                             "model": "glm-ocr",
-                            "prompt": "Text Recognition: ",
+                            "prompt": (
+                                "Extract all text from this page accurately. "
+                                "If you detect tables, format them strictly as Markdown tables (| Col | Col |). "
+                                "Do not skip any numeric data or dates."
+                            ),
                             "images": [img_str],
                             "stream": False,
                             "options": {

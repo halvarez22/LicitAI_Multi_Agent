@@ -168,14 +168,23 @@ class CompraNetPackager:
                 sd = root / name
                 if not sd.is_dir():
                     continue
-                for idx, src in enumerate(sorted(sd.iterdir()), start=1):
+                # Deduplicación: si el mismo archivo base aparece con prefijos de orden distintos
+                # (ej: 01_TABLA_PRECIOS.xlsx y 02_TABLA_PRECIOS.xlsx), solo tomamos el último.
+                # Usamos el nombre sin el prefijo numérico como clave de dedup.
+                seen_stems: dict = {}  # stem_limpio -> (src, idx)
+                for src in sorted(sd.iterdir()):
                     if not src.is_file() or src.name.startswith("00_CARATULA"):
                         continue
                     ext = src.suffix.lower()
                     if ext not in self._allowed:
                         errors.append(f"Extensión no permitida ({ext}): {src.name}")
                         continue
-                    # Nombre canónico CompraNet: RFC + id licitación + sobre + orden
+                    # Normalizar: quitar prefijo numérico "01_", "02_" etc.
+                    clean_stem = re.sub(r"^\d+_", "", src.stem)
+                    seen_stems[clean_stem] = src  # sobreescribe con el más reciente
+
+                for idx, (clean_stem, src) in enumerate(seen_stems.items(), start=1):
+                    ext = src.suffix.lower()
                     canonical = f"{rfc_s}_{lic_s}_{label}_{idx:02d}{ext}"
                     collected.append((src, label, canonical))
 

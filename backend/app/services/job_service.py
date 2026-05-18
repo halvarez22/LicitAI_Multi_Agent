@@ -48,3 +48,10 @@ def update_job_status(job_id: str, status: str, progress: Dict[str, Any] = None,
         has_error=bool(error),
         has_result=bool(result)
     )
+
+def get_job_status(job_id: str) -> Dict[str, Any]:
+    """Recupera la información completa de un job desde Redis."""
+    if not job_id:
+        return {}
+    job_data = redis_client.get(f"job:{job_id}")
+    return json.loads(job_data) if job_data else {}

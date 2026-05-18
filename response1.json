@@ -1,0 +1,111 @@
+{
+  "reply": "La fecha y hora de la Junta de Aclaraciones no se especifica en el texto proporcionado. Sin embargo, se menciona que se abrir\u00e1 un nuevo lapso de seis horas a partir de la hora establecida en el cierre del acta para que se realicen preguntas relacionadas con las respuestas plasmadas en la primer Acta de Aclaraci\u00f3n de dudas.",
+  "citations": [
+    {
+      "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "pagina": 52
+    },
+    {
+      "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "pagina": 8
+    },
+    {
+      "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "pagina": 35
+    },
+    {
+      "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "pagina": 26
+    },
+    {
+      "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+      "pagina": 13
+    }
+  ],
+  "confidence": "Alta",
+  "expert_suggestion": null,
+  "suggested_actions": [
+    {
+      "label": "\ud83d\ude80 Generar Propuesta",
+      "payload": "CMD_TRIGGER_GENERATION",
+      "style": "primary"
+    },
+    {
+      "label": "\ud83d\udccb Ver Dictamen Forense",
+      "payload": "CMD_SHOW_FORENSIC",
+      "style": "secondary"
+    }
+  ],
+  "data": {
+    "respuesta": "La fecha y hora de la Junta de Aclaraciones no se especifica en el texto proporcionado. Sin embargo, se menciona que se abrir\u00e1 un nuevo lapso de seis horas a partir de la hora establecida en el cierre del acta para que se realicen preguntas relacionadas con las respuestas plasmadas en la primer Acta de Aclaraci\u00f3n de dudas.",
+    "citations": [
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 52
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 8
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 35
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 26
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 13
+      }
+    ],
+    "sources": [
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 52
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 8
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 35
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 26
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 13
+      }
+    ],
+    "citas": [
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 52
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 8
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 35
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 26
+      },
+      {
+        "documento": "LA-51-GYN-051GYN025-N-8-2024 VIGILANCIA.pdf",
+        "pagina": 13
+      }
+    ],
+    "confianza": "Alta",
+    "sugerencia": null,
+    "tipo": "rag_answer"
+  }
+}

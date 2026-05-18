@@ -21,7 +21,8 @@ class OrchestratorState(BaseModel):
         description=(
             "Razón de pausa o fin. Valores conocidos: "
             "FINAL_OK, ANALYSIS_COMPLETED, GENERATION_COMPLETED, COMPLIANCE_ERROR, "
-            "ECONOMIC_GAP, INCOMPLETE_DATA, INVALID_MODE, INVALID_INPUT, LOW_CONFIDENCE"
+            "ECONOMIC_GAP, INCOMPLETE_DATA, INVALID_MODE, INVALID_INPUT, LOW_CONFIDENCE, "
+            "GO_NO_GO_PENDING (pipeline pausado esperando decisión del usuario sobre brechas críticas)"
         )
     )
     aggregate_health: str = Field(

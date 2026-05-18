@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
+from app.core.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Versión actual del schema de sesión
 CURRENT_SESSION_VERSION = 1

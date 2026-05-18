@@ -9,7 +9,7 @@ async def check():
     
     async with memory.async_session() as db_session:
         # 1. Buscar la empresa
-        result = await db_session.execute(select(Company).filter(Company.name.ilike('%Tecnologia Integrales%')))
+        result = await db_session.execute(select(Company).filter(Company.name.ilike('%Mayo%')))
         company = result.scalars().first()
         
         if not company:

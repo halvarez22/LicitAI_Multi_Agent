@@ -60,6 +60,8 @@ async def test_delivery_proceso_exitoso_llm_valido():
     assert "LOGISTICA_Y_GUIA_DE_ENTREGA.pdf" in out.data["guia_pdf"]
     # Verificar que se usó 'sess_del1' en la ruta del PDF
     assert "sess_del1" in out.data["guia_pdf"]
+    checks = [str((c or {}).get("check") or "").lower() for c in (out.data.get("checklist") or [])]
+    assert any("identificación oficial del representante" in x for x in checks)
     mock_pdf.assert_called_once()
 
 
@@ -82,6 +84,8 @@ async def test_delivery_usa_fallback_si_llm_falla_con_error():
     assert out.data["tipo_licitacion"] == "DETERMINACIÓN_MANUAL_REQUERIDA"
     assert len(out.data["alertas"]) > 0
     assert "No se pudo determinar" in out.data["alertas"][0]
+    checks = [str((c or {}).get("check") or "").lower() for c in (out.data.get("checklist") or [])]
+    assert any("identificación oficial del representante" in x for x in checks)
 
 
 @pytest.mark.asyncio
@@ -99,6 +103,8 @@ async def test_delivery_usa_fallback_si_json_no_es_valido():
 
     assert out.status == AgentStatus.SUCCESS
     assert out.data["tipo_licitacion"] == "DETERMINACIÓN_MANUAL_REQUERIDA"
+    checks = [str((c or {}).get("check") or "").lower() for c in (out.data.get("checklist") or [])]
+    assert any("identificación oficial del representante" in x for x in checks)
 
 
 @pytest.mark.asyncio
