@@ -41,7 +41,7 @@ tmp/
 temp/
 *.tmp
 
-# Project runtime artifacts
+# Project runtime artifacts (nunca subir a GitHub)
 logs/
 uploads/
 backups/
@@ -52,6 +52,29 @@ models/
 backend/app/models/__pycache__/
 backend/app/models/**/*.pyc
 out/
+
+# Datos de licitaciones, empresas y pruebas locales (NO versionar)
+bases y convocatorias de prueba/
+Documentos de empresa participante/
+Contratos anteriores/
+costos de servicios/
+scratch/
+backend/scratch/
+backend/brain/
+backend/*.pdf
+backend/dictamen_output.json
+backend/state_data.json
+backend/apply_refinement.py
+backend/check_*.py
+backend/debug_*.py
+backend/repair_*.py
+backend/get_session_dictamen.py
+backend/print_full_chunk.py
+backend/tests/fixtures/real_sessions/
+
+# Scripts locales de purga git (no producto)
+scripts/git-filter-rm-bases.sh
+.git-filter-rm-bases.bat
 
 # Local reports and generated text artifacts
 *.log
@@ -68,6 +91,8 @@ test_out.txt
 inspect_out.txt
 test_page1.jpg
 
-# Fixtures locales de licitación (PDFs grandes; no versionar en GitHub)
-bases y convocatorias de prueba/
-backend/scratch/
+# PDFs/DOCs sueltos en raíz o fuera de public/ (excepto logo en frontend/public)
+*.pdf
+*.docx
+*.xlsx
+!frontend/public/**
