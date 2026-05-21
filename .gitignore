@@ -70,7 +70,27 @@ backend/debug_*.py
 backend/repair_*.py
 backend/get_session_dictamen.py
 backend/print_full_chunk.py
+backend/bases_content_raw.txt
+backend/ingest_real_data.py
+backend/seed_session_data.py
+backend/app/brain/
+backend/acid_test_*.py
 backend/tests/fixtures/real_sessions/
+
+# Scripts sueltos en raíz del repo (no producto)
+/acid_test*.py
+/clear_pending.py
+/compare_extraction_host.py
+/compliance_zone_admin_only.py
+/debug_chroma.py
+/fix_technical.py
+/inspect_session.py
+/inspect_vigilancia.py
+/test_performance.py
+/test_queries.py
+/verify_zona_origen.py
+"Proceso de análisis de bases para licitai.txt"
+"cerebro que decide qué es un documento y qué no.txt"
 
 # Scripts locales de purga git (no producto)
 scripts/git-filter-rm-bases.sh
