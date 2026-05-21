@@ -74,6 +74,7 @@ backend/tests/fixtures/real_sessions/
 
 # Scripts locales de purga git (no producto)
 scripts/git-filter-rm-bases.sh
+scripts/git-purge-non-app-from-history.sh
 .git-filter-rm-bases.bat
 
 # Local reports and generated text artifacts
