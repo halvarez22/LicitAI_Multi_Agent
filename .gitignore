@@ -67,3 +67,7 @@ test_out.txt
 *_output*.txt
 inspect_out.txt
 test_page1.jpg
+
+# Fixtures locales de licitación (PDFs grandes; no versionar en GitHub)
+bases y convocatorias de prueba/
+backend/scratch/
