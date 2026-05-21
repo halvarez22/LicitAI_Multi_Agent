@@ -1,22 +1,297 @@
-import os
-import shutil
+"""
+Empacador de documentos: organiza archivos generados en SOBRE_1/2/3.
+
+Por defecto usa mapeo **determinístico** (carpeta de origen + clasificación legal/económica),
+sin depender del LLM — evita duplicados (p. ej. 13× el mismo Anexo M en SOBRE_2).
+"""
+from __future__ import annotations
+
 import json
-from typing import Dict, Any, List
-from docx import Document
-import docx.shared as docx_shared
+import os
+import re
+import shutil
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import docx.shared as docx_shared
+from docx import Document
+
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
+from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.services.resilient_llm import ResilientLLMClient
 from app.services.vector_service import VectorDbServiceClient
-from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+
+# Carpetas de generación del orquestador → categoría de origen
+_OUTPUT_FOLDER_TO_CATEGORY: Tuple[Tuple[str, str], ...] = (
+    ("1.propuesta tecnica", "tecnica"),
+    ("2.propuesta_economica", "economica"),
+    ("2.propuesta economica", "economica"),
+    ("3.documentos administrativos", "administrativa"),
+)
+
+_ALLOWED_EXTENSIONS = (".doc", ".docx", ".pdf", ".xlsx", ".xls", ".jpg", ".jpeg", ".png")
+
+_SOBR_E_SHELLS = {
+    "sobre_1": {
+        "titulo": "SOBRE 1 - DOCUMENTACIÓN ADMINISTRATIVA",
+        "nombre_carpeta": "SOBRE_1_ADMINISTRATIVO",
+    },
+    "sobre_2": {
+        "titulo": "SOBRE 2 - PROPUESTA TÉCNICA",
+        "nombre_carpeta": "SOBRE_2_TECNICO",
+    },
+    "sobre_3": {
+        "titulo": "SOBRE 3 - PROPUESTA ECONÓMICA",
+        "nombre_carpeta": "SOBRE_3_ECONOMICO",
+    },
+}
+
+
+def _packager_use_llm_mapping() -> bool:
+    return os.getenv("PACKAGER_USE_LLM_MAPPING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _doc_path_key(doc: Dict[str, Any]) -> str:
+    ruta = doc.get("ruta")
+    if ruta and os.path.isfile(ruta):
+        return os.path.normcase(os.path.abspath(ruta))
+    return f"nombre:{str(doc.get('nombre') or '').strip().lower()}"
+
+
+def _dedupe_doc_list(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for d in docs or []:
+        if not isinstance(d, dict):
+            continue
+        key = _doc_path_key(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def _infer_category_from_path(ruta: str) -> Optional[str]:
+    norm = ruta.replace("\\", "/").lower()
+    for folder, cat in _OUTPUT_FOLDER_TO_CATEGORY:
+        if f"/{folder}/" in norm or norm.endswith(f"/{folder}"):
+            return cat
+    return None
+
+
+def _classify_doc_to_sobre_key(doc: Dict[str, Any]) -> str:
+    """
+    Sobre 1 = administrativo/legal, 2 = técnico, 3 = económico (convención CompraNet piloto).
+    """
+    ruta = str(doc.get("ruta") or "")
+    nombre = str(doc.get("nombre") or "")
+    cat = str(doc.get("categoria") or "")
+    blob = f"{nombre} {ruta}".lower()
+
+    path_cat = _infer_category_from_path(ruta) if ruta else None
+    if path_cat == "administrativa":
+        return "sobre_1"
+    if path_cat == "economica":
+        return "sobre_3"
+    if path_cat == "tecnica":
+        return "sobre_2"
+
+    if cat == "administrativa" or "administrativ" in blob:
+        return "sobre_1"
+    if cat == "economica" or "propuesta_econom" in blob or "propuesta econom" in blob:
+        return "sobre_3"
+    if cat == "tecnica" or "propuesta tecnica" in blob or "propuesta técnica" in blob:
+        return "sobre_2"
+
+    # Prefijos de archivo generados por Formats / TechnicalWriter
+    base = os.path.basename(ruta).upper() if ruta else nombre.upper()
+    if re.search(r"\b(AD|FO|DD)[-_]", base) or "MANIFEST" in base:
+        return "sobre_1"
+    if re.search(r"\b(TE|AT)[-_]", base) or "CARTA_PRESENTACION" in base:
+        return "sobre_2"
+    if re.search(r"\b(AE|ANEXO_AE|TABLA_PRECIOS|CARTA_COMPROMISO_PRECIOS)\b", base):
+        return "sobre_3"
+
+    from app.services.compliance_consolidation_service import classify_deliverable_sobre
+
+    zone = classify_deliverable_sobre(nombre, "")
+    if zone == "requisitos_legales":
+        return "sobre_1"
+    if zone == "sobre_2_economico":
+        return "sobre_3"
+    return "sobre_2"
+
+
+def _sort_docs_for_sobre(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def sort_key(d: Dict[str, Any]) -> Tuple[int, str]:
+        n = (d.get("nombre") or os.path.basename(d.get("ruta") or "")).lower()
+        if "carta" in n and ("present" in n or "presentación" in n):
+            return (0, n)
+        if re.match(r"^0?1[_\s]", n):
+            return (1, n)
+        return (2, n)
+
+    return sorted(docs, key=sort_key)
+
+
+def collect_documentos_para_empaque(
+    session_id: str,
+    gen_docs: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Une listas del orquestador con archivos existentes en disco (fuente de verdad).
+    """
+    merged: Dict[str, List[Dict[str, Any]]] = {
+        "administrativa": [],
+        "tecnica": [],
+        "economica": [],
+    }
+    for cat, docs in (gen_docs or {}).items():
+        if cat in merged and isinstance(docs, list):
+            for d in docs:
+                if isinstance(d, dict):
+                    item = dict(d)
+                    item.setdefault("categoria", cat)
+                    merged[cat].append(item)
+
+    output_base = os.path.join("/data", "outputs", session_id)
+    for folder, cat in _OUTPUT_FOLDER_TO_CATEGORY:
+        dir_path = os.path.join(output_base, folder)
+        if not os.path.isdir(dir_path):
+            continue
+        for fn in sorted(os.listdir(dir_path)):
+            if fn.startswith(".") or fn.upper().startswith("00_CARATULA"):
+                continue
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in _ALLOWED_EXTENSIONS:
+                continue
+            full = os.path.join(dir_path, fn)
+            merged[cat].append(
+                {
+                    "nombre": fn,
+                    "ruta": full,
+                    "categoria": cat,
+                    "status": "OK",
+                }
+            )
+
+    unified: List[Dict[str, Any]] = []
+    for cat in ("administrativa", "tecnica", "economica"):
+        unified.extend(_dedupe_doc_list(merged.get(cat) or []))
+    return unified
+
+
+def mapear_sobres_deterministico(
+    session_id: str,
+    gen_docs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Distribuye documentos en tres sobres sin LLM."""
+    unified = collect_documentos_para_empaque(session_id, gen_docs)
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "sobre_1": [],
+        "sobre_2": [],
+        "sobre_3": [],
+    }
+    seen_paths: Set[str] = set()
+    for doc in unified:
+        ruta = doc.get("ruta")
+        if not ruta or not os.path.isfile(ruta):
+            continue
+        pkey = os.path.normcase(os.path.abspath(ruta))
+        if pkey in seen_paths:
+            continue
+        seen_paths.add(pkey)
+        sk = _classify_doc_to_sobre_key(doc)
+        buckets[sk].append(doc)
+
+    out: Dict[str, Any] = {}
+    for sk, shell in _SOBR_E_SHELLS.items():
+        docs = _sort_docs_for_sobre(_dedupe_doc_list(buckets[sk]))
+        out[sk] = {
+            **shell,
+            "documentos": docs,
+        }
+    return out
+
+
+def _sanitize_llm_estructura(
+    parsed: Dict[str, Any],
+    session_id: str,
+    gen_docs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Dedup y valida rutas del JSON del LLM; rellena huecos con mapeo determinístico."""
+    det = mapear_sobres_deterministico(session_id, gen_docs)
+    if not isinstance(parsed, dict):
+        return det
+
+    known_paths = {
+        os.path.normcase(os.path.abspath(d["ruta"]))
+        for d in collect_documentos_para_empaque(session_id, gen_docs)
+        if d.get("ruta") and os.path.isfile(d["ruta"])
+    }
+
+    out: Dict[str, Any] = {}
+    assigned: Set[str] = set()
+    for sk in ("sobre_1", "sobre_2", "sobre_3"):
+        raw = parsed.get(sk) if isinstance(parsed.get(sk), dict) else {}
+        shell = _SOBR_E_SHELLS[sk]
+        docs_in: List[Dict[str, Any]] = []
+        seen_local: Set[str] = set()
+        for doc in raw.get("documentos") or []:
+            if not isinstance(doc, dict):
+                continue
+            ruta = doc.get("ruta")
+            if not ruta or not os.path.isfile(ruta):
+                continue
+            pkey = os.path.normcase(os.path.abspath(ruta))
+            if pkey in seen_local or pkey not in known_paths:
+                continue
+            seen_local.add(pkey)
+            assigned.add(pkey)
+            docs_in.append(
+                {
+                    "nombre": doc.get("nombre") or os.path.basename(ruta),
+                    "ruta": ruta,
+                }
+            )
+        out[sk] = {
+            "titulo": raw.get("titulo") or shell["titulo"],
+            "nombre_carpeta": raw.get("nombre_carpeta") or shell["nombre_carpeta"],
+            "documentos": _sort_docs_for_sobre(docs_in),
+        }
+
+    # Documentos no asignados por el LLM → clasificación determinística
+    for doc in collect_documentos_para_empaque(session_id, gen_docs):
+        ruta = doc.get("ruta")
+        if not ruta or not os.path.isfile(ruta):
+            continue
+        pkey = os.path.normcase(os.path.abspath(ruta))
+        if pkey in assigned:
+            continue
+        sk = _classify_doc_to_sobre_key(doc)
+        out[sk]["documentos"].append(
+            {"nombre": doc.get("nombre") or os.path.basename(ruta), "ruta": ruta}
+        )
+        assigned.add(pkey)
+
+    for sk in out:
+        out[sk]["documentos"] = _sort_docs_for_sobre(
+            _dedupe_doc_list(out[sk]["documentos"])
+        )
+    return out
+
 
 class DocumentPackagerAgent(BaseAgent):
     """
-    Agente: Empacador de Documentos.
-    Organiza archivos en carpetas de sobres y genera carátulas e índices.
+    Organiza archivos generados en carpetas de sobres oficiales y carátulas.
 
-    Contrato de rutas: raíz de salida → /data/outputs/{session_id}/ (misma clave que API de descargas).
+    Contrato de rutas: ``/data/outputs/{session_id}/``.
     """
 
     def __init__(self, context_manager: MCPContextManager):
@@ -24,7 +299,7 @@ class DocumentPackagerAgent(BaseAgent):
             agent_id="document_packager",
             name="Document Packager Agent",
             description="Organizador de expedientes de licitación en estructura de sobres oficiales.",
-            context_manager=context_manager
+            context_manager=context_manager,
         )
         self.llm = ResilientLLMClient()
         self.vector_db = VectorDbServiceClient()
@@ -34,24 +309,15 @@ class DocumentPackagerAgent(BaseAgent):
         correlation_id = agent_input.correlation_id or "no-id"
         print(f"[{self.name}] 📦 Iniciando empaquetado de expediente para {session_id}...", flush=True)
 
-        # 1. Recuperar contexto
-        context = await self.context_manager.get_global_context(session_id)
-
-        # 2. Recuperar documentos generados y perfil
-        gen_docs = agent_input.company_data.get("documentos_generados", {})
+        gen_docs = agent_input.company_data.get("documentos_generados", {}) or {}
         master_profile = agent_input.company_data.get("master_profile", {})
 
-        # 3. Buscar estructura de sobres en las bases (RAG inyectado)
-        query = "orden presentación documentos sobre técnica administrativa económica foliado"
-        context_rag = await self.smart_search(session_id, query, n_results=5, vector_db=self.vector_db)
+        estructura = await self._mapear_sobres(gen_docs, session_id, correlation_id)
+        mapping_mode = "deterministic" if not _packager_use_llm_mapping() else "llm_sanitized"
 
-        # 4. Mapear documentos a sobres (LLM con fallback determinístico)
-        estructura = await self._mapear_sobres_llm(context_rag, gen_docs, correlation_id)
-
-        # 5. Crear estructura física de carpetas y carátulas
         output_base = os.path.join("/data", "outputs", session_id)
-        reporte_sobres = {}
-        caratulas = []
+        reporte_sobres: Dict[str, Any] = {}
+        caratulas: List[str] = []
 
         for key, info in estructura.items():
             if not isinstance(info, dict):
@@ -61,28 +327,47 @@ class DocumentPackagerAgent(BaseAgent):
 
             print(f"[{self.name}] 📨 Organizando {info['titulo']}...", flush=True)
 
-            docs_finales = []
-            for i, doc in enumerate(info["documentos"], 1):
+            docs_finales: List[Dict[str, Any]] = []
+            seen_paths: Set[str] = set()
+            orden = 0
+            for doc in info.get("documentos") or []:
                 raw_path = doc.get("ruta")
-                if raw_path and os.path.exists(raw_path):
-                    ext = os.path.splitext(raw_path)[1]
-                    nuevo_nombre = f"{i:02d}_{os.path.basename(raw_path)}"
-                    destino = os.path.join(sobre_dir, nuevo_nombre)
-                    shutil.copy2(raw_path, destino)
-                    docs_finales.append({"orden": i, "nombre": doc["nombre"], "archivo": nuevo_nombre})
+                if not raw_path or not os.path.exists(raw_path):
+                    continue
+                norm_path = os.path.normcase(os.path.abspath(raw_path))
+                if norm_path in seen_paths:
+                    continue
+                seen_paths.add(norm_path)
+                orden += 1
+                nuevo_nombre = f"{orden:02d}_{os.path.basename(raw_path)}"
+                destino = os.path.join(sobre_dir, nuevo_nombre)
+                shutil.copy2(raw_path, destino)
+                docs_finales.append(
+                    {
+                        "orden": orden,
+                        "nombre": doc.get("nombre") or os.path.basename(raw_path),
+                        "archivo": nuevo_nombre,
+                    }
+                )
 
             caratula_path = os.path.join(sobre_dir, "00_CARATULA_SOBRE.docx")
-            self._generate_caratula(caratula_path, info["titulo"], docs_finales, master_profile, session_id)
+            self._generate_caratula(
+                caratula_path, info["titulo"], docs_finales, master_profile, session_id
+            )
             caratulas.append(caratula_path)
 
             reporte_sobres[key] = {
                 "nombre": info["titulo"],
                 "carpeta": sobre_dir,
                 "documentos": docs_finales,
-                "total_documentos": len(docs_finales)
+                "total_documentos": len(docs_finales),
             }
 
-        print(f"[{self.name}] ✅ Expediente organizado en {len(reporte_sobres)} sobres.", flush=True)
+        print(
+            f"[{self.name}] ✅ Expediente organizado en {len(reporte_sobres)} sobres "
+            f"({mapping_mode}).",
+            flush=True,
+        )
 
         return AgentOutput(
             status=AgentStatus.SUCCESS,
@@ -91,62 +376,73 @@ class DocumentPackagerAgent(BaseAgent):
             data={
                 "estructura_sobres": reporte_sobres,
                 "caratulas_generadas": caratulas,
-                "folder_raiz": output_base
+                "folder_raiz": output_base,
+                "mapping_mode": mapping_mode,
             },
-            correlation_id=correlation_id
+            correlation_id=correlation_id,
         )
 
-    async def _mapear_sobres_llm(self, context: str, gen_docs: Dict, correlation_id: str = "") -> Dict:
-        """
-        Determina qué documento va en qué sobre basándose en las bases (vía LLM).
-        Si el LLM falla o devuelve JSON inválido, aplica un fallback determinístico
-        que reparte gen_docs por keys conocidas sin consumir tokens.
-        """
+    async def _mapear_sobres(
+        self,
+        gen_docs: Dict[str, Any],
+        session_id: str,
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
+        if not _packager_use_llm_mapping():
+            print(
+                f"[{self.name}] 📋 Mapeo determinístico (carpeta origen + tipo documental).",
+                flush=True,
+            )
+            return mapear_sobres_deterministico(session_id, gen_docs)
+
+        context_rag = await self.smart_search(
+            session_id,
+            "orden presentación documentos sobre técnica administrativa económica foliado",
+            n_results=5,
+            vector_db=self.vector_db,
+        )
+        parsed = await self._mapear_sobres_llm_raw(
+            context_rag, gen_docs, session_id, correlation_id
+        )
+        return _sanitize_llm_estructura(parsed, session_id, gen_docs)
+
+    async def _mapear_sobres_llm_raw(
+        self,
+        context: str,
+        gen_docs: Dict[str, Any],
+        session_id: str,
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
         documentos_disponibles = []
-        for cat, docs in gen_docs.items():
-            if isinstance(docs, list):
-                for d in docs:
-                    documentos_disponibles.append({"nombre": d.get("nombre"), "ruta": d.get("ruta"), "categoria": cat})
+        for doc in collect_documentos_para_empaque(session_id, gen_docs):
+            documentos_disponibles.append(
+                {
+                    "nombre": doc.get("nombre"),
+                    "ruta": doc.get("ruta"),
+                    "categoria": doc.get("categoria"),
+                }
+            )
 
         prompt = f"""
-        Eres un Experto en Organización de Expedientes de Licitación. Tu tarea es clasificar los documentos generados
-        en la estructura de SOBRES requerida por las bases.
+        Clasifica cada archivo en sobre_1 (administrativo), sobre_2 (técnico) o sobre_3 (económico).
+        NO repitas el mismo archivo en más de un sobre. NO dupliques rutas.
 
-        BASES DE LICITACIÓN (Contexto de sobres):
+        BASES (extracto):
         {context[:5000]}
 
-        DOCUMENTOS DISPONIBLES PARA EMPACAR:
+        ARCHIVOS:
         {json.dumps(documentos_disponibles, indent=2)}
 
-        INSTRUCCIONES:
-        1. Clasifica en 3 grupos: sobre_1_administrativo, sobre_2_tecnico, sobre_3_economico.
-        2. Determina el orden lógico (ej. Carta presentación siempre va primero).
-        3. Si no hay instrucciones claras en las bases, usa el estándar:
-           - Sobre 1: Administrativos (Actas, RFC, Identificaciones).
-           - Sobre 2: Propuesta Técnica.
-           - Sobre 3: Propuesta Económica.
-        4. Devuelve un JSON estructurado así:
-           {{
-             "sobre_1": {{
-               "titulo": "SOBRE No. 1 - DOCUMENTACIÓN ADMINISTRATIVA",
-               "nombre_carpeta": "SOBRE_1_ADMINISTRATIVO",
-               "documentos": [ {{"nombre": "...", "ruta": "..."}}, ... ]
-             }},
-             ...
-           }}
-
-        RESPONDE SOLO EL JSON, sin explicaciones.
+        JSON: {{ "sobre_1": {{ "titulo": "...", "nombre_carpeta": "SOBRE_1_ADMINISTRATIVO", "documentos": [...] }}, ... }}
         """
 
         resp = await self.llm.generate(prompt=prompt, format="json", correlation_id=correlation_id)
-
         if not resp.success:
-            print(f"[{self.name}] ⚠️ LLM error en mapeo de sobres: {resp.error}. Usando fallback determinístico.")
-            return self._fallback_estructura_por_claves(gen_docs)
+            print(f"[{self.name}] ⚠️ LLM error: {resp.error}. Fallback determinístico.", flush=True)
+            return {}
 
         raw_text = resp.response or ""
         try:
-            # Limpiar fences de markdown si el modelo los incluyó
             if "```json" in raw_text:
                 raw_text = raw_text.split("```json")[1].split("```")[0].strip()
             elif "```" in raw_text:
@@ -154,41 +450,24 @@ class DocumentPackagerAgent(BaseAgent):
             start = raw_text.find("{")
             end = raw_text.rfind("}")
             if start != -1 and end != -1:
-                return json.loads(raw_text[start:end + 1])
-            raise ValueError("No se encontró objeto JSON en la respuesta del LLM.")
+                return json.loads(raw_text[start : end + 1])
         except Exception as e:
-            print(f"[{self.name}] ⚠️ JSON inválido del LLM ({e}). Usando fallback determinístico.")
-            return self._fallback_estructura_por_claves(gen_docs)
+            print(f"[{self.name}] ⚠️ JSON inválido ({e}).", flush=True)
+        return {}
 
-    def _fallback_estructura_por_claves(self, gen_docs: Dict) -> Dict:
-        """
-        Fallback determinístico: reparte gen_docs a los tres sobres estándar
-        usando las claves que el orquestador inyecta (administrativa, tecnica, economica).
-        No requiere LLM.
-        """
-        print(f"[{self.name}] 📋 Usando fallback determinístico (LLM no disponible o JSON inválido).")
-        return {
-            "sobre_1": {
-                "titulo": "SOBRE 1 - DOCUMENTACIÓN ADMINISTRATIVA",
-                "nombre_carpeta": "SOBRE_1_ADMINISTRATIVO",
-                "documentos": gen_docs.get("administrativa", [])
-            },
-            "sobre_2": {
-                "titulo": "SOBRE 2 - PROPUESTA TÉCNICA",
-                "nombre_carpeta": "SOBRE_2_TECNICO",
-                "documentos": gen_docs.get("tecnica", [])
-            },
-            "sobre_3": {
-                "titulo": "SOBRE 3 - PROPUESTA ECONÓMICA",
-                "nombre_carpeta": "SOBRE_3_ECONOMICO",
-                "documentos": gen_docs.get("economica", [])
-            }
-        }
+    def _fallback_estructura_por_claves(self, gen_docs: Dict[str, Any]) -> Dict[str, Any]:
+        """Compatibilidad tests: alias del mapeo por categoría de generación."""
+        return mapear_sobres_deterministico("", gen_docs)
 
-    def _generate_caratula(self, path: str, titulo: str, docs: List[Dict], profile: Dict, session_id: str):
-        """Genera una carátula de sobre profesional."""
+    def _generate_caratula(
+        self,
+        path: str,
+        titulo: str,
+        docs: List[Dict[str, Any]],
+        profile: Dict[str, Any],
+        session_id: str,
+    ) -> None:
         doc = Document()
-
         for section in doc.sections:
             section.top_margin = docx_shared.Inches(1)
 
@@ -197,7 +476,7 @@ class DocumentPackagerAgent(BaseAgent):
         run_titulo = p_titulo.add_run(titulo.upper())
         run_titulo.bold = True
         run_titulo.font.size = docx_shared.Pt(24)
-        p_titulo.alignment = 1  # Center
+        p_titulo.alignment = 1
 
         doc.add_paragraph("-" * 40).alignment = 1
 
@@ -217,10 +496,13 @@ class DocumentPackagerAgent(BaseAgent):
         doc.add_heading("ÍNDICE DE CONTENIDO", 2)
 
         for doc_item in docs:
-            doc.add_paragraph(f"{doc_item['orden']}. {doc_item['nombre']}", style='List Bullet')
+            doc.add_paragraph(
+                f"{doc_item['orden']}. {doc_item['nombre']}", style="List Bullet"
+            )
 
         doc.add_paragraph("\n" * 3)
-        doc.add_paragraph(f"FECHA DE GENERACIÓN: {datetime.now().strftime('%d/%m/%Y')}").alignment = 1
+        doc.add_paragraph(
+            f"FECHA DE GENERACIÓN: {datetime.now().strftime('%d/%m/%Y')}"
+        ).alignment = 1
 
         doc.save(path)
-

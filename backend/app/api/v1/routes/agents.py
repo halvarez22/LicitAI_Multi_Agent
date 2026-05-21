@@ -94,11 +94,15 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
         # DocumentIngestionRouter canónico — mismo comportamiento que el Camino A.
         docs = await memory.get_documents(request.session_id)
         vector_client = VectorDbServiceClient()
+        col = vector_client.get_or_create_collection(request.session_id)
+        is_rag_empty = col.count() == 0
+        
         _router = DocumentIngestionRouter()
 
         for d in docs:
             content = d.get("content", {})
-            if content.get("status") != "UPLOADED":
+            # Si el RAG está vacío, ignoramos el status y re-ingestamos forzosamente.
+            if content.get("status") != "UPLOADED" and not is_rag_empty:
                 continue
 
             filename = content.get("filename") or ""
@@ -200,6 +204,11 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             try:
                 from app.utils.audit_processor import process_audit_results_backend
 
+                session_for_ccc = await memory.get_session(request.session_id) or {}
+                ccc_raw = (
+                    resultado_dict.get("document_candidates_consolidated")
+                    or session_for_ccc.get("document_candidates_consolidated")
+                )
                 dictamen = process_audit_results_backend(
                     {
                         "status": resultado_dict.get("status"),
@@ -209,6 +218,7 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
                         "error": resultado_dict.get("message", "") or "",
                         "orchestrator_decision": resultado_dict.get("orchestrator_decision"),
                         "fast_track_document_candidates": resultado_dict.get("fast_track_document_candidates") or resultado_dict.get("fastTrackDocumentCandidates"),
+                        "document_candidates_consolidated": ccc_raw,
                     },
                     pipeline_telemetry=pipeline_telemetry,
                 )
@@ -216,6 +226,9 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
                 if dictamen:
                     session_data = await memory.get_session(request.session_id) or {}
                     session_data["dictamen"] = dictamen
+                    ccc_saved = dictamen.get("documentCandidatesConsolidated")
+                    if isinstance(ccc_saved, dict) and ccc_saved.get("sobre_1_tecnico") is not None:
+                        session_data["document_candidates_consolidated"] = ccc_saved
                     await memory.save_session(request.session_id, session_data)
                     logger.info(
                         f"Dictamen auto-persistido sesión={request.session_id} "

@@ -6,9 +6,46 @@ para que el semáforo y la métrica de brechas atenuadas sean coherentes con el 
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from app.config.settings import settings
+
+# Valores reconocidos en session_state["go_no_go_override"]["authorized_by"]
+GO_NO_GO_ACK_USER = "user"
+GO_NO_GO_ACK_SYSTEM_AUTO = "system_auto"
+GO_NO_GO_ACK_AUTHORIZED_VALUES = frozenset({GO_NO_GO_ACK_USER, GO_NO_GO_ACK_SYSTEM_AUTO})
+
+
+def is_go_no_go_acknowledged(override: Optional[Dict[str, Any]]) -> bool:
+    """True si el usuario o la política silenciosa ya registraron aceptación de riesgos."""
+    if not isinstance(override, dict):
+        return False
+    return str(override.get("authorized_by") or "") in GO_NO_GO_ACK_AUTHORIZED_VALUES
+
+
+def build_silent_go_no_go_override(
+    gng_data: Dict[str, Any],
+    *,
+    mode: str,
+    policy: str = "silent_analysis",
+) -> Dict[str, Any]:
+    """Construye override auditable tras Go/No-Go en modos de análisis (sin UI de semáforo)."""
+    brechas = gng_data.get("brechas") if isinstance(gng_data.get("brechas"), list) else []
+    brecha_ids: List[str] = [
+        str(b.get("id"))
+        for b in brechas
+        if isinstance(b, dict) and b.get("id") is not None
+    ]
+    return {
+        "authorized_by": GO_NO_GO_ACK_SYSTEM_AUTO,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "policy": policy,
+        "pipeline_mode": mode,
+        "semaforo": str(gng_data.get("semaforo") or "GREEN"),
+        "brechas_registradas": len(brechas),
+        "brechas_autorizadas": brecha_ids,
+    }
 
 
 async def merge_company_data_with_session_evidence(

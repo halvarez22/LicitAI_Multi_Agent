@@ -238,27 +238,40 @@ Devuelve SOLO un JSON Array con este formato estricto:
 
 # Keywords GENÉRICOS (no específicos de ninguna licitación)
 _SOBRE2_KEYWORDS = (
-    "económic", "precio", "fianza", "seriedad", "garantia de seriedad",
+    "econom", "precio", "fianza", "seriedad", "garantia de seriedad",
     "propuesta economica", "oferta economica", "cotizacion", "importe",
-    "partida", "unitario", "desglose", "iva",
+    "partida", "unitario", "desglose", "iva", "catalogo de conceptos",
+    "analisis de precios", "anexo g", "tabla de precios",
 )
 _LEGAL_KEYWORDS = (
     "acta constitutiva", "poder notarial", "identificacion oficial",
-    "situacion fiscal", "opinion de cumplimiento", "rfc",
-    "registro federal", "padron de proveedores", "alta ante el sat",
-    "cedula fiscal", "constancia fiscal", "notario",
+    "identificacion personal", "situacion fiscal", "opinion de cumplimiento",
+    "opinion del cumplimiento", "rfc", "registro federal", "padron de proveedores",
+    "alta ante el sat", "cedula fiscal", "cedula de identificacion fiscal",
+    "constancia fiscal", "notario", "imss", "infonavit", "servicio de administracion tributaria",
+    "seguridad social", "comprobante fiscal", "cfdi", "instrumento juridico",
+    "representante o apoderado", "constancia de no adeudos", "comprobante de domicilio",
+    "credencial para votar", "credencial electronica",
 )
 
 
-def _classify_sobre(name: str, snippet: str) -> str:
+def classify_deliverable_sobre(name: str, snippet: str = "") -> str:
+    """
+    Clasifica un entregable en sobre técnico, económico o legal.
+    Precedencia: legal > económico > técnico (evita actas/opiniones en sobre económico).
+    """
     combined = _normalize(f"{name} {snippet}")
-    for kw in _SOBRE2_KEYWORDS:
-        if kw in combined:
-            return "sobre_2_economico"
     for kw in _LEGAL_KEYWORDS:
         if kw in combined:
             return "requisitos_legales"
+    for kw in _SOBRE2_KEYWORDS:
+        if kw in combined:
+            return "sobre_2_economico"
     return "sobre_1_tecnico"
+
+
+def _classify_sobre(name: str, snippet: str) -> str:
+    return classify_deliverable_sobre(name, snippet)
 
 
 # ---------------------------------------------------------------------------
@@ -415,10 +428,13 @@ class ComplianceConsolidator:
         sobre_2.sort(key=_sort_key)
         legales.sort(key=_sort_key)
 
-        total_consolidados = len(sobre_1) + len(sobre_2) + len(legales) + len(huerfanos_criticos)
         latencia_ms = round((time.time() - t0) * 1000, 1)
 
-        return {
+        from app.services.document_deliverable_filter import (
+            filter_consolidated_document_candidates,
+        )
+
+        payload = {
             "sobre_1_tecnico":          sobre_1,
             "sobre_2_economico":        sobre_2,
             "requisitos_legales":       legales,
@@ -426,12 +442,16 @@ class ComplianceConsolidator:
             "_meta": {
                 "session_id":             session_id,
                 "total_raw_items":        len(all_items),
-                "total_consolidados":     total_consolidados,
+                "total_consolidados":     len(sobre_1)
+                + len(sobre_2)
+                + len(legales)
+                + len(huerfanos_criticos),
                 "items_con_anexo":        len(groups),
                 "items_agrupados_semanticamente": len(deduped_orphans),
                 "latencia_ms":            latencia_ms,
             },
         }
+        return filter_consolidated_document_candidates(payload)
 
     @staticmethod
     def _empty_result(session_id: str, total: int) -> Dict[str, Any]:

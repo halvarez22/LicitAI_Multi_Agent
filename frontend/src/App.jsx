@@ -22,6 +22,7 @@ import BlockResolutionPanel from './components/BlockResolutionPanel';
 import DocumentQualityDiagnosticPanel from './components/DocumentQualityDiagnosticPanel';
 import IntakeProgressCard from './components/IntakeProgressCard';
 import DocumentCandidatePanel from './components/DocumentCandidatePanel';
+import PhysicalChecklistPanel from './components/PhysicalChecklistPanel';
 import { useValidationManager } from './hooks/useValidationManager';
 import {
     processAuditResults,
@@ -29,6 +30,7 @@ import {
     enrichDictamenFromStorage,
     applyInfrastructureUxOverrides,
     synthesizePipelineTelemetryFromDictamen,
+    pickDocumentCandidatesForPanel,
 } from './utils/auditSummary';
 import { LICITAI_APP_VERSION } from './appVersion.js';
 import { API_BASE } from './apiBase.js';
@@ -51,6 +53,12 @@ const chatProactiveBootstrapDoneKeys = new Set();
 
 const AGENTS_JOB_POLL_MS = 2500;
 const AGENTS_JOB_TIMEOUT_MS = 90 * 60 * 1000;
+
+/** Go/No-Go ya reconocido (usuario o política silenciosa en análisis). */
+function isGoNoGoAcknowledged(override) {
+    const by = override?.authorized_by;
+    return by === 'user' || by === 'system_auto';
+}
 
 /**
  * El backend responde 202 a POST /agents/process con job_id; el resultado real llega vía GET .../jobs/{id}/status.
@@ -368,6 +376,26 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
         </button>
     );
 
+    if (results.uxKind === 'rag_index_missing') {
+        return (
+            <div style={{ maxHeight: '600px', overflowY: 'auto', padding: '15px', background: 'rgba(255,255,255,0.02)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '15px', paddingBottom: '15px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                    <Shield size={20} color="var(--primary)" />
+                    <h3 style={{ fontSize: '15px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '1px' }}>Dictamen Forense</h3>
+                </div>
+                <div style={{ padding: '20px', background: 'rgba(56, 189, 248, 0.08)', borderRadius: '15px', border: '1px solid rgba(56, 189, 248, 0.35)', textAlign: 'center' }}>
+                    <Shield size={32} color="#7dd3fc" style={{ marginBottom: '15px' }} />
+                    <h4 style={{ fontSize: '16px', fontWeight: 800, color: '#7dd3fc', margin: '0 0 10px 0' }}>Sincronización de Expediente Requerida</h4>
+                    <p style={{ fontSize: '13px', color: '#e2e8f0', lineHeight: 1.6, margin: 0 }}>
+                        Hemos realizado un mantenimiento en el sistema. Para garantizar la tolerancia cero a errores en tu propuesta, necesitamos reconectar tus bases con nuestro motor de análisis. 
+                        <br/><br/>
+                        Por favor, pulsa el botón <strong>"Analizar Bases"</strong> (arriba a la derecha de este panel) para restaurar tu sesión de forma segura.
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div style={{ maxHeight: '600px', overflowY: 'auto', padding: '15px', background: 'rgba(255,255,255,0.02)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)', scrollbarWidth: 'thin' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '15px', paddingBottom: '15px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
@@ -569,13 +597,14 @@ const App = () => {
     const [isHoverRight, setIsHoverRight] = useState(false);
 
     /**
-     * Fase C (cinturón A1): herramientas de sesión bajo el Dashboard, sin ocultar dictamen en columna izquierda.
-     * @type {'calendario' | 'post_junta' | 'economico' | 'calidad_docs' | 'avanzado'}
+     * Fase C (cinturón A1): herramientas de sesión bajo el Dashboard.
+     * null = ningún panel visible (pestaña pulsada de nuevo para contraer).
+     * @type {null | 'calendario' | 'checklist_fisico' | 'documentos_candidatos' | 'post_junta' | 'economico' | 'calidad_docs' | 'avanzado'}
      */
-    const [sessionToolsTab, setSessionToolsTab] = useState('calendario');
+    const [sessionToolsTab, setSessionToolsTab] = useState(null);
 
     useEffect(() => {
-        setSessionToolsTab('calendario');
+        setSessionToolsTab(null);
         setIntakeUiSnapshot(null);
     }, [sessionId]);
 
@@ -584,7 +613,7 @@ const App = () => {
             sessionToolsTab === 'avanzado' &&
             import.meta.env.VITE_SHOW_VALIDATION_POLICY === 'false'
         ) {
-            setSessionToolsTab('calendario');
+            setSessionToolsTab(null);
         }
     }, [sessionToolsTab]);
 
@@ -841,6 +870,23 @@ const App = () => {
                     return;
                 }
                 let enriched = enrichDictamenFromStorage(d);
+                const ftFromApi = res.data.data?.fast_track_document_candidates;
+                if (ftFromApi && typeof ftFromApi === 'object') {
+                    if (ftFromApi.sobre_1_tecnico) {
+                        enriched = {
+                            ...enriched,
+                            documentCandidatesConsolidated: ftFromApi,
+                        };
+                    }
+                    if (ftFromApi.candidate_document_list || Array.isArray(ftFromApi)) {
+                        enriched = {
+                            ...enriched,
+                            fastTrackDocumentCandidates: ftFromApi,
+                        };
+                    } else if (!enriched.fastTrackDocumentCandidates) {
+                        enriched = { ...enriched, fastTrackDocumentCandidates: ftFromApi };
+                    }
+                }
                 const inferredTelem = synthesizePipelineTelemetryFromDictamen(enriched);
                 if (inferredTelem) {
                     enriched = { ...enriched, pipelineTelemetry: inferredTelem };
@@ -868,13 +914,16 @@ const App = () => {
                 setDocumentQualityBlockingSessionLatch(false);
             }
 
-            // Cargar go_no_go_result si el pipeline está en GO_NO_GO_PENDING
+            // Panel Go/No-Go solo si quedó pendiente SIN acknowledgment (legacy o generation).
             if (res.data.success && res.data.data.go_no_go_result) {
                 const gng = res.data.data.go_no_go_result;
                 const stopReason = res.data.data.stop_reason;
-                if (gng && stopReason === 'GO_NO_GO_PENDING') {
+                const gngOverride = res.data.data.go_no_go_override;
+                if (gng && stopReason === 'GO_NO_GO_PENDING' && !isGoNoGoAcknowledged(gngOverride)) {
                     setGoNoGoResult(gng);
                     setShowGoNoGoPanel(true);
+                } else {
+                    setShowGoNoGoPanel(false);
                 }
             }
         } catch (err) {
@@ -1156,8 +1205,14 @@ const App = () => {
             if (orchestrator?.data) {
                 // Detectar GO_NO_GO_PENDING antes de procesar como dictamen normal
                 const stopReason = orchestrator?.agent_decision?.stop_reason;
-                if (stopReason === 'GO_NO_GO_PENDING' || orchestrator?.status === 'go_no_go_pending') {
-                    const gngResult = orchestrator?.go_no_go_result 
+                const gngOverride =
+                    orchestrator?.data?.go_no_go_override
+                    || orchestrator?.go_no_go_override;
+                if (
+                    (stopReason === 'GO_NO_GO_PENDING' || orchestrator?.status === 'go_no_go_pending')
+                    && !isGoNoGoAcknowledged(gngOverride)
+                ) {
+                    const gngResult = orchestrator?.go_no_go_result
                         || orchestrator?.data?.go_no_go_result
                         || orchestrator?.data?.go_no_go;
                     if (gngResult) {
@@ -1190,6 +1245,7 @@ const App = () => {
                     nuevosDictamen.fechaAuditoria = new Date().toLocaleString('es-MX');
                     setAuditResults(nuevosDictamen);
                     await saveDictamenToPostgres(nuevosDictamen);
+                    await fetchDictamen();
                 } else {
                     console.error('processAuditResults devolvió null; payload:', auditPayload);
                     pushAssistantGuidance(
@@ -1596,7 +1652,8 @@ const App = () => {
                 }
 
                 const updatedGng = botData.go_no_go_result || res.data?.data?.go_no_go_result;
-                if (updatedGng) {
+                const gngOverride = res.data?.data?.go_no_go_override || botData.go_no_go_override;
+                if (updatedGng && !isGoNoGoAcknowledged(gngOverride)) {
                     setGoNoGoResult(updatedGng);
                     if (!showGoNoGoPanel) setShowGoNoGoPanel(true);
                 }
@@ -1946,7 +2003,7 @@ const App = () => {
                     </div>
                     
                     <div style={{ marginTop: '10px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '15px' }}>
-                        {showGoNoGoPanel && goNoGoResult ? (
+                        {showGoNoGoPanel && goNoGoResult && auditResults?.uxKind !== 'rag_index_missing' ? (
                             <GoNoGoPanel
                                 goNoGoResult={goNoGoResult}
                                 onAskExpert={(q) => { setChatInput(q); }}
@@ -2043,6 +2100,7 @@ const App = () => {
                             >
                                 {[
                                     { id: 'calendario', label: 'Hitos / calendario' },
+                                    { id: 'checklist_fisico', label: 'Aduana Corporativa (Checklist Físico)' },
                                     { id: 'documentos_candidatos', label: 'Documentos detectados' },
                                     { id: 'post_junta', label: 'Actas y aclaraciones' },
                                     { id: 'economico', label: 'Validaciones económicas' },
@@ -2058,9 +2116,13 @@ const App = () => {
                                             type="button"
                                             role="tab"
                                             aria-selected={active}
+                                            aria-expanded={active}
                                             id={`session-tool-tab-${t.id}`}
                                             aria-controls={`session-tool-panel-${t.id}`}
-                                            onClick={() => setSessionToolsTab(t.id)}
+                                            title={active ? 'Pulsa de nuevo para ocultar' : 'Mostrar panel'}
+                                            onClick={() =>
+                                                setSessionToolsTab((prev) => (prev === t.id ? null : t.id))
+                                            }
                                             style={{
                                                 padding: '8px 12px',
                                                 borderRadius: '10px',
@@ -2078,6 +2140,18 @@ const App = () => {
                                     );
                                 })}
                             </div>
+                            {sessionToolsTab == null && (
+                                <p
+                                    style={{
+                                        fontSize: '11px',
+                                        color: 'var(--text-muted)',
+                                        margin: 0,
+                                        lineHeight: 1.45,
+                                    }}
+                                >
+                                    Elige una pestaña para abrir el panel. Pulsa la misma pestaña otra vez para contraerlo.
+                                </p>
+                            )}
 
                             {sessionToolsTab === 'calendario' && (
                                 <div
@@ -2095,6 +2169,15 @@ const App = () => {
                                     />
                                 </div>
                             )}
+                            {sessionToolsTab === 'checklist_fisico' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-checklist_fisico"
+                                    aria-labelledby="session-tool-tab-checklist_fisico"
+                                >
+                                    <PhysicalChecklistPanel sessionId={sessionId} />
+                                </div>
+                            )}
                             {sessionToolsTab === 'documentos_candidatos' && (
                                 <div
                                     role="tabpanel"
@@ -2102,7 +2185,7 @@ const App = () => {
                                     aria-labelledby="session-tool-tab-documentos_candidatos"
                                 >
                                     <DocumentCandidatePanel 
-                                        candidates={auditResults?.fastTrackDocumentCandidates || []}
+                                        candidates={pickDocumentCandidatesForPanel(auditResults)}
                                         onAskExpert={(q) => { setChatInput(q); }}
                                         sessionId={sessionId}
                                         companyId={selectedCompanyId}
@@ -2170,7 +2253,16 @@ const App = () => {
                         </div>
                     )}
 
-                    <DeliveryPanel results={generationResults || auditResults || {}} sessionName={sessionName} sessionId={sessionId} />
+                    <DeliveryPanel
+                        results={generationResults || auditResults || {}}
+                        sessionName={sessionName}
+                        sessionId={sessionId}
+                        onExpedienteCleared={() => {
+                            setGenerationResults(null);
+                            setDocumentQualityGateSnapshot(null);
+                            setDocumentQualityBlockingSessionLatch(false);
+                        }}
+                    />
                 </section>
 
                 {/* VISUAL RESIZER DERECHO (CON HOVER Y LUZ) */}

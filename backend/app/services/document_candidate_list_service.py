@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from app.services.document_deliverable_filter import (
+    normalize_deliverable_key,
+    should_show_deliverable_in_ui,
+)
+
 _VALID_ACTIONS = {"generar", "presentar_fisico", "informativo"}
 _NO_APLICA_RE = re.compile(r"\b(no\s*aplica|no\s*aplicable|n/?a)\b", re.IGNORECASE)
 _NOISE_RE = re.compile(
@@ -57,6 +62,7 @@ def build_candidate_document_list(
     """
     categories = ("administrativo", "tecnico", "formatos")
     out: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
     unresolved_count = 0
     low_conf_count = 0
 
@@ -67,6 +73,13 @@ def build_candidate_document_list(
             name = str(item.get("nombre") or item.get("descripcion") or "Documento sin nombre").strip()
             description = str(item.get("descripcion") or "").strip()
             snippet = str(item.get("snippet") or "").strip()
+            if not should_show_deliverable_in_ui(
+                name, description, snippet, str(item.get("tipo_accion") or "")
+            ):
+                continue
+            dedup_key = normalize_deliverable_key(name, category)
+            if dedup_key in seen_keys:
+                continue
             text_for_na = " ".join((name, description, snippet)).strip()
             no_aplica = bool(_NO_APLICA_RE.search(text_for_na))
 
@@ -97,6 +110,7 @@ def build_candidate_document_list(
             if confidence < low_conf_threshold:
                 low_conf_count += 1
 
+            seen_keys.add(dedup_key)
             out.append(
                 {
                     "document_id": str(item.get("id") or f"{category[:2].upper()}-{len(out)+1:02d}"),

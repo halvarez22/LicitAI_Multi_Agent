@@ -5,6 +5,9 @@ from app.agents.chatbot_rag import ChatbotRAGAgent
 from app.agents.mcp_context import MCPContextManager
 from app.api.deps import get_connected_memory
 from app.contracts.agent_contracts import AgentInput
+from app.core.logging_config import get_logger
+
+logger = get_logger("licitai.chatbot")
 
 router = APIRouter()
 
@@ -23,6 +26,29 @@ async def ask_chatbot(request: ChatbotRequest):
     safe_session_id = request.session_id.strip().lower().replace("-", "_")
     
     try:
+        # ── HITO 11: Auto-Curación de Vectores (VectorSyncService) ───────────
+        # Verifica coherencia entre Postgres (ANALYZED) y ChromaDB (chunks).
+        # Si detecta desincronización (0 chunks para un doc ANALYZED), re-indexa
+        # silenciosamente desde el texto guardado. Idempotente y universal.
+        try:
+            from app.services.vector_sync_service import VectorSyncService
+            sync_result = await VectorSyncService().ensure_session_indexed(memory, safe_session_id)
+            if sync_result.get("healed"):
+                logger.warning(
+                    "vector_sync_auto_healed",
+                    session_id=safe_session_id,
+                    docs_healed=sync_result.get("docs_healed"),
+                    pages_indexed=sync_result.get("pages_indexed"),
+                )
+        except Exception as _sync_exc:
+            # La auto-curación NUNCA bloquea al usuario — falla silenciosa
+            logger.error(
+                "vector_sync_guard_failed",
+                session_id=safe_session_id,
+                error=str(_sync_exc)[:200],
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         agent_input = AgentInput(
             session_id=safe_session_id,
             company_id=request.company_id,
@@ -38,13 +64,17 @@ async def ask_chatbot(request: ChatbotRequest):
         
         # FIX ARQUITECTÓNICO: Si el usuario ya firmó la carta responsiva (override), 
         # amordazamos el envío del semáforo para no resucitar el panel en la UI.
+        from app.services.go_no_go_session_bridges import is_go_no_go_acknowledged
+
         go_no_go_override = session_state.get("go_no_go_override") or {}
-        already_authorized = go_no_go_override.get("authorized_by") == "user"
+        already_authorized = is_go_no_go_acknowledged(go_no_go_override)
         
         if not already_authorized:
             gng_result = session_state.get("go_no_go_result")
             if gng_result:
                 reply_data = {**reply_data, "go_no_go_result": gng_result}
+        if go_no_go_override:
+            reply_data = {**reply_data, "go_no_go_override": go_no_go_override}
 
         return ChatbotResponse(
             reply=reply_data.get("respuesta", "Lo siento, hubo un error de contexto."),

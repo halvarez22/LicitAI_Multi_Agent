@@ -74,38 +74,7 @@ class DigitalExtractorAgent:
 
             real_text_chars = 0
             for i, page in enumerate(doc):
-                table_blocks: List[str] = []
-                try:
-                    tables = page.find_tables()
-                    for tbl in tables:
-                        md = _format_table_as_markdown(tbl)
-                        if md:
-                            table_blocks.append(md)
-                except Exception as exc:
-                    logger.warning(
-                        "pdf_table_extraction_failed",
-                        page=i + 1,
-                        error=str(exc),
-                    )
-
-                # Extraer texto plano excluyendo áreas de tablas para evitar duplicidad (Ghost Text)
-                # Obtenemos los rectángulos de las tablas encontradas
-                table_rects = [tbl.bbox for tbl in tables]
-                
-                # Extraer texto por bloques y filtrar los que caen dentro de tablas
-                blocks = page.get_text("blocks")
-                plain_text_parts = []
-                for b in blocks:
-                    block_rect = fitz.Rect(b[:4])
-                    # Si el bloque no intersecta significativamente con ninguna tabla, lo incluimos
-                    is_inside_table = any(block_rect.intersect(t_rect).get_area() > (block_rect.get_area() * 0.5) for t_rect in table_rects)
-                    if not is_inside_table:
-                        plain_text_parts.append(b[4].strip())
-                
-                plain_text = "\n".join(p for p in plain_text_parts if p)
-                page_parts = table_blocks + ([plain_text] if plain_text else [])
-                page_text = "\n\n".join(page_parts)
-
+                page_text = self.extract_page_digital(page)
                 extracted_pages.append({"page": i + 1, "text": page_text})
                 full_text += f"\n--- PÁGINA {i+1} ---\n{page_text}\n"
                 real_text_chars += len(page_text)
@@ -127,3 +96,38 @@ class DigitalExtractorAgent:
         except Exception as e:
             logger.error(f"[{self.name}] Error critico en extraccion digital: {str(e)}")
             return {"error": str(e), "success": False}
+
+    def extract_page_digital(self, page: fitz.Page) -> str:
+        """Extrae el texto digital de una página individual con formateo de tablas."""
+        table_blocks: List[str] = []
+        table_rects = []
+        try:
+            tables = list(page.find_tables())
+            for tbl in tables:
+                md = _format_table_as_markdown(tbl)
+                if md.strip():
+                    table_blocks.append(md)
+                    table_rects.append(tbl.bbox)
+        except Exception as exc:
+            logger.warning(
+                "pdf_table_extraction_failed",
+                page=page.number + 1,
+                error=str(exc),
+            )
+
+        # Extraer texto plano excluyendo áreas de tablas con markdown exitoso
+        blocks = page.get_text("blocks")
+        plain_text_parts = []
+        for b in blocks:
+            block_rect = fitz.Rect(b[:4])
+            is_inside_table = any(
+                block_rect.intersect(t_rect).get_area() > (block_rect.get_area() * 0.5) 
+                for t_rect in table_rects
+            )
+            if not is_inside_table:
+                plain_text_parts.append(b[4].strip())
+        
+        plain_text = "\n".join(p for p in plain_text_parts if p)
+        page_parts = table_blocks + ([plain_text] if plain_text else [])
+        return "\n\n".join(page_parts)
+

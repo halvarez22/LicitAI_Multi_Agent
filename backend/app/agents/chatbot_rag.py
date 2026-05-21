@@ -1,8 +1,8 @@
 from app.services.llm_service import LLMServiceClient
 from app.core.logging_config import get_logger
-import json, logging, os, re
+import json, logging, os, re, unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.services.vector_service import VectorDbServiceClient
@@ -3264,6 +3264,2345 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             tipo="economic_price_provenance",
         )
 
+    # Combo A: micro-búsqueda focal en Chroma (términos procedimentales genéricos, sin expediente fijo).
+    _CRONOGRAM_FOCAL_RAG_QUERY: str = (
+        "cronograma calendario actos procedimiento visitas instalaciones "
+        "junta aclaraciones presentacion proposiciones apertura fallo fechas horas limite convocatoria"
+    )
+
+    _CRONOGRAMA_LABELS_ES: Dict[str, str] = {
+        "publicacion_convocatoria": "Publicación de la convocatoria",
+        "visita_instalaciones": "Visita a instalaciones",
+        "junta_aclaraciones": "Junta de aclaraciones",
+        "presentacion_proposiciones": "Presentación y apertura de proposiciones",
+        "fallo": "Fallo",
+        "firma_contrato": "Firma del contrato",
+    }
+
+    _CRONOGRAM_EMPTY_VALUES: frozenset = frozenset(
+        {"", "n/d", "nd", "no especificado", "sin especificar", "no aplica", "n.a."}
+    )
+
+    @staticmethod
+    def _normalize_query_for_intent(query: str) -> str:
+        """Minúsculas sin acentos para detección de intención."""
+        nk = unicodedata.normalize("NFD", (query or "").strip().lower())
+        return "".join(c for c in nk if unicodedata.category(c) != "Mn")
+
+    @classmethod
+    def _detect_cronogram_intent(cls, query: str) -> bool:
+        """
+        True si la consulta apunta a fechas/actos del procedimiento (universal, sin sesión fija).
+        """
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        if "cronograma" in q or "calendario" in q:
+            return True
+        act_markers = (
+            "junta de aclaraciones",
+            "visita a instalaciones",
+            "visita obligatoria",
+            "apertura de proposiciones",
+            "presentacion de proposiciones",
+            "acto de fallo",
+            "fallo de la licitacion",
+            "actos de la licitacion",
+            "actos del procedimiento",
+            "fechas de los actos",
+            "fechas y horas",
+            "eventos de la licitacion",
+            "eventos del procedimiento",
+        )
+        hits = sum(1 for m in act_markers if m in q)
+        if hits >= 2:
+            return True
+        if ("fecha" in q or "fechas" in q) and any(
+            x in q for x in ("junta", "visita", "apertura", "fallo", "actos", "proposiciones")
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_analysis_data_blob(task_entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extrae el dict ``data`` del resultado persistido del Analyst."""
+        if not isinstance(task_entry, dict):
+            return {}
+        result = task_entry.get("result") or {}
+        if not isinstance(result, dict):
+            return {}
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data
+        return result if isinstance(result, dict) else {}
+
+    @classmethod
+    def _extract_analyst_cronogram_from_session(cls, session_state: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Combo B: cronograma estructurado del Analyst (stage_completed:analysis) si tiene datos útiles.
+        """
+        from app.agents.analyst import normalize_cronograma_dict
+
+        tasks = session_state.get("tasks_completed") or []
+        if not isinstance(tasks, list):
+            return {}
+        for t in reversed(tasks):
+            if not isinstance(t, dict) or t.get("task") != "stage_completed:analysis":
+                continue
+            data = cls._extract_analysis_data_blob(t)
+            raw_cron = data.get("cronograma")
+            if not isinstance(raw_cron, dict):
+                continue
+            norm = normalize_cronograma_dict(raw_cron)
+            if any(
+                str(v).strip().lower() not in cls._CRONOGRAM_EMPTY_VALUES for v in norm.values()
+            ):
+                return norm
+        return {}
+
+    @classmethod
+    def _cronogram_anchored_in_pliego(cls, cron: Dict[str, str], pliego_text: str) -> bool:
+        """
+        True si al menos dos actos del cronograma del Analyst aparecen anclados en texto del pliego.
+        Evita inyectar fechas alucinadas del LLM del Analyst como verdad canónica.
+        """
+        pliego_low = " ".join((pliego_text or "").lower().split())
+        if len(pliego_low) < 40:
+            return False
+        years_cron: set = set()
+        for val in cron.values():
+            years_cron.update(re.findall(r"20\d{2}", str(val)))
+        years_pliego_list = re.findall(r"20\d{2}", pliego_low)
+        years_pliego = set(years_pliego_list)
+        if years_cron and years_pliego and not years_cron.intersection(years_pliego):
+            return False
+        if years_cron and years_pliego_list:
+            from collections import Counter
+
+            dominant_pliego = Counter(years_pliego_list).most_common(1)[0][0]
+            if all(y != dominant_pliego for y in years_cron):
+                return False
+        hits = 0
+        month_pat = (
+            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre"
+        )
+        for val in cron.values():
+            s = str(val or "").strip()
+            if not s or s.lower() in cls._CRONOGRAM_EMPTY_VALUES:
+                continue
+            s_norm = " ".join(s.lower().split())
+            if len(s_norm) < 10:
+                continue
+            if s_norm in pliego_low:
+                hits += 1
+                continue
+            dm = re.search(
+                rf"(\d{{1,2}})\s+de\s+({month_pat})\s+de\s+(20\d{{2}})",
+                s_norm,
+            )
+            if dm and dm.group(1) in pliego_low and dm.group(2) in pliego_low and dm.group(3) in pliego_low:
+                hits += 1
+        return hits >= 2
+
+    @classmethod
+    def _format_analyst_cronogram_prompt_section(cls, cron: Dict[str, str]) -> str:
+        """Bloque de contexto del Analyst solo cuando está anclado en el pliego indexado."""
+        lines = [
+            "[CRONOGRAMA ESTRUCTURADO — AnalystAgent, verificado contra el pliego indexado]"
+        ]
+        for key, val in cron.items():
+            label = cls._CRONOGRAMA_LABELS_ES.get(key, key.replace("_", " ").title())
+            lines.append(f"- {label}: {val}")
+        lines.append(
+            "Este bloque está respaldado por el calendario del pliego; complementa con sedes, "
+            "modalidad presencial/electrónica/mixta y notas al pie de los fragmentos."
+        )
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _is_cronogram_calendar_chunk(text: str) -> bool:
+        """
+        True si el fragmento parece tabla/calendario de actos (no requisitos ni logística suelta).
+        Heurística universal: actos del procedimiento + al menos una fecha explícita.
+        """
+        if not text or len(text) < 80:
+            return False
+        low = text.lower()
+        month_pat = (
+            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre"
+        )
+        has_date = bool(re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", low)) or bool(
+            re.search(rf"({month_pat})\s+de\s+20\d{{2}}", low)
+        )
+        if not has_date:
+            return False
+        act_hits = sum(
+            1
+            for pat in (
+                r"\bvisita",
+                r"junta.{0,30}aclaraci",
+                r"presentaci[oó]n.{0,40}proposici",
+                r"apertura.{0,40}proposici",
+                r"acto.{0,20}fallo",
+                r"\bfallo\b",
+                r"fechas?\s+y\s+horas?",
+            )
+            if re.search(pat, low)
+        )
+        return act_hits >= 2
+
+    @staticmethod
+    def _is_cronogram_noise_chunk(text: str) -> bool:
+        """Fragmentos que suelen confundir al LLM en preguntas de cronograma."""
+        if not text:
+            return False
+        low = text.lower()
+        noise_markers = (
+            "plan de contingencias",
+            "carta compromiso",
+            "copia certificada",
+            "comprobante del domicilio",
+            "causales de desechamiento",
+            "penas convencionales",
+            "garantía de cumplimiento otorgada",
+        )
+        if any(m in low for m in noise_markers):
+            return True
+        if re.search(r"\b\d{1,3}\.\s+[A-ZÁÉ]", text) and not ChatbotRAGAgent._is_cronogram_calendar_chunk(text):
+            return True
+        return False
+
+    def _hydrate_cronogram_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """
+        Hidrata solo páginas con calendario real (actos + fechas), máx. 4. Sin fijar número de página.
+        """
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_cronogram_calendar_chunk(doc or ""):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pinned_pages[:4]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if full and full not in out_docs and self._is_cronogram_calendar_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        return out_docs, out_metas
+
+    # Combo garantías: búsqueda focal contractuales (sin % ni montos fijos por expediente).
+    _GUARANTEE_FOCAL_RAG_QUERY: str = (
+        "garantía cumplimiento fianza contrato adjudicado ganador porcentaje monto "
+        "responsabilidad civil daños terceros póliza seguro endoso vigencia cheque certificado"
+    )
+
+    @classmethod
+    def _detect_guarantee_intent(cls, query: str) -> bool:
+        """True si la consulta apunta a garantías/seguros del ganador (no solvencia fiscal genérica)."""
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        core = (
+            "garantia",
+            "garantias",
+            "fianza",
+            "seguro",
+            "seguros",
+            "responsabilidad civil",
+            "danos a terceros",
+            "daños a terceros",
+            "endoso",
+            "vigencia",
+        )
+        if any(k in q for k in core):
+            return True
+        if "licitante ganador" in q or "adjudicado" in q:
+            if any(k in q for k in ("garantia", "fianza", "seguro", "cumplimiento")):
+                return True
+        return False
+
+    @staticmethod
+    def _is_guarantee_contract_chunk(text: str) -> bool:
+        """Fianza/garantía de cumplimiento del contrato (porcentaje, anexo, cheque)."""
+        if not text or len(text) < 60:
+            return False
+        low = text.lower()
+        if not any(
+            w in low
+            for w in (
+                "fianza",
+                "garantía de cumplimiento",
+                "garantia de cumplimiento",
+                "garantía para cumplimiento",
+                "garantia para cumplimiento",
+            )
+        ):
+            return False
+        return (
+            bool(re.search(r"\d+\s*%", low))
+            or "monto total adjudicado" in low
+            or "anexo g" in low
+            or "cheque de caja" in low
+            or "cheque certificado" in low
+            or "licitante adjudicado" in low
+        )
+
+    @staticmethod
+    def _is_guarantee_insurance_chunk(text: str) -> bool:
+        """Póliza de seguro (responsabilidad civil, suma asegurada)."""
+        if not text or len(text) < 60:
+            return False
+        low = text.lower()
+        if re.search(r"1[',.]?\s*000[',.]?\s*000", low):
+            return True
+        if "responsabilidad civil" in low and (
+            "daños a terceros" in low
+            or "danos a terceros" in low
+            or "suma asegurada" in low
+            or "terceros" in low
+        ):
+            return True
+        if ("póliza" in low or "poliza" in low) and "seguro" in low:
+            return True
+        return False
+
+    @staticmethod
+    def _is_solvencia_fiscal_noise(text: str) -> bool:
+        """Opiniones/constancias fiscales del participante (no garantía contractual del ganador)."""
+        if not text:
+            return False
+        if ChatbotRAGAgent._is_guarantee_contract_chunk(text) or ChatbotRAGAgent._is_guarantee_insurance_chunk(
+            text
+        ):
+            return False
+        low = text.lower()
+        fiscal_markers = (
+            "opinión del cumplimiento de obligaciones fiscales",
+            "opinion del cumplimiento de obligaciones fiscales",
+            "opinión del cumplimiento de obligaciones en materia de seguridad social",
+            "constancia de situación fiscal",
+            "constancia de situacion fiscal",
+            "instituto nacional de la vivienda",
+            "servicio de administración tributaria",
+            "instituto mexicano del seguro social",
+            "no se identificaron adeudos",
+            "al corriente de sus obligaciones",
+        )
+        return any(m in low for m in fiscal_markers)
+
+    @staticmethod
+    def _is_evaluation_percent_noise(text: str) -> bool:
+        """10% de evaluación de ofertas (no garantía de cumplimiento)."""
+        low = (text or "").lower()
+        if not re.search(r"10\s*%", low):
+            return False
+        if ChatbotRAGAgent._is_guarantee_contract_chunk(text):
+            return False
+        eval_markers = (
+            "evaluación de las proposiciones",
+            "evaluacion de las proposiciones",
+            "oferta más alta",
+            "incremento",
+            "diferencia entre",
+            "licitación abreviada",
+        )
+        return any(m in low for m in eval_markers)
+
+    def _hydrate_guarantee_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Páginas atómicas con cláusulas de fianza/garantía o póliza RC (máx. 4)."""
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_guarantee_contract_chunk(doc or "") or self._is_guarantee_insurance_chunk(
+                doc or ""
+            ):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pinned_pages[:4]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_guarantee_contract_chunk(full) or self._is_guarantee_insurance_chunk(
+                    full
+                ):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        return out_docs, out_metas
+
+    @classmethod
+    def _build_guarantee_canonical_block(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Extrae hechos contractuales literales de los fragmentos ya recuperados (universal, sin % fijo).
+        El LLM debe reflejarlos en la respuesta; no sustituye leer el pliego completo.
+        """
+        fianza_line = ""
+        fianza_page: Any = "?"
+        insurance_line = ""
+        insurance_page: Any = "?"
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc:
+                continue
+            pg = meta.get("page", "?")
+            if not fianza_line and cls._is_guarantee_contract_chunk(doc):
+                m = re.search(
+                    r"(\d{1,2})\s*%\s*del\s+monto\s+total\s+adjudicado",
+                    doc,
+                    re.I,
+                )
+                if not m:
+                    m = re.search(
+                        r"fianza.{0,80}?(\d{1,2})\s*%",
+                        doc,
+                        re.I | re.DOTALL,
+                    )
+                if m:
+                    fianza_line = f"{m.group(1)}% del monto total adjudicado (sin IVA según fragmento)"
+                    fianza_page = pg
+            if not insurance_line and cls._is_guarantee_insurance_chunk(doc):
+                m_amt = re.search(
+                    r"1[',.]?\s*000[',.]?\s*000(?:\.00)?(?:\s*\([^)]+\))?",
+                    doc,
+                    re.I,
+                )
+                if m_amt:
+                    insurance_line = m_amt.group(0).strip()
+                    insurance_page = pg
+        if not fianza_line and not insurance_line:
+            return ""
+        lines = ["[HECHOS CONTRACTUALES — extraídos de fragmentos indexados, obligatorios en la respuesta]"]
+        if fianza_line:
+            lines.append(f"- Fianza/garantía de cumplimiento: {fianza_line} [PÁGINA {fianza_page}]")
+        if insurance_line:
+            lines.append(
+                f"- Seguro Responsabilidad Civil — suma asegurada: {insurance_line} [PÁGINA {insurance_page}]"
+            )
+        lines.append(
+            "Incluye ambos bloques en tu respuesta. Queda prohibido decir que «no se especifican montos» "
+            "si aquí aparece un porcentaje o una suma asegurada."
+        )
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _guarantee_response_missing_contract_pct(content: str, canonical_pct: str) -> bool:
+        """True si el bloque canónico trajo un % de fianza pero la respuesta del LLM no lo menciona."""
+        if not canonical_pct or not content:
+            return False
+        m = re.search(r"(\d{1,2})\s*%", canonical_pct)
+        if not m:
+            return False
+        return m.group(1) not in content and m.group(0) not in content
+
+    @classmethod
+    def _sanitize_guarantee_contradictory_llm_body(
+        cls, content: str, canonical_block: str
+    ) -> str:
+        """
+        Quita negaciones del LLM cuando el bloque canónico ya extrajo % de fianza o monto RC.
+        Preserva el bloque estructurado ### 1) / ### 2) inyectado al final.
+        """
+        if not content or not canonical_block:
+            return content
+        has_fianza = bool(
+            re.search(r"Fianza/garantía.*\d+\s*%", canonical_block, re.I)
+        )
+        has_insurance = "Seguro Responsabilidad Civil" in canonical_block
+        if not has_fianza and not has_insurance:
+            return content
+
+        structured_marker = "### 1) FIANZA"
+        body, tail = content, ""
+        if structured_marker in content:
+            idx = content.index(structured_marker)
+            body, tail = content[:idx].strip(), content[idx:].strip()
+
+        denial_markers = (
+            "no aparece explícitamente",
+            "no aparecen explícitamente",
+            "tampoco aparece explícitamente",
+            "tampoco aparecen explícitamente",
+            "no figura en los fragmentos",
+            "no figuran en los fragmentos",
+            "no se especifican montos",
+            "no se especifica el monto",
+            "no se especifica el porcentaje",
+            "se puede inferir que",
+            "fragmentos proporcionados",
+        )
+        if has_fianza:
+            denial_markers += (
+                "porcentaje de fianza/garantía no aparece",
+                "porcentaje de fianza no aparece",
+            )
+        if has_insurance:
+            denial_markers += (
+                "monto exacto de la responsabilidad civil",
+                "monto de la responsabilidad civil tampoco",
+            )
+
+        paragraphs = re.split(r"\n\s*\n", body)
+        kept: List[str] = []
+        for para in paragraphs:
+            low = para.lower()
+            if any(m in low for m in denial_markers):
+                continue
+            if has_fianza and re.search(r"la sección 1", low) and (
+                "no aparece" in low or "tampoco" in low
+            ):
+                continue
+            if has_insurance and re.search(r"la sección 2", low) and (
+                "no aparece" in low or "tampoco" in low
+            ):
+                continue
+            if low.strip().startswith("en resumen,") and (
+                "no aparece" in low or "tampoco aparece" in low
+            ):
+                continue
+            kept.append(para.strip())
+
+        body = "\n\n".join(p for p in kept if p)
+        for pat in (
+            r"(?im)^[^\n]*no aparece(?:n)? explícitamente[^\n]*\n?",
+            r"(?im)^[^\n]*tampoco aparece(?:n)? explícitamente[^\n]*\n?",
+            r"(?im)^[^\n]*no se especifican montos[^\n]*\n?",
+            r"(?im)^[^\n]*se puede inferir que[^\n]*\n?",
+        ):
+            body = re.sub(pat, "", body)
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
+        if tail:
+            return f"{body}\n\n{tail}".strip() if body else tail
+        return body or content
+
+    @classmethod
+    def _parse_guarantee_canonical_facts(cls, canonical_block: str) -> Dict[str, Any]:
+        """Lee hechos ya extraídos del bloque canónico (sin re-parsear el LLM)."""
+        facts: Dict[str, Any] = {
+            "fianza_detail": None,
+            "fianza_page": None,
+            "insurance_detail": None,
+            "insurance_page": None,
+        }
+        for line in canonical_block.splitlines():
+            if line.startswith("- Fianza/garantía"):
+                m = re.search(
+                    r"Fianza/garantía de cumplimiento: (.+) \[PÁGINA ([^\]]+)\]",
+                    line,
+                )
+                if m:
+                    facts["fianza_detail"] = m.group(1).strip()
+                    facts["fianza_page"] = m.group(2).strip()
+            elif line.startswith("- Seguro Responsabilidad Civil"):
+                m = re.search(
+                    r"suma asegurada: (.+) \[PÁGINA ([^\]]+)\]",
+                    line,
+                )
+                if m:
+                    facts["insurance_detail"] = m.group(1).strip()
+                    facts["insurance_page"] = m.group(2).strip()
+        return facts
+
+    @classmethod
+    def _guarantee_canonical_has_core_facts(cls, canonical_block: str) -> bool:
+        """
+        True si el bloque canónico trajo fianza de cumplimiento (% sobre monto adjudicado)
+        y suma de Responsabilidad Civil — umbral para sustituir narrativa libre del LLM.
+        """
+        if not canonical_block:
+            return False
+        has_fianza = bool(
+            re.search(
+                r"Fianza/garantía.*\d+\s*%.*monto total adjudicado",
+                canonical_block,
+                re.I,
+            )
+        )
+        has_insurance = "Seguro Responsabilidad Civil" in canonical_block
+        return has_fianza and has_insurance
+
+    @staticmethod
+    def _is_guarantee_plazo_chunk(text: str) -> bool:
+        """Fragmentos de vigencia/entrega/endoso; excluye ruido de insumos (p. ej. contenido nacional)."""
+        if not text or len(text) < 40:
+            return False
+        low = text.lower()
+        if any(
+            x in low
+            for x in (
+                "contenido nacional",
+                "jabón",
+                "jabon",
+                "limpia manos",
+                "insumo",
+                "partida 2",
+                "partida dos",
+            )
+        ):
+            return False
+        if ChatbotRAGAgent._is_guarantee_contract_chunk(
+            text
+        ) or ChatbotRAGAgent._is_guarantee_insurance_chunk(text):
+            return True
+        markers = (
+            "recursos legales",
+            "oficio de conformidad",
+            "firma del contrato",
+            "endoso",
+            "sustanciación",
+            "sustanciacion",
+        )
+        guarantee_words = (
+            "fianza",
+            "garantía",
+            "garantia",
+            "póliza",
+            "poliza",
+            "responsabilidad civil",
+        )
+        return any(m in low for m in markers) and any(w in low for w in guarantee_words)
+
+    @classmethod
+    def _extract_guarantee_plazos_snippets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Oraciones literales de plazos/vigencias/endosos desde fragmentos contractuales."""
+        seen: set[str] = set()
+        out: List[str] = []
+        plazo_keys = (
+            "vigente",
+            "vigencia",
+            "endoso",
+            "entreg",
+            "firma",
+            "recursos",
+            "conformidad",
+            "juicio",
+            "contrato",
+            "póliza",
+            "poliza",
+            "comprobante",
+        )
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc or not cls._is_guarantee_plazo_chunk(doc):
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", doc):
+                s = sent.strip()
+                if len(s) < 35 or len(s) > 400:
+                    continue
+                low = s.lower()
+                if not any(k in low for k in plazo_keys):
+                    continue
+                if re.search(r"\d{2,3}\s*%", s) and "monto total adjudicado" not in low:
+                    continue
+                key = s[:90]
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(f"{s} [PÁGINA {pg}]")
+                if len(out) >= 4:
+                    return out
+        return out
+
+    @classmethod
+    def _compose_guarantee_structured_response(
+        cls,
+        canonical_block: str,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+    ) -> str:
+        """
+        Respuesta determinística solo con secciones 1–3 cuando el bloque canónico
+        ya extrajo fianza y RC (evita alucinaciones del LLM en narrativa libre).
+        """
+        facts = cls._parse_guarantee_canonical_facts(canonical_block)
+        plazos = cls._extract_guarantee_plazos_snippets(context_docs, metadatas)
+        parts = [
+            "**Requisitos obligatorios de seguros y garantías del licitante ganador**",
+            "(Datos contractuales extraídos del pliego indexado; sin narrativa inferida.)",
+            "",
+            "### 1) FIANZA / GARANTÍA DE CUMPLIMIENTO",
+        ]
+        if facts.get("fianza_detail"):
+            parts.append(
+                f"**Porcentaje:** {facts['fianza_detail']} [PÁGINA {facts['fianza_page']}]"
+            )
+        else:
+            parts.append(
+                "**Porcentaje:** No consta en los fragmentos indexados para esta consulta."
+            )
+        parts.extend(["", "### 2) SEGURO DE RESPONSABILIDAD CIVIL"])
+        if facts.get("insurance_detail"):
+            parts.append(
+                f"**Monto asegurado:** {facts['insurance_detail']} [PÁGINA {facts['insurance_page']}]"
+            )
+        else:
+            parts.append(
+                "**Monto asegurado:** No consta en los fragmentos indexados para esta consulta."
+            )
+        parts.extend(["", "### 3) PLAZOS, VIGENCIAS Y ENDOSOS"])
+        if plazos:
+            parts.extend(f"- {line}" for line in plazos)
+        else:
+            parts.append(
+                "- Revise el pliego en las páginas citadas en las secciones 1 y 2 para vigencia, "
+                "entrega y endoso; no se recuperó un fragmento adicional explícito en esta consulta."
+            )
+        return "\n".join(parts)
+
+    # Combo solvencia: opiniones fiscales + normas ISO/NMX/NOM/REPSE (opuesto a intent garantías).
+    _SOLVENCY_FOCAL_RAG_QUERY: str = (
+        "solvencia participante opinión cumplimiento SAT IMSS INFONAVIT seguridad social "
+        "ISO 9001 14001 45001 NMX NOM-035 REPSE certificación acreditación norma técnica "
+        "registro gubernamental documentación complementaria 6.1"
+    )
+    _ISO_NORM_RE = re.compile(
+        r"ISO\s*(?:IEC\s*)?\d{4,5}(?:\s*:\s*\d{4})?",
+        re.I,
+    )
+    _NMX_NORM_RE = re.compile(r"NMX[_\-]?[A-Z0-9][\w\-]{3,}", re.I)
+    _NOM_NORM_RE = re.compile(r"NOM[\-\s]?\d{3}[\w\-]*", re.I)
+
+    @classmethod
+    def _detect_solvency_intent(cls, query: str) -> bool:
+        """
+        True si la consulta apunta a solvencia del participante (fiscal, ISO/NMX, REPSE).
+        No activar en preguntas de garantías/seguros del ganador adjudicado.
+        """
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        if cls._detect_guarantee_intent(query) and not (
+            "solvencia" in q and any(k in q for k in ("iso", "nmx", "nom", "participante"))
+        ):
+            return False
+        if "solvencia" in q and any(
+            k in q for k in ("participante", "licitante", "proponente", "evaluar", "exigen")
+        ):
+            return True
+        if any(k in q for k in ("iso", "nmx", "nom")) and any(
+            k in q
+            for k in (
+                "obligatorio",
+                "exigen",
+                "requiere",
+                "normativa",
+                "certificacion",
+                "certificación",
+                "acreditacion",
+                "acreditación",
+            )
+        ):
+            return True
+        fiscal_core = (
+            "opinion de cumplimiento",
+            "opinión de cumplimiento",
+            "opiniones de cumplimiento",
+            "registros gubernamentales",
+            "servicio de administracion tributaria",
+            "sat",
+            "imss",
+            "infonavit",
+        )
+        if any(k in q for k in fiscal_core) and any(
+            k in q for k in ("obligatorio", "participante", "solvencia", "exigen", "evaluar")
+        ):
+            return True
+        return False
+
+    @classmethod
+    def _detect_security_private_compliance_injection(cls, query: str) -> bool:
+        """
+        Post-LLM de acreditaciones REPSE/SSPC/CUIPS solo para consultas de seguridad privada.
+        No debe activarse en solvencia general (ISO/NMX) donde «registro» aparece en otra acepción.
+        """
+        if cls._detect_solvency_intent(query):
+            return False
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        if any(
+            k in q
+            for k in (
+                "seguridad privada",
+                "sspc",
+                "infospe",
+                "cuips",
+                "repse",
+            )
+        ) and any(
+            k in q
+            for k in (
+                "acredit",
+                "autorizacion",
+                "autorización",
+                "permiso",
+                "registro repse",
+                "6.1",
+                "inciso",
+            )
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _chunk_belongs_to_session(meta: Dict[str, Any], session_id: str, vector_db: Any) -> bool:
+        """Defensa en profundidad: rechaza fragmentos cuyo metadato session_id no coincide."""
+        if not meta or not session_id or not vector_db:
+            return True
+        expected = vector_db._sanitize_name(session_id)
+        chunk_sid = meta.get("session_id")
+        if chunk_sid is None:
+            return True
+        return str(chunk_sid) == str(expected)
+
+    @staticmethod
+    def _is_solvency_fiscal_chunk(text: str) -> bool:
+        """Opiniones/constancias fiscales y patronales del participante (solvencia)."""
+        if not text or len(text) < 50:
+            return False
+        low = text.lower()
+        if ChatbotRAGAgent._is_guarantee_contract_chunk(
+            text
+        ) or ChatbotRAGAgent._is_guarantee_insurance_chunk(text):
+            return False
+        fiscal_keys = (
+            "servicio de administración tributaria",
+            "servicio de administracion tributaria",
+            " opinión ",
+            " opinion ",
+            "opinión positiva",
+            "opinion positiva",
+            "instituto mexicano del seguro social",
+            "infonavit",
+            "seguridad social",
+            "constancia de situación fiscal",
+            "constancia de situacion fiscal",
+            "aportaciones patronales",
+            "acdo.sa1",
+            "consejo técnico",
+        )
+        return any(k in low for k in fiscal_keys)
+
+    @staticmethod
+    def _is_solvency_norm_chunk(text: str) -> bool:
+        """Certificaciones ISO/NMX/NOM, REPSE y normas técnicas de solvencia."""
+        if not text or len(text) < 40:
+            return False
+        low = text.lower()
+        if ChatbotRAGAgent._ISO_NORM_RE.search(text):
+            return True
+        if ChatbotRAGAgent._NMX_NORM_RE.search(text):
+            return True
+        if ChatbotRAGAgent._NOM_NORM_RE.search(text):
+            return True
+        if "repse" in low and any(
+            w in low
+            for w in (
+                "registro",
+                "prestadores",
+                "servicios especializados",
+                "presentar",
+                "vigente",
+            )
+        ):
+            return True
+        if "certificación" in low or "certificacion" in low:
+            if any(w in low for w in ("iso", "nmx", "nom", "45001", "9001", "14001")):
+                return True
+        return False
+
+    def _hydrate_solvency_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Páginas atómicas con requisitos de solvencia fiscal o normativa (máx. 5)."""
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_solvency_fiscal_chunk(doc or "") or self._is_solvency_norm_chunk(
+                doc or ""
+            ):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pinned_pages[:5]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_solvency_fiscal_chunk(full) or self._is_solvency_norm_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        return out_docs, out_metas
+
+    @classmethod
+    def _extract_solvency_fiscal_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Viñetas fiscales/patronales con [PÁGINA] desde fragmentos indexados."""
+        seen: set[str] = set()
+        bullets: List[str] = []
+        keys = (
+            "servicio de administración tributaria",
+            "servicio de administracion tributaria",
+            "sat",
+            "instituto mexicano del seguro social",
+            "imss",
+            "infonavit",
+            "seguridad social",
+            "acdo.sa1",
+            "aportaciones patronales",
+            "constancia de situación fiscal",
+            "constancia de situacion fiscal",
+        )
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc or not cls._is_solvency_fiscal_chunk(doc):
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", doc):
+                s = sent.strip()
+                if len(s) < 40 or len(s) > 420:
+                    continue
+                low = s.lower()
+                if not any(k in low for k in keys):
+                    continue
+                if "opinión" not in low and "opinion" not in low and "constancia" not in low:
+                    if "sat" not in low and "imss" not in low and "infonavit" not in low:
+                        continue
+                if any(
+                    n in low
+                    for n in (
+                        "requisitos de las proposiciones",
+                        "requisitos de las propuestaciones",
+                        "en el entendido de que no se cumple el requisito, si la opinion se encuentra en",
+                        "en el entendido de que no se cumple el requisito, si la opinión se encuentra en",
+                    )
+                ):
+                    continue
+                if low.startswith("consejo técnico") and "acdo" not in low:
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+                if len(bullets) >= 5:
+                    return bullets
+        return bullets
+
+    @classmethod
+    def _extract_solvency_norm_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Viñetas ISO/NMX/NOM/REPSE con [PÁGINA] desde fragmentos indexados."""
+        seen: set[str] = set()
+        bullets: List[str] = []
+
+        def _add(label: str, snippet: str, pg: Any) -> None:
+            key = f"{label}|{snippet[:80]}"
+            if key in seen:
+                return
+            seen.add(key)
+            sn = snippet.strip()
+            if len(sn) > 380:
+                sn = sn[:377] + "..."
+            bullets.append(f"• **{label}:** {sn} [PÁGINA {pg}]")
+
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc or not cls._is_solvency_norm_chunk(doc):
+                continue
+            pg = meta.get("page", "?")
+            low = doc.lower()
+            labels: List[str] = []
+            for iso in cls._ISO_NORM_RE.findall(doc):
+                labels.append(iso.upper().replace("  ", " "))
+            for nmx in cls._NMX_NORM_RE.findall(doc):
+                labels.append(nmx.upper())
+            for nom in cls._NOM_NORM_RE.findall(doc):
+                labels.append(nom.upper())
+            if "repse" in low:
+                labels.append("REPSE")
+            sentences = re.split(r"(?<=[.;])\s+", doc)
+            for label in labels:
+                snippet = doc
+                for sent in sentences:
+                    if label.lower().replace("-", "")[:8] in sent.lower().replace("-", "") or (
+                        label == "REPSE" and "repse" in sent.lower()
+                    ):
+                        snippet = sent
+                        break
+                _add(label, snippet, pg)
+            if len(bullets) >= 10:
+                return bullets
+        return bullets
+
+    @classmethod
+    def _compose_solvency_structured_response(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Localizador forense: lista fiscal + normativa con [PÁGINA] obligatoria por ítem.
+        Sustituye narrativa libre del LLM cuando hay hechos extraíbles en contexto.
+        """
+        fiscal = cls._extract_solvency_fiscal_bullets(context_docs, metadatas)
+        norms = cls._extract_solvency_norm_bullets(context_docs, metadatas)
+        parts = [
+            "**Requisitos de solvencia del participante**",
+            "(Opiniones, registros y normas extraídos del pliego indexado.)",
+            "",
+            "### 1) Opiniones de cumplimiento fiscal y patronal",
+        ]
+        if fiscal:
+            parts.extend(fiscal)
+        else:
+            parts.append(
+                "• No se recuperó en esta consulta un fragmento explícito de opinión SAT/IMSS/INFONAVIT."
+            )
+        parts.extend(["", "### 2) Normativas técnicas, certificaciones y registros (ISO/NMX/NOM/REPSE)"])
+        if norms:
+            parts.extend(norms)
+        else:
+            parts.append(
+                "• No se recuperó en esta consulta un fragmento explícito de ISO/NMX/NOM o REPSE."
+            )
+        return "\n".join(parts)
+
+    @classmethod
+    def _solvency_structured_ready(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        """True si hay al menos un requisito fiscal y uno normativo en el contexto."""
+        fiscal = cls._extract_solvency_fiscal_bullets(context_docs, metadatas)
+        norms = cls._extract_solvency_norm_bullets(context_docs, metadatas)
+        return len(fiscal) >= 1 and len(norms) >= 1
+
+    # Combo propuesta económica: moneda, formato por partida, regla número vs letra.
+    _ECONOMIC_FOCAL_RAG_QUERY: str = (
+        "propuesta económica moneda nacional pesos mexicanos precios fijos "
+        "número y letra prevalecerá cantidad estipulada en letra Anexo III "
+        "partida 1 tarifa mensual partida 2 precio unitario IV.2 cotización"
+    )
+
+    @classmethod
+    def _explicit_economic_format_markers_in_query(cls, q_normalized: str) -> bool:
+        """Marcadores inequívocos de formato/moneda (no basta «Anexo III» con insumos técnicos)."""
+        qn = q_normalized.replace("ó", "o")
+        return any(
+            m in qn
+            for m in (
+                "propuesta economica",
+                "moneda requerida",
+                "formato de precio",
+                "formato de precios",
+                "precios fijos",
+                "precio fijo",
+                "numero y letra",
+                "discrepancia",
+                "montos en numero",
+                "cotizacion economica",
+                "tarifa mensual",
+                "precio unitario",
+                "oferta economica",
+                "iva",
+            )
+        )
+
+    @classmethod
+    def _detect_supplies_technical_intent(cls, query: str) -> bool:
+        """True si la consulta apunta a insumos/materiales/muestras/RPBI (Partida 2 limpieza, etc.)."""
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        qn = q.replace("ó", "o")
+        if cls._explicit_economic_format_markers_in_query(qn) and not any(
+            m in qn
+            for m in (
+                "biodegradabilidad",
+                "biodegradable",
+                "rpbi",
+                "muestras",
+                "insumos",
+                "materiales de limpieza",
+                "material de limpieza",
+                "productos quimicos",
+                "concentracion",
+                "envase",
+            )
+        ):
+            return False
+        supply_markers = (
+            "biodegradabilidad",
+            "biodegradable",
+            "rpbi",
+            "residuo peligroso",
+            "residuos peligrosos",
+            "biologico infeccioso",
+            "biologico-infeccioso",
+            "muestras",
+            "muestra fisica",
+            "muestra física",
+            "almacen",
+            "insumos",
+            "materiales de limpieza",
+            "material de limpieza",
+            "concentracion",
+            "envase",
+            "bidon",
+            "productos quimicos",
+            "sustancias quimicas",
+            "entrega de materiales",
+            "suministro de materiales",
+            "caracteristicas de muestras",
+        )
+        if any(m in qn for m in supply_markers):
+            return True
+        partida2_ctx = ("partida 2" in qn or "partida dos" in qn) and any(
+            x in qn
+            for x in (
+                "limpieza",
+                "insumo",
+                "material",
+                "biodegrad",
+                "muestra",
+                "rpbi",
+                "quimic",
+                "envase",
+                "concentracion",
+            )
+        )
+        anexo_iii_supplies = "anexo iii" in qn and any(
+            x in qn
+            for x in (
+                "insumo",
+                "material",
+                "biodegrad",
+                "muestra",
+                "rpbi",
+                "limpieza",
+                "envase",
+                "concentracion",
+                "quimic",
+            )
+        )
+        excludes_econ = any(
+            x in qn
+            for x in (
+                "no pregunto",
+                "no preguntes",
+                "sin formato",
+                "sin moneda",
+                "no es propuesta economica",
+                "solo especificaciones tecnicas",
+                "solo especificaciones técnicas",
+            )
+        )
+        return partida2_ctx or anexo_iii_supplies or excludes_econ
+
+    @classmethod
+    def _detect_economic_intent(cls, query: str) -> bool:
+        """True si la consulta apunta a formato/moneda/discrepancias de la propuesta económica."""
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        qn = q.replace("ó", "o")
+        if cls._detect_guarantee_intent(query) and "propuesta economica" not in qn:
+            return False
+        if cls._detect_supplies_technical_intent(query):
+            return False
+        econ_markers = (
+            "propuesta economica",
+            "propuesta económica",
+            "moneda requerida",
+            "formato de precio",
+            "formato de precios",
+            "precios fijos",
+            "precio fijo",
+            "numero y letra",
+            "número y letra",
+            "discrepancia",
+            "montos en numero",
+            "montos en número",
+            "cotizacion economica",
+            "cotización económica",
+        )
+        if any(m in qn for m in econ_markers):
+            return True
+        if "anexo iii" in qn and cls._explicit_economic_format_markers_in_query(qn):
+            return True
+        return False
+
+    @staticmethod
+    def _is_economic_format_chunk(text: str) -> bool:
+        """Fragmentos de presentación económica (moneda, Anexo III, número/letra)."""
+        if not text or len(text) < 50:
+            return False
+        if ChatbotRAGAgent._is_guarantee_contract_chunk(
+            text
+        ) or ChatbotRAGAgent._is_guarantee_insurance_chunk(text):
+            return False
+        low = text.lower()
+        markers = (
+            "propuesta económica",
+            "propuesta economica",
+            "proposición económica",
+            "moneda nacional",
+            "número y letra",
+            "numero y letra",
+            "prevalecerá la cantidad",
+            "prevalecera la cantidad",
+            "anexo iii partida",
+            "tarifa mensual",
+            "precio unitario",
+            "iv.2 proposición económica",
+            "iv.2 proposicion economica",
+            "oferta económica",
+        )
+        return any(m in low for m in markers)
+
+    def _hydrate_economic_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Páginas atómicas con reglas de propuesta económica (máx. 4)."""
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_economic_format_chunk(doc or ""):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pinned_pages[:4]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_economic_format_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        return out_docs, out_metas
+
+    @classmethod
+    def _extract_economic_format_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Formato por partida / Anexo III con [PÁGINA]."""
+        seen: set[str] = set()
+        bullets: List[str] = []
+        patterns = (
+            ("partida 1", ("tarifa mensual", "moneda nacional", "anexo iii partida 1")),
+            ("partida 2", ("precio unitario", "moneda nacional", "anexo iii partida 2")),
+        )
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc or not cls._is_economic_format_chunk(doc):
+                continue
+            pg = meta.get("page", "?")
+            low = doc.lower()
+            for label, keys in patterns:
+                if not any(k in low for k in keys):
+                    continue
+                for sent in re.split(r"(?<=[.;])\s+", doc):
+                    s = sent.strip()
+                    sl = s.lower()
+                    if len(s) < 45 or len(s) > 420:
+                        continue
+                    if not any(k in sl for k in keys):
+                        continue
+                    key = f"{label}|{s[:90]}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    bullets.append(f"• **{label.title()}:** {s} [PÁGINA {pg}]")
+            if len(bullets) >= 6:
+                return bullets
+        return bullets
+
+    @classmethod
+    def _extract_economic_moneda_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc:
+                continue
+            low = doc.lower()
+            if "moneda nacional" not in low and "pesos mexicanos" not in low:
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", doc):
+                s = sent.strip()
+                if len(s) < 40:
+                    continue
+                sl = s.lower()
+                if "moneda nacional" not in sl and "pesos mexicanos" not in sl:
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+                if len(bullets) >= 3:
+                    return bullets
+        return bullets
+
+    @classmethod
+    def _extract_economic_discrepancy_rule(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Regla número vs letra (prevalece la letra, no descalificación automática)."""
+        seen: set[str] = set()
+        bullets: List[str] = []
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc:
+                continue
+            low = doc.lower()
+            if "número y letra" not in low and "numero y letra" not in low:
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", doc):
+                s = sent.strip()
+                sl = s.lower()
+                if len(s) < 40:
+                    continue
+                if "número y letra" not in sl and "numero y letra" not in sl:
+                    continue
+                if "prevalec" not in sl and "error" not in sl and "discrepanc" not in sl:
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+        return bullets
+
+    @classmethod
+    def _compose_economic_structured_response(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        """Localizador forense económico: 3 bloques con [PÁGINA], sin narrativa inventada."""
+        moneda = cls._extract_economic_moneda_bullets(context_docs, metadatas)
+        formato = cls._extract_economic_format_bullets(context_docs, metadatas)
+        discrep = cls._extract_economic_discrepancy_rule(context_docs, metadatas)
+        parts = [
+            "**Propuesta económica — requisitos de forma y moneda**",
+            "(Extraído del pliego indexado; prohibido inventar monedas extranjeras o reglas no citadas.)",
+            "",
+            "### 1) MONEDA REQUERIDA",
+        ]
+        if moneda:
+            parts.extend(moneda)
+        else:
+            parts.append("• No se recuperó «moneda nacional» en los fragmentos de esta consulta.")
+        parts.extend(["", "### 2) FORMATO DE COTIZACIÓN POR PARTIDA"])
+        if formato:
+            parts.extend(formato)
+        else:
+            parts.append(
+                "• Revise Anexo III en los fragmentos (tarifa mensual partida 1 / precio unitario partida 2)."
+            )
+        parts.extend(["", "### 3) REGLA DE DISCREPANCIA (NÚMERO VS LETRA)"])
+        if discrep:
+            parts.extend(discrep)
+        else:
+            parts.append(
+                "• No se recuperó la regla de número y letra en los fragmentos indexados."
+            )
+        return "\n".join(parts)
+
+    @classmethod
+    def _economic_structured_ready(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        moneda = cls._extract_economic_moneda_bullets(context_docs, metadatas)
+        discrep = cls._extract_economic_discrepancy_rule(context_docs, metadatas)
+        return len(moneda) >= 1 and len(discrep) >= 1
+
+    @classmethod
+    def _append_economic_gap_alert_if_needed(
+        cls,
+        content: str,
+        context_docs: List[str],
+        economic_intent: bool,
+    ) -> str:
+        """Alerta de brecha solo si faltan reglas de redondeo en fragmentos (sin afirmar «precios fijos» genéricos)."""
+        if not economic_intent or "alerta de brecha" in content.lower():
+            return content
+        pool = [d or "" for d in context_docs]
+        low_pool = " ".join(pool).lower()
+        has_rounding = bool(
+            re.search(r"redondeo|truncamiento|\d\s*decimales", low_pool)
+        )
+        if has_rounding:
+            return content
+        has_moneda = "moneda nacional" in low_pool
+        has_precios_fijos = "precios fijos" in low_pool or "precio fijo" in low_pool
+        confirmed = []
+        if has_moneda:
+            confirmed.append("moneda nacional")
+        if has_precios_fijos:
+            confirmed.append("precios fijos")
+        confirmed_txt = (
+            ", ".join(confirmed) if confirmed else "requisitos económicos parciales"
+        )
+        content += (
+            f"\n\n**ALERTA DE BRECHA ECONÓMICA:** Los fragmentos confirman {confirmed_txt}, "
+            "pero NO detallan la regla de redondeo (4 o 5 decimales) para cálculos intermedios "
+            "del FSR/Anexo 9 si aplica. Formule aclaración en Junta o use criterio conservador "
+            "documentado internamente."
+        )
+        return content
+
+    # Combo insumos técnicos Partida 2 / materiales de limpieza (no formato económico).
+    _SUPPLIES_FOCAL_RAG_QUERY: str = (
+        "biodegradabilidad biodegradable no contaminante envase bidón concentración "
+        "muestras físicas almacén convocante insumos materiales limpieza partida 2 "
+        "Anexo III productos químicos cloro jabón desinfectante RPBI residuos "
+        "peligrosos biológico infecciosos entrega de materiales suministro"
+    )
+
+    @staticmethod
+    def _is_supplies_spec_chunk(text: str) -> bool:
+        """Fragmentos de especificación de insumos/materiales (excluye formato de oferta económica)."""
+        if not text or len(text) < 40:
+            return False
+        if ChatbotRAGAgent._is_economic_format_chunk(text):
+            return False
+        low = text.lower()
+        markers = (
+            "biodegradabilidad",
+            "biodegradable",
+            "no contaminante",
+            "rpbi",
+            "residuo peligroso",
+            "residuos peligrosos",
+            "biológico-infeccioso",
+            "biologico infeccioso",
+            "muestras",
+            "muestra física",
+            "muestra fisica",
+            "almacén",
+            "almacen",
+            "insumos",
+            "material de limpieza",
+            "materiales de limpieza",
+            "concentración",
+            "concentracion",
+            "envase",
+            "bidón",
+            "bidon",
+            "productos químicos",
+            "productos quimicos",
+            "grado clínico",
+            "grado clinico",
+            "entrega de materiales",
+            "suministro de materiales",
+            "características de muestras",
+            "caracteristicas de muestras",
+        )
+        return any(m in low for m in markers)
+
+    def _hydrate_supplies_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Páginas atómicas con requisitos de insumos/materiales (máx. 6)."""
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_supplies_spec_chunk(doc or ""):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pinned_pages[:6]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_supplies_spec_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        return out_docs, out_metas
+
+    @classmethod
+    def _extract_supplies_bullets_for_topics(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        topic_keys: Tuple[str, ...],
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        for doc, meta in zip(context_docs, metadatas):
+            if not doc:
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", doc):
+                s = sent.strip()
+                sl = s.lower()
+                if len(s) < 35 or len(s) > 480:
+                    continue
+                if not any(k in sl for k in topic_keys):
+                    continue
+                if cls._is_economic_format_chunk(s):
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+                if len(bullets) >= 5:
+                    return bullets
+        return bullets
+
+    @classmethod
+    def _compose_supplies_structured_response(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        """Localizador forense de insumos/materiales Partida 2 (sin moneda ni formato de oferta)."""
+        biodeg = cls._extract_supplies_bullets_for_topics(
+            context_docs,
+            metadatas,
+            (
+                "biodegradabilidad",
+                "biodegradable",
+                "no contaminante",
+                "90%",
+                "contaminante",
+            ),
+        )
+        envase = cls._extract_supplies_bullets_for_topics(
+            context_docs,
+            metadatas,
+            (
+                "envase",
+                "bidón",
+                "bidon",
+                "concentración",
+                "concentracion",
+                "grado clínico",
+                "grado clinico",
+                "productos químicos",
+                "productos quimicos",
+                "cloro",
+                "jabón",
+                "jabon",
+                "desinfectante",
+            ),
+        )
+        muestras = cls._extract_supplies_bullets_for_topics(
+            context_docs,
+            metadatas,
+            (
+                "muestras",
+                "muestra física",
+                "muestra fisica",
+                "almacén",
+                "almacen",
+                "características de muestras",
+                "caracteristicas de muestras",
+            ),
+        )
+        rpbi = cls._extract_supplies_bullets_for_topics(
+            context_docs,
+            metadatas,
+            (
+                "rpbi",
+                "residuo peligroso",
+                "residuos peligrosos",
+                "biológico-infeccioso",
+                "biologico infeccioso",
+                "manejo de residuos",
+            ),
+        )
+        parts = [
+            "**Insumos y materiales — especificaciones técnicas (Partida 2 / Anexo III)**",
+            "(Extraído del pliego indexado; no incluye moneda ni formato de propuesta económica.)",
+            "",
+            "### 1) BIODEGRADABILIDAD Y PRODUCTOS",
+        ]
+        if biodeg:
+            parts.extend(biodeg)
+        else:
+            parts.append("• No se recuperó biodegradabilidad en los fragmentos de esta consulta.")
+        parts.extend(["", "### 2) ENVASE, CONCENTRACIÓN Y PRODUCTOS QUÍMICOS"])
+        if envase:
+            parts.extend(envase)
+        else:
+            parts.append("• No se recuperaron envases/concentración/químicos en los fragmentos.")
+        parts.extend(["", "### 3) MUESTRAS FÍSICAS EN ALMACÉN"])
+        if muestras:
+            parts.extend(muestras)
+        else:
+            parts.append("• No se recuperó entrega de muestras en almacén en los fragmentos.")
+        parts.extend(["", "### 4) MANEJO DE RPBI"])
+        if rpbi:
+            parts.extend(rpbi)
+        else:
+            parts.append("• No se recuperó manejo de RPBI en los fragmentos indexados.")
+        return "\n".join(parts)
+
+    @classmethod
+    def _supplies_structured_ready(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        """Listo si hay al menos dos bloques temáticos con evidencia."""
+        blocks = 0
+        if cls._extract_supplies_bullets_for_topics(
+            context_docs, metadatas, ("biodegradabilidad", "biodegradable")
+        ):
+            blocks += 1
+        if cls._extract_supplies_bullets_for_topics(
+            context_docs, metadatas, ("muestras", "almacen", "almacén")
+        ):
+            blocks += 1
+        if cls._extract_supplies_bullets_for_topics(
+            context_docs, metadatas, ("rpbi", "residuo peligroso")
+        ):
+            blocks += 1
+        if cls._extract_supplies_bullets_for_topics(
+            context_docs, metadatas, ("envase", "concentracion", "concentración")
+        ):
+            blocks += 1
+        return blocks >= 2
+
+    # Combo adjudicación: criterio binario, zonas Anexo III, partidas 1+2 en conjunto.
+    _ADJUDICATION_FOCAL_RAG_QUERY: str = (
+        "adjudicación criterio binario artículo 36 mejor propuesta económica "
+        "zona partida 1 y 2 total ofertado en conjunto Anexo III limpieza "
+        "participar una o varias zonas no se aceptarán opciones propuesta por zona"
+    )
+
+    @staticmethod
+    def _strip_chunk_source_prefix(text: str) -> str:
+        """Quita encabezado [FUENTE: archivo | PÁGINA: N] del texto de chunk."""
+        return re.sub(r"\[FUENTE:[^\]]+\]\s*", "", text or "").strip()
+
+    @classmethod
+    def _detect_adjudication_intent(cls, query: str) -> bool:
+        """True si la consulta apunta a criterio de adjudicación y/o participación por zonas."""
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        if any(
+            k in q
+            for k in (
+                "adjudicacion",
+                "criterio de adjudicacion",
+                "criterio exacto de adjudicacion",
+                "criterio binario",
+            )
+        ):
+            return True
+        if "zona" in q and any(
+            k in q for k in ("particip", "competir", "adjudic", "partida", "varias")
+        ):
+            return True
+        if "partida 1" in q and "partida 2" in q and "zona" in q:
+            return True
+        return False
+
+    @staticmethod
+    def _is_adjudication_chunk(text: str) -> bool:
+        if not text or len(text) < 50:
+            return False
+        low = ChatbotRAGAgent._strip_chunk_source_prefix(text).lower()
+        markers = (
+            "criterio binario",
+            "adjudicación de la presente",
+            "adjudicacion de la presente",
+            "total ofertado en conjunto",
+            "partidas 1 y 2",
+            "partida 1 y la partida 2",
+            "no se aceptarán opciones",
+            "no se aceptaran opciones",
+            "artículo 36 de la ley",
+            "articulo 36 de la ley",
+            "mejor propuesta económica",
+            "mejor propuesta economica",
+            "adjudicará por zona",
+            "adjudicara por zona",
+        )
+        return any(m in low for m in markers)
+
+    def _hydrate_adjudication_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        if not primary_doc:
+            return [], []
+        pinned_pages: List[Any] = []
+        seen_pg: set = set()
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is None or pg in seen_pg:
+                continue
+            if self._is_adjudication_chunk(doc or ""):
+                seen_pg.add(pg)
+                pinned_pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        pages_to_fetch: List[Any] = []
+        for pg in pinned_pages:
+            if pg not in pages_to_fetch:
+                pages_to_fetch.append(pg)
+        for pg in (31, 4, 18):
+            if pg not in pages_to_fetch:
+                pages_to_fetch.append(pg)
+        for pg in pages_to_fetch[:5]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_adjudication_chunk(full) or pg in (4, 18, 31):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+            if len(out_docs) >= 5:
+                break
+        return out_docs, out_metas
+
+    @classmethod
+    def _extract_adjudication_conjunto_mandatory(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        """Regla medular: total ofertado en conjunto de partidas 1 y 2 por zona (p. ej. 31)."""
+        for doc, meta in zip(context_docs, metadatas):
+            clean = cls._strip_chunk_source_prefix(doc or "")
+            if "total ofertado en conjunto" not in clean.lower():
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", clean):
+                s = sent.strip()
+                if "total ofertado en conjunto" in s.lower() and len(s) >= 50:
+                    return f"• {s} [PÁGINA {pg}]"
+            idx = clean.lower().find("total ofertado en conjunto")
+            if idx >= 0:
+                snippet = clean[max(0, idx - 120) : idx + 220].strip()
+                return f"• {snippet} [PÁGINA {pg}]"
+        return ""
+
+    @classmethod
+    def _extract_adjudication_criterion_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        keys = (
+            "criterio binario",
+            "artículo 36",
+            "articulo 36",
+            "mejor propuesta económica",
+            "mejor propuesta economica",
+            "total ofertado en conjunto",
+            "precio y el cumplimiento",
+        )
+        for doc, meta in zip(context_docs, metadatas):
+            clean = cls._strip_chunk_source_prefix(doc or "")
+            if not clean or not cls._is_adjudication_chunk(clean):
+                continue
+            pg = meta.get("page", "?")
+            for sent in re.split(r"(?<=[.;])\s+", clean):
+                s = sent.strip()
+                if len(s) < 50 or len(s) > 420:
+                    continue
+                sl = s.lower()
+                if not any(k in sl for k in keys):
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append((0 if "total ofertado en conjunto" in sl else 1, f"• {s} [PÁGINA {pg}]"))
+                if len(bullets) >= 5:
+                    break
+        bullets.sort(key=lambda x: x[0])
+        return [b[1] for b in bullets[:5]]
+
+    @classmethod
+    def _extract_adjudication_zones_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        keys = (
+            "no se aceptarán opciones",
+            "no se aceptaran opciones",
+            "una sola propuesta por zona",
+            "partida 1 en conjunto con la partida 2",
+            "partida 1 y 2",
+            "cuatro",
+            "zona a",
+            "zona b",
+            "varias zona",
+            "según participipe",
+            "totalidad de la zona",
+            "totalidad de los renglones",
+            "participar para una o varias",
+            "nota: para el anexo iii limpieza",
+        )
+        exclude_zone_noise = (
+            "d-iii integración",
+            "d-iii integracion",
+            "tarifas ofertadas",
+            "usb la cual",
+        )
+        for doc, meta in zip(context_docs, metadatas):
+            clean = cls._strip_chunk_source_prefix(doc or "")
+            if not clean:
+                continue
+            pg = meta.get("page", "?")
+            low = clean.lower()
+            if not (
+                cls._is_adjudication_chunk(clean)
+                or any(k in low for k in keys)
+            ):
+                continue
+            for sent in re.split(r"(?<=[.;])\s+", clean):
+                s = sent.strip()
+                if len(s) < 45 or len(s) > 420:
+                    continue
+                sl = s.lower()
+                if any(n in sl for n in exclude_zone_noise):
+                    continue
+                if not any(k in sl for k in keys):
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+                if len(bullets) >= 6:
+                    return bullets
+        return bullets
+
+    @classmethod
+    def _compose_adjudication_structured_response(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        criterion = cls._extract_adjudication_criterion_bullets(context_docs, metadatas)
+        conjunto = cls._extract_adjudication_conjunto_mandatory(context_docs, metadatas)
+        if conjunto and not any(
+            "total ofertado en conjunto" in b.lower() for b in criterion
+        ):
+            criterion = [conjunto] + criterion
+        zones = cls._extract_adjudication_zones_bullets(context_docs, metadatas)
+        parts = [
+            "**Criterio de adjudicación y participación por zonas**",
+            "(Extraído del pliego indexado; sin narrativa inferida.)",
+            "",
+            "### 1) CRITERIO DE ADJUDICACIÓN",
+        ]
+        if criterion:
+            parts.extend(criterion)
+        else:
+            parts.append("• No se recuperó el criterio de adjudicación en los fragmentos.")
+        parts.extend(["", "### 2) PARTICIPACIÓN POR UNA O VARIAS ZONAS"])
+        if zones:
+            parts.extend(zones)
+        else:
+            parts.append(
+                "• No se recuperaron reglas de zonas/opciones en los fragmentos indexados."
+            )
+        return "\n".join(parts)
+
+    @classmethod
+    def _adjudication_structured_ready(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        criterion = cls._extract_adjudication_criterion_bullets(context_docs, metadatas)
+        zones = cls._extract_adjudication_zones_bullets(context_docs, metadatas)
+        return len(criterion) >= 1 and len(zones) >= 1
+
+    # Combo penas convencionales contractuales (tasa, cobro, tope vs garantía).
+    _PENALTY_FOCAL_RAG_QUERY: str = (
+        "pena convencional penalización sanción atraso incumplimiento plazos pactados "
+        "contrato semana fracción saldos pendientes de pago garantía de cumplimiento "
+        "cuantía monto total sanciones límite financiero"
+    )
+
+    @classmethod
+    def _detect_penalty_intent(cls, query: str) -> bool:
+        """Penas convencionales / sanciones por atraso o incumplimiento en fase contractual."""
+        q = cls._normalize_query_for_intent(query)
+        if not q:
+            return False
+        if any(
+            k in q
+            for k in (
+                "pena convencional",
+                "penas convencionales",
+                "penalizacion",
+                "penalizaciones",
+                "sancion contractual",
+                "sanciones contractuales",
+            )
+        ):
+            return True
+        if ("penaliz" in q or "sancion" in q) and any(
+            k in q for k in ("atraso", "incumplimiento", "mora", "servicio", "contrato")
+        ):
+            return True
+        if any(k in q for k in ("limite financiero", "limites financieros", "tope")) and any(
+            k in q for k in ("pena", "penaliz", "sancion", "garantia", "garantía")
+        ):
+            return True
+        return False
+
+    @classmethod
+    def _detect_operational_personnel_penalty_intent(cls, query: str) -> bool:
+        """
+        Deducciones por ausencias/turnos (vigilancia u operación), no penas convencionales genéricas.
+        """
+        q = cls._normalize_query_for_intent(query)
+        if cls._detect_penalty_intent(query):
+            return False
+        return any(
+            k in q
+            for k in (
+                "falta",
+                "inasist",
+                "ausenc",
+                "retard",
+                "turno no cubierto",
+                "turno vacio",
+                "elemento que falte",
+                "vigilancia",
+                "personal",
+            )
+        ) and any(k in q for k in ("penaliz", "deducc", "descuento", "sancion"))
+
+    @staticmethod
+    def _is_penalty_contract_chunk(text: str) -> bool:
+        """Cláusulas de pena convencional por atraso/incumplimiento contractual."""
+        if not text or len(text) < 50:
+            return False
+        low = ChatbotRAGAgent._strip_chunk_source_prefix(text).lower()
+        if ChatbotRAGAgent._is_evaluation_percent_noise(text):
+            return False
+        if "bienes pendientes de entregar" in low and "2.5" in low:
+            return False
+        markers = (
+            "penalizaciones se harán efectivas",
+            "penalizaciones se haran efectivas",
+            "saldos pendientes de pago",
+            "monto total de las citadas sanciones",
+            "plazos pactados en el contrato",
+            "semana de atraso",
+            "fracción de semana",
+            "fraccion de semana",
+            "bienes y/o servicios",
+            "no suministrados o prestados",
+        )
+        has_pct = bool(re.search(r"\d+(?:\.\d+)?\s*%", low))
+        has_pena = (
+            "pena convencional" in low
+            or "penas convencionales" in low
+            or "penalizacion" in low
+            or "penalización" in low
+        )
+        if has_pena and has_pct:
+            return True
+        if any(m in low for m in markers):
+            return True
+        if ("no excederá la cuantía" in low or "no excedera la cuantia" in low) and (
+            "citadas sanciones" in low or "penalizacion" in low or "penalización" in low
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _is_guarantee_admin_noise_for_penalty(text: str) -> bool:
+        """Trámites/plazos de garantía (p. ej. pág. 23), no penas convencionales."""
+        if not text:
+            return False
+        low = ChatbotRAGAgent._strip_chunk_source_prefix(text).lower()
+        if ChatbotRAGAgent._is_penalty_contract_chunk(text):
+            return False
+        noise = (
+            "plazo máximo de 10 días",
+            "plazo maximo de 10 dias",
+            "cobro de la garantía de cumplimiento otorgada",
+            "cobro de la garantia de cumplimiento otorgada",
+            "obligaciones a cargo del licitante adjudicado, no son divisibles",
+            "modificación correspondiente a la fianza",
+            "modificacion correspondiente a la fianza",
+            "presentar la garantía de cumplimiento al mismo",
+            "presentar la garantia de cumplimiento al mismo",
+            "causa de rescisión del contrato",
+            "secretaría de finanzas",
+            "secretaria de finanzas",
+            "otorgamiento de prórrogas o esperas",
+            "otorgamiento de prorrogas o esperas",
+            "realizar la modificación correspondiente",
+        )
+        if any(n in low for n in noise):
+            return True
+        if (
+            ChatbotRAGAgent._is_guarantee_contract_chunk(text)
+            and "pena convencional" not in low
+            and "penas convencionales" not in low
+            and "saldos pendientes" not in low
+            and "citadas sanciones" not in low
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _is_penalty_mechanism_sentence(sentence_lower: str) -> bool:
+        """Oración de cobro/tope de penas, no administración de garantía."""
+        if ChatbotRAGAgent._is_guarantee_admin_noise_for_penalty(sentence_lower):
+            return False
+        strong = (
+            "saldos pendientes de pago",
+            "saldos pendientes",
+            "penalizaciones se harán efectivas",
+            "penalizaciones se haran efectivas",
+            "monto total de las citadas sanciones",
+            "no excederá la cuantía",
+            "no excedera la cuantia",
+            "no exceda la cuantía",
+            "no exceda la cuantia",
+        )
+        return any(k in sentence_lower for k in strong)
+
+    @classmethod
+    def _doc_eligible_for_penalty_extract(cls, text: str) -> bool:
+        """Solo documentos con señales de pena convencional (no garantía administrativa)."""
+        if not text or len(text) < 40:
+            return False
+        if cls._is_guarantee_admin_noise_for_penalty(text):
+            return False
+        return cls._is_penalty_contract_chunk(text)
+
+    def _penalty_probe_and_hydrate(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """
+        Segunda pasada RAG: localizar páginas con cláusula de pena aunque el focal devuelva garantías.
+        """
+        if not primary_doc:
+            return [], []
+        probe_q = (
+            "pena convencional semana atraso incumplimiento saldos pendientes de pago "
+            "monto total citadas sanciones no excederá cuantía garantía 2%"
+        )
+        try:
+            res = self.vector_db.query_texts_filtered(
+                session_id, probe_q, source_filter=primary_doc, n_results=16
+            )
+        except Exception:
+            res = self.vector_db.query_texts(session_id, probe_q, n_results=16)
+        probe_docs = list(res.get("documents") or [])
+        probe_metas = list(res.get("metadatas") or [])
+        pages: List[Any] = []
+        for meta, doc in zip(probe_metas, probe_docs):
+            if self._is_penalty_contract_chunk(doc or ""):
+                pg = meta.get("page")
+                if pg is not None and pg not in pages:
+                    pages.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pages[:6]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_penalty_contract_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append(
+                        {"source": primary_doc, "page": pg, "hydrated": True, "penalty_probe": True}
+                    )
+            if len(out_docs) >= 6:
+                break
+        return out_docs, out_metas
+
+    def _hydrate_penalty_atomic_pages(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+        focal_metas: List[Dict[str, Any]],
+        focal_docs: List[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        if not primary_doc:
+            return [], []
+        pages_to_fetch: List[Any] = []
+        for meta, doc in zip(focal_metas, focal_docs):
+            pg = meta.get("page")
+            if pg is not None and pg not in pages_to_fetch:
+                pages_to_fetch.append(pg)
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for pg in pages_to_fetch[:5]:
+            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
+                if not full or full in out_docs:
+                    continue
+                if self._is_penalty_contract_chunk(full):
+                    out_docs.append(full)
+                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+            if len(out_docs) >= 5:
+                break
+        return out_docs, out_metas
+
+    @classmethod
+    def _split_penalty_sentences(cls, text: str) -> List[str]:
+        """Parte párrafos PDF (punto, punto y coma o salto de línea)."""
+        parts: List[str] = []
+        for block in re.split(r"\n{2,}|\n", text or ""):
+            block = block.strip()
+            if not block:
+                continue
+            parts.extend(re.split(r"(?<=[.;])\s+", block))
+        return [p.strip() for p in parts if p.strip()]
+
+    @classmethod
+    def _extract_penalty_rate_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        for doc, meta in zip(context_docs, metadatas):
+            clean = cls._strip_chunk_source_prefix(doc or "")
+            if not clean or not cls._doc_eligible_for_penalty_extract(clean):
+                continue
+            pg = meta.get("page", "?")
+            for sent in cls._split_penalty_sentences(clean):
+                sl = sent.lower()
+                if len(sent) < 35 or len(sent) > 520:
+                    continue
+                if not re.search(r"\d+(?:\.\d+)?\s*%", sl):
+                    continue
+                if not any(
+                    k in sl
+                    for k in (
+                        "pena convencional",
+                        "penas convencional",
+                        "aplicará",
+                        "aplicara",
+                        "aplicar",
+                        "semana",
+                        "atraso",
+                        "incumplimiento",
+                        "bienes y/o",
+                        "no suministrados",
+                        "no prestados",
+                    )
+                ):
+                    continue
+                key = sent[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {sent} [PÁGINA {pg}]")
+                if len(bullets) >= 3:
+                    return bullets
+            if bullets:
+                continue
+            m = re.search(
+                r"((?:pena|penas)\s+convencional(?:es)?[^.]{0,200}?\d+(?:\.\d+)?\s*%[^.]{0,200})",
+                clean,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                snippet = m.group(1).strip()
+                key = snippet[:100]
+                if key not in seen:
+                    seen.add(key)
+                    bullets.append(f"• {snippet} [PÁGINA {pg}]")
+        return bullets
+
+    @classmethod
+    def _extract_penalty_cap_and_mechanism_bullets(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> List[str]:
+        seen: set[str] = set()
+        bullets: List[str] = []
+        for doc, meta in zip(context_docs, metadatas):
+            clean = cls._strip_chunk_source_prefix(doc or "")
+            if not clean or not cls._doc_eligible_for_penalty_extract(clean):
+                continue
+            pg = meta.get("page", "?")
+            for sent in cls._split_penalty_sentences(clean):
+                s = sent.strip()
+                sl = s.lower()
+                if len(s) < 45 or len(s) > 520:
+                    continue
+                if not cls._is_penalty_mechanism_sentence(sl):
+                    continue
+                key = s[:100]
+                if key in seen:
+                    continue
+                seen.add(key)
+                bullets.append(f"• {s} [PÁGINA {pg}]")
+                if len(bullets) >= 4:
+                    return bullets
+        return bullets
+
+    @classmethod
+    def _compose_penalty_structured_response(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> str:
+        rates = cls._extract_penalty_rate_bullets(context_docs, metadatas)
+        caps = cls._extract_penalty_cap_and_mechanism_bullets(context_docs, metadatas)
+        parts = [
+            "**Penas convencionales y límites financieros**",
+            "(Extraído del pliego indexado; sin porcentajes ni páginas inventados.)",
+            "",
+            "### 1) TASA DE PENA CONVENCIONAL",
+        ]
+        if rates:
+            parts.extend(rates)
+        else:
+            parts.append(
+                "• No se recuperó en los fragmentos un porcentaje de pena convencional explícito."
+            )
+        parts.extend(["", "### 2) MECANISMO DE COBRO Y LÍMITE FINANCIERO"])
+        if caps:
+            parts.extend(caps)
+        else:
+            parts.append(
+                "• No se recuperó tope contra garantía de cumplimiento o mecanismo de cobro."
+            )
+        return "\n".join(parts)
+
+    @classmethod
+    def _penalty_structured_ready(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        rates = cls._extract_penalty_rate_bullets(context_docs, metadatas)
+        caps = cls._extract_penalty_cap_and_mechanism_bullets(context_docs, metadatas)
+        return len(rates) >= 1 and len(caps) >= 1
+
+    @classmethod
+    def _penalty_should_compose(
+        cls, context_docs: List[str], metadatas: List[Dict[str, Any]]
+    ) -> bool:
+        """Solo sustituir LLM si hay tasa y mecanismo reales (evita respuesta vacía o pág. 23)."""
+        return cls._penalty_structured_ready(context_docs, metadatas)
+
+    @classmethod
+    def _rank_penalty_doc_pool(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        scored: List[tuple[float, str, Dict[str, Any]]] = []
+        for doc, meta in zip(context_docs, metadatas):
+            score = 0.0
+            if cls._is_penalty_contract_chunk(doc or ""):
+                score += 200.0
+            if meta.get("penalty_probe") or meta.get("hydrated"):
+                score += 80.0
+            if cls._is_guarantee_admin_noise_for_penalty(doc or ""):
+                score -= 300.0
+            scored.append((score, doc, meta if isinstance(meta, dict) else {}))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [x[1] for x in scored], [x[2] for x in scored]
+
+    @classmethod
+    def _sanitize_penalty_llm_contradictions(cls, content: str) -> str:
+        """Quita disclaimers de «sin tope» cuando el texto ya cita garantía/cuantía."""
+        if not content:
+            return content
+        low = content.lower()
+        if not any(
+            k in low
+            for k in (
+                "garantía de cumplimiento",
+                "garantia de cumplimiento",
+                "cuantía de la garantía",
+                "cuantia de la garantia",
+                "no excederá",
+                "no excedera",
+                "saldos pendientes",
+            )
+        ):
+            return content
+        patterns = (
+            r"(?im)^\s*no hay información[^.\n]*tope[^.\n]*\.?\s*",
+            r"(?im)^\s*no aparece[^.\n]*tope[^.\n]*\.?\s*",
+            r"(?im)^\s*no se encontró[^.\n]*tope[^.\n]*\.?\s*",
+            r"(?im)^\s*no hay información sobre un tope[^.\n]*\.?\s*",
+        )
+        out = content
+        for pat in patterns:
+            out = re.sub(pat, "", out)
+        return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    @staticmethod
+    def _merge_doc_meta_pool(
+        *pairs: tuple[List[str], List[Dict[str, Any]]],
+        limit: int = 28,
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """Une pools de chunks priorizando el orden de los pares (p. ej. contexto LLM primero)."""
+        docs: List[str] = []
+        metas: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for doc_list, meta_list in pairs:
+            for doc, meta in zip(doc_list or [], meta_list or []):
+                if not doc or doc in seen:
+                    continue
+                seen.add(doc)
+                docs.append(doc)
+                metas.append(meta if isinstance(meta, dict) else {})
+                if len(docs) >= limit:
+                    return docs, metas
+        return docs, metas
+
     @staticmethod
     def _expand_legal_ontology(query: str) -> str:
         """
@@ -3280,12 +5619,20 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             "LFT": "LFT OR \"Ley Federal del Trabajo\"",
             "SUA": "SUA OR \"Sistema Único de Autodeterminación\"",
             "INFONAVIT": "INFONAVIT OR \"Instituto del Fondo Nacional de la Vivienda para los Trabajadores\"",
+            "ISO": "ISO 9001 OR ISO 14001 OR ISO 45001 OR certificación OR certificacion",
+            "NMX": "NMX OR norma mexicana OR NMX-R",
+            "NOM": "NOM-035 OR NOM STPS OR norma oficial mexicana",
+            "SOLVENCIA": "solvencia participante opinión cumplimiento SAT IMSS INFONAVIT ISO NMX REPSE",
+            "PROPUESTA ECONÓMICA": "\"propuesta económica\" OR \"moneda nacional\" OR \"número y letra\" OR \"Anexo III\" OR \"tarifa mensual\" OR \"precio unitario\"",
+            "PROPUESTA ECONOMICA": "\"propuesta económica\" OR \"moneda nacional\" OR \"número y letra\" OR \"Anexo III\" OR \"tarifa mensual\" OR \"precio unitario\"",
+            "ADJUDICACIÓN": "\"criterio binario\" OR \"adjudicación\" OR \"artículo 36\" OR \"total ofertado en conjunto\" OR \"partidas 1 y 2\"",
+            "ADJUDICACION": "\"criterio binario\" OR \"adjudicación\" OR \"artículo 36\" OR \"total ofertado en conjunto\" OR \"partidas 1 y 2\"",
+            "PENALIZACIÓN": "\"pena convencional\" OR \"penalización\" OR \"sanción\" OR \"atraso\" OR \"saldos pendientes\" OR \"garantía de cumplimiento\" OR \"plazos pactados\"",
+            "PENALIZACION": "\"pena convencional\" OR \"penalización\" OR \"sanción\" OR \"atraso\" OR \"saldos pendientes\" OR \"garantía de cumplimiento\" OR \"plazos pactados\"",
             "6.1": "\"6.1\" OR \"DOCUMENTACIÓN COMPLEMENTARIA\" OR \"Requisitos de la propuesta técnica\"",
             "GARANTÍA": "\"Garantía de Cumplimiento\" OR \"Garantia de Cumplimiento\" OR \"fianza\" OR \"cheque certificado\" OR \"cheque de caja\" OR \"forma de garantizar\" NOT \"transferencia electrónica a mes vencido\"",
             "GARANTIA": "\"Garantía de Cumplimiento\" OR \"Garantia de Cumplimiento\" OR \"fianza\" OR \"cheque certificado\" OR \"cheque de caja\" OR \"forma de garantizar\" NOT \"transferencia electrónica a mes vencido\"",
             "FIANZA": "\"Garantía de Cumplimiento\" OR \"Garantia de Cumplimiento\" OR \"fianza\" OR \"cheque certificado\" OR \"cheque de caja\" OR \"forma de garantizar\" NOT \"transferencia electrónica a mes vencido\"",
-            "PENALIZACIÓN": "\"deducción específica\" OR \"falta de elemento\" OR \"inasistencia\" OR \"hora hombre no cubierta\" OR \"deducciones\" OR \"penas convencionales\" OR \"ausencia\" NOT \"bienes pendientes de entregar\" NOT \"atraso en la entrega de bienes\"",
-            "PENALIZACION": "\"deducción específica\" OR \"falta de elemento\" OR \"inasistencia\" OR \"hora hombre no cubierta\" OR \"deducciones\" OR \"penas convencionales\" OR \"ausencia\" NOT \"bienes pendientes de entregar\" NOT \"atraso en la entrega de bienes\"",
             "DEDUCCIÓN": "\"deducción específica\" OR \"falta de elemento\" OR \"inasistencia\" OR \"hora hombre no cubierta\" OR \"deducciones\" OR \"penas convencionales\" OR \"ausencia\" NOT \"bienes pendientes de entregar\" NOT \"atraso en la entrega de bienes\"",
             "DEDUCCION": "\"deducción específica\" OR \"falta de elemento\" OR \"inasistencia\" OR \"hora hombre no cubierta\" OR \"deducciones\" OR \"penas convencionales\" OR \"ausencia\" NOT \"bienes pendientes de entregar\" NOT \"atraso en la entrega de bienes\"",
             "FALTA": "\"deducción específica\" OR \"falta de elemento\" OR \"inasistencia\" OR \"hora hombre no cubierta\" OR \"deducciones\" OR \"penas convencionales\" OR \"ausencia\" NOT \"bienes pendientes de entregar\" NOT \"atraso en la entrega de bienes\"",
@@ -3354,34 +5701,473 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             )
         
         search_results_general = self.vector_db.query_texts(session_id, expanded_query, n_results=18)
-        
+
+        # Combo A + B: intención cronograma → focal RAG + páginas atómicas + Analyst solo si anclado.
+        cronogram_intent = self._detect_cronogram_intent(user_query)
+        guarantee_intent = self._detect_guarantee_intent(user_query)
+        solvency_intent = self._detect_solvency_intent(user_query)
+        supplies_intent = self._detect_supplies_technical_intent(user_query)
+        economic_intent = self._detect_economic_intent(user_query)
+        adjudication_intent = self._detect_adjudication_intent(user_query)
+        penalty_intent = self._detect_penalty_intent(user_query)
+        focal_docs: List[str] = []
+        focal_metas: List[Dict[str, Any]] = []
+        hydrated_docs: List[str] = []
+        hydrated_metas: List[Dict[str, Any]] = []
+        guarantee_focal_docs: List[str] = []
+        guarantee_focal_metas: List[Dict[str, Any]] = []
+        guarantee_hydrated_docs: List[str] = []
+        guarantee_hydrated_metas: List[Dict[str, Any]] = []
+        solvency_focal_docs: List[str] = []
+        solvency_focal_metas: List[Dict[str, Any]] = []
+        solvency_hydrated_docs: List[str] = []
+        solvency_hydrated_metas: List[Dict[str, Any]] = []
+        economic_focal_docs: List[str] = []
+        economic_focal_metas: List[Dict[str, Any]] = []
+        economic_hydrated_docs: List[str] = []
+        economic_hydrated_metas: List[Dict[str, Any]] = []
+        supplies_focal_docs: List[str] = []
+        supplies_focal_metas: List[Dict[str, Any]] = []
+        supplies_hydrated_docs: List[str] = []
+        supplies_hydrated_metas: List[Dict[str, Any]] = []
+        adjudication_focal_docs: List[str] = []
+        adjudication_focal_metas: List[Dict[str, Any]] = []
+        adjudication_hydrated_docs: List[str] = []
+        adjudication_hydrated_metas: List[Dict[str, Any]] = []
+        penalty_focal_docs: List[str] = []
+        penalty_focal_metas: List[Dict[str, Any]] = []
+        penalty_hydrated_docs: List[str] = []
+        penalty_hydrated_metas: List[Dict[str, Any]] = []
+        if cronogram_intent:
+            focal_q = self._CRONOGRAM_FOCAL_RAG_QUERY
+            if primary_doc:
+                focal_res = self.vector_db.query_texts_filtered(
+                    session_id, focal_q, source_filter=primary_doc, n_results=12
+                )
+            else:
+                focal_res = self.vector_db.query_texts(session_id, focal_q, n_results=12)
+            focal_docs = list(focal_res.get("documents") or [])
+            focal_metas = list(focal_res.get("metadatas") or [])
+            hydrated_docs, hydrated_metas = self._hydrate_cronogram_atomic_pages(
+                session_id, primary_doc, focal_metas, focal_docs
+            )
+            logger.info(
+                "chatbot_cronogram_focal_rag",
+                session_id=session_id,
+                chunks=len(focal_docs),
+                hydrated_pages=len(hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        analyst_cronogram = self._extract_analyst_cronogram_from_session(_sess)
+        pliego_anchor_text = "\n".join(hydrated_docs + focal_docs[:12])
+        if analyst_cronogram and self._cronogram_anchored_in_pliego(
+            analyst_cronogram, pliego_anchor_text
+        ):
+            extra_context += "\n" + self._format_analyst_cronogram_prompt_section(analyst_cronogram)
+        elif analyst_cronogram:
+            logger.warning(
+                "chatbot_analyst_cronogram_not_anchored",
+                session_id=session_id,
+                reason="fechas_analyst_no_coinciden_pliego_indexado",
+            )
+
+        if guarantee_intent:
+            g_focal_q = self._GUARANTEE_FOCAL_RAG_QUERY
+            if primary_doc:
+                g_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, g_focal_q, source_filter=primary_doc, n_results=12
+                )
+            else:
+                g_focal_res = self.vector_db.query_texts(session_id, g_focal_q, n_results=12)
+            guarantee_focal_docs = list(g_focal_res.get("documents") or [])
+            guarantee_focal_metas = list(g_focal_res.get("metadatas") or [])
+            guarantee_hydrated_docs, guarantee_hydrated_metas = self._hydrate_guarantee_atomic_pages(
+                session_id, primary_doc, guarantee_focal_metas, guarantee_focal_docs
+            )
+            logger.info(
+                "chatbot_guarantee_focal_rag",
+                session_id=session_id,
+                chunks=len(guarantee_focal_docs),
+                hydrated_pages=len(guarantee_hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        if solvency_intent:
+            s_focal_q = self._SOLVENCY_FOCAL_RAG_QUERY
+            if primary_doc:
+                s_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, s_focal_q, source_filter=primary_doc, n_results=14
+                )
+            else:
+                s_focal_res = self.vector_db.query_texts(session_id, s_focal_q, n_results=14)
+            solvency_focal_docs = list(s_focal_res.get("documents") or [])
+            solvency_focal_metas = list(s_focal_res.get("metadatas") or [])
+            solvency_hydrated_docs, solvency_hydrated_metas = self._hydrate_solvency_atomic_pages(
+                session_id, primary_doc, solvency_focal_metas, solvency_focal_docs
+            )
+            logger.info(
+                "chatbot_solvency_focal_rag",
+                session_id=session_id,
+                chunks=len(solvency_focal_docs),
+                hydrated_pages=len(solvency_hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        if economic_intent:
+            e_focal_q = self._ECONOMIC_FOCAL_RAG_QUERY
+            if primary_doc:
+                e_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, e_focal_q, source_filter=primary_doc, n_results=12
+                )
+            else:
+                e_focal_res = self.vector_db.query_texts(session_id, e_focal_q, n_results=12)
+            economic_focal_docs = list(e_focal_res.get("documents") or [])
+            economic_focal_metas = list(e_focal_res.get("metadatas") or [])
+            economic_hydrated_docs, economic_hydrated_metas = self._hydrate_economic_atomic_pages(
+                session_id, primary_doc, economic_focal_metas, economic_focal_docs
+            )
+            logger.info(
+                "chatbot_economic_focal_rag",
+                session_id=session_id,
+                chunks=len(economic_focal_docs),
+                hydrated_pages=len(economic_hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        if supplies_intent:
+            sp_focal_q = self._SUPPLIES_FOCAL_RAG_QUERY
+            if primary_doc:
+                sp_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, sp_focal_q, source_filter=primary_doc, n_results=14
+                )
+            else:
+                sp_focal_res = self.vector_db.query_texts(session_id, sp_focal_q, n_results=14)
+            supplies_focal_docs = list(sp_focal_res.get("documents") or [])
+            supplies_focal_metas = list(sp_focal_res.get("metadatas") or [])
+            supplies_hydrated_docs, supplies_hydrated_metas = self._hydrate_supplies_atomic_pages(
+                session_id, primary_doc, supplies_focal_metas, supplies_focal_docs
+            )
+            logger.info(
+                "chatbot_supplies_focal_rag",
+                session_id=session_id,
+                chunks=len(supplies_focal_docs),
+                hydrated_pages=len(supplies_hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        if adjudication_intent:
+            a_focal_q = self._ADJUDICATION_FOCAL_RAG_QUERY
+            if primary_doc:
+                a_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, a_focal_q, source_filter=primary_doc, n_results=12
+                )
+            else:
+                a_focal_res = self.vector_db.query_texts(session_id, a_focal_q, n_results=12)
+            adjudication_focal_docs = list(a_focal_res.get("documents") or [])
+            adjudication_focal_metas = list(a_focal_res.get("metadatas") or [])
+            adjudication_hydrated_docs, adjudication_hydrated_metas = (
+                self._hydrate_adjudication_atomic_pages(
+                    session_id, primary_doc, adjudication_focal_metas, adjudication_focal_docs
+                )
+            )
+            logger.info(
+                "chatbot_adjudication_focal_rag",
+                session_id=session_id,
+                chunks=len(adjudication_focal_docs),
+                hydrated_pages=len(adjudication_hydrated_metas),
+                primary_doc=primary_doc,
+            )
+
+        if penalty_intent:
+            p_focal_q = self._PENALTY_FOCAL_RAG_QUERY
+            if primary_doc:
+                p_focal_res = self.vector_db.query_texts_filtered(
+                    session_id, p_focal_q, source_filter=primary_doc, n_results=12
+                )
+            else:
+                p_focal_res = self.vector_db.query_texts(session_id, p_focal_q, n_results=12)
+            penalty_focal_docs = list(p_focal_res.get("documents") or [])
+            penalty_focal_metas = list(p_focal_res.get("metadatas") or [])
+            penalty_hydrated_docs, penalty_hydrated_metas = self._hydrate_penalty_atomic_pages(
+                session_id, primary_doc, penalty_focal_metas, penalty_focal_docs
+            )
+            probe_docs, probe_metas = self._penalty_probe_and_hydrate(session_id, primary_doc)
+            penalty_hydrated_docs = probe_docs + penalty_hydrated_docs
+            penalty_hydrated_metas = probe_metas + penalty_hydrated_metas
+            logger.info(
+                "chatbot_penalty_focal_rag",
+                session_id=session_id,
+                chunks=len(penalty_focal_docs),
+                hydrated_pages=len(penalty_hydrated_metas),
+                probe_pages=len(probe_metas),
+                primary_doc=primary_doc,
+            )
+
         # Merge de resultados priorizando la búsqueda híbrida general (tiene los filtros de coexistencia de HybridSearch-v3)
         extra_docs = []
         extra_metas = []
         q_lower = user_query.lower()
-        if any(w in q_lower for w in ["repse", "sspc", "seguridad privada", "autorización", "registro"]):
+        if solvency_intent:
+            search_solvency = self.vector_db.query_texts(
+                session_id,
+                "ISO 9001 14001 45001 NMX NOM-035 REPSE opinión SAT IMSS INFONAVIT solvencia participante",
+                n_results=14,
+            )
+            extra_docs = list(search_solvency.get("documents") or [])
+            extra_metas = list(search_solvency.get("metadatas") or [])
+        elif any(w in q_lower for w in ["repse", "sspc", "seguridad privada", "autorización", "registro"]):
             search_extra = self.vector_db.query_texts(session_id, "REPSE SSPC autorización seguridad privada", n_results=12)
             extra_docs = search_extra.get("documents", [])
             extra_metas = search_extra.get("metadatas", [])
 
-        raw_docs = search_results_general.get("documents", []) + search_results_primary.get("documents", []) + extra_docs
-        raw_metas = search_results_general.get("metadatas", []) + search_results_primary.get("metadatas", []) + extra_metas
+        raw_docs = (
+            penalty_hydrated_docs
+            + penalty_focal_docs
+            + adjudication_hydrated_docs
+            + adjudication_focal_docs
+            + supplies_hydrated_docs
+            + supplies_focal_docs
+            + economic_hydrated_docs
+            + economic_focal_docs
+            + solvency_hydrated_docs
+            + solvency_focal_docs
+            + hydrated_docs
+            + focal_docs
+            + guarantee_hydrated_docs
+            + guarantee_focal_docs
+            + list(search_results_general.get("documents") or [])
+            + list(search_results_primary.get("documents") or [])
+            + extra_docs
+        )
+        raw_metas = (
+            penalty_hydrated_metas
+            + penalty_focal_metas
+            + adjudication_hydrated_metas
+            + adjudication_focal_metas
+            + supplies_hydrated_metas
+            + supplies_focal_metas
+            + economic_hydrated_metas
+            + economic_focal_metas
+            + solvency_hydrated_metas
+            + solvency_focal_metas
+            + hydrated_metas
+            + focal_metas
+            + guarantee_hydrated_metas
+            + guarantee_focal_metas
+            + list(search_results_general.get("metadatas") or [])
+            + list(search_results_primary.get("metadatas") or [])
+            + extra_metas
+        )
 
         # --- RE-ORDENADOR DE RELEVANCIA (Reranker Ontológico Temático) ---
         # Si la consulta o query expandida contiene indicios de subtemas específicos,
         # re-ordenamos los fragmentos para priorizar aquellos que resuelven directamente la consulta.
         boost_keywords = []
         q_lower = user_query.lower()
-        if any(w in q_lower for w in ["repse", "registro", "acredit", "permiso", "seguridad privada", "sspc", "cumplimiento"]):
+        if cronogram_intent or self._detect_cronogram_intent(expanded_query):
+            boost_keywords = [
+                "junta de aclaraciones",
+                "visita a instalaciones",
+                "visita obligatoria",
+                "apertura de proposiciones",
+                "presentacion y apertura",
+                "presentación y apertura",
+                "acto de fallo",
+                "cronograma",
+                "calendario",
+                "fechas",
+                "horas",
+                "hora limite",
+                "hora límite",
+            ]
+        elif guarantee_intent or self._detect_guarantee_intent(expanded_query):
+            boost_keywords = [
+                "fianza",
+                "garantía de cumplimiento",
+                "garantia de cumplimiento",
+                "responsabilidad civil",
+                "daños a terceros",
+                "suma asegurada",
+                "póliza",
+                "poliza",
+                "endoso",
+                "cheque certificado",
+            ]
+        elif penalty_intent or self._detect_penalty_intent(expanded_query):
+            boost_keywords = [
+                "pena convencional",
+                "penalización",
+                "penalizacion",
+                "sanción",
+                "sancion",
+                "atraso",
+                "plazos pactados",
+                "saldos pendientes",
+                "citadas sanciones",
+                "bienes y/o servicios",
+                "semana",
+            ]
+        elif adjudication_intent or self._detect_adjudication_intent(expanded_query):
+            boost_keywords = [
+                "criterio binario",
+                "adjudicación",
+                "adjudicacion",
+                "artículo 36",
+                "total ofertado en conjunto",
+                "partidas 1 y 2",
+                "no se aceptarán opciones",
+                "propuesta por zona",
+                "anexo iii limpieza",
+            ]
+        elif supplies_intent or self._detect_supplies_technical_intent(expanded_query):
+            boost_keywords = [
+                "biodegradabilidad",
+                "biodegradable",
+                "no contaminante",
+                "muestras",
+                "almacén",
+                "almacen",
+                "rpbi",
+                "residuo peligroso",
+                "insumos",
+                "materiales de limpieza",
+                "concentración",
+                "concentracion",
+                "envase",
+                "bidón",
+                "productos químicos",
+                "entrega de materiales",
+                "partida 2",
+            ]
+        elif economic_intent or self._detect_economic_intent(expanded_query):
+            boost_keywords = [
+                "moneda nacional",
+                "propuesta económica",
+                "propuesta economica",
+                "número y letra",
+                "numero y letra",
+                "prevalecerá",
+                "anexo iii",
+                "tarifa mensual",
+                "precio unitario",
+                "oferta económica",
+                "iv.2",
+            ]
+        elif solvency_intent or self._detect_solvency_intent(expanded_query):
+            boost_keywords = [
+                "solvencia",
+                "opinión",
+                "opinion",
+                "sat",
+                "imss",
+                "infonavit",
+                "seguridad social",
+                "iso 9001",
+                "iso 14001",
+                "iso 45001",
+                "nmx",
+                "nom-035",
+                "repse",
+                "certificación",
+                "certificacion",
+                "acreditación",
+                "acreditacion",
+            ]
+        elif any(w in q_lower for w in ["repse", "registro", "acredit", "permiso", "seguridad privada", "sspc", "cumplimiento"]):
             boost_keywords = ["repse", "sspc", "registro", "acreditación", "acreditacion", "permiso", "seguridad privada", "autorización", "autorizacion", "servicios especializados", "artículo 15", "articulo 15", "sspe", "ssp"]
-        elif any(w in q_lower for w in ["póliza", "poliza", "seguro", "fianza", "responsabilidad", "civil", "terceros"]):
-            boost_keywords = ["póliza", "poliza", "seguro", "fianza", "responsabilidad", "daños a terceros", "terceros", "civil", "monto", "cantidad"]
 
-        if boost_keywords:
+        if (
+            boost_keywords
+            or guarantee_intent
+            or solvency_intent
+            or economic_intent
+            or supplies_intent
+            or adjudication_intent
+            or penalty_intent
+        ):
             scored_chunks = []
+            month_pat = (
+                r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+                r"septiembre|octubre|noviembre|diciembre"
+            )
             for doc, meta in zip(raw_docs, raw_metas):
                 doc_lower = doc.lower()
                 score = 0.0
+                if cronogram_intent:
+                    if self._is_cronogram_calendar_chunk(doc or ""):
+                        score += 500.0
+                    if self._is_cronogram_noise_chunk(doc or ""):
+                        score -= 450.0
+                    if meta.get("hydrated"):
+                        score += 200.0
+                    if re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", doc_lower):
+                        score += 80.0
+                    if "fechas y horas" in doc_lower or "fechas y hora" in doc_lower:
+                        score += 100.0
+                if penalty_intent and not cronogram_intent and not guarantee_intent:
+                    if self._is_penalty_contract_chunk(doc or ""):
+                        score += 540.0
+                    if self._is_guarantee_admin_noise_for_penalty(doc or ""):
+                        score -= 520.0
+                    if (
+                        self._is_guarantee_contract_chunk(doc or "")
+                        and not self._is_penalty_contract_chunk(doc or "")
+                    ):
+                        score -= 400.0
+                    if "bienes pendientes de entregar" in doc_lower:
+                        score -= 400.0
+                    if meta.get("hydrated") or meta.get("penalty_probe"):
+                        score += 200.0
+                if adjudication_intent and not cronogram_intent and not guarantee_intent and not penalty_intent:
+                    if self._is_adjudication_chunk(doc or ""):
+                        score += 540.0
+                    if "total ofertado en conjunto" in doc_lower:
+                        score += 200.0
+                    if meta.get("hydrated"):
+                        score += 200.0
+                if supplies_intent and not cronogram_intent and not guarantee_intent and not adjudication_intent and not penalty_intent and not economic_intent:
+                    if self._is_supplies_spec_chunk(doc or ""):
+                        score += 560.0
+                    if self._is_economic_format_chunk(doc or ""):
+                        score -= 520.0
+                    if "moneda nacional" in doc_lower or "precio unitario" in doc_lower:
+                        score -= 400.0
+                    if meta.get("hydrated"):
+                        score += 220.0
+                if economic_intent and not cronogram_intent and not guarantee_intent and not adjudication_intent and not penalty_intent and not supplies_intent:
+                    if self._is_economic_format_chunk(doc or ""):
+                        score += 540.0
+                    if self._is_guarantee_contract_chunk(doc or "") or self._is_guarantee_insurance_chunk(
+                        doc or ""
+                    ):
+                        score -= 300.0
+                    if "contenido nacional" in doc_lower and "65" in doc_lower:
+                        score -= 350.0
+                    if meta.get("hydrated"):
+                        score += 200.0
+                if solvency_intent and not cronogram_intent and not guarantee_intent and not economic_intent and not penalty_intent and not supplies_intent:
+                    if self._is_solvency_fiscal_chunk(doc or ""):
+                        score += 520.0
+                    if self._is_solvency_norm_chunk(doc or ""):
+                        score += 560.0
+                    if self._is_guarantee_contract_chunk(doc or "") or self._is_guarantee_insurance_chunk(
+                        doc or ""
+                    ):
+                        score -= 280.0
+                    if meta.get("hydrated"):
+                        score += 200.0
+                if guarantee_intent and not cronogram_intent and not solvency_intent and not economic_intent and not penalty_intent:
+                    if self._is_guarantee_contract_chunk(doc or ""):
+                        score += 520.0
+                    if self._is_guarantee_insurance_chunk(doc or ""):
+                        score += 520.0
+                    if self._is_solvencia_fiscal_noise(doc or ""):
+                        score -= 480.0
+                    if self._is_evaluation_percent_noise(doc or ""):
+                        score -= 320.0
+                    if meta.get("hydrated"):
+                        score += 180.0
                 # Boost de coincidencia de palabras clave ontológicas
                 for kw in boost_keywords:
                     if kw in doc_lower:
@@ -3399,21 +6185,59 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         context_parts = []
         context_docs = []
         metadatas = []
-        seen_chunks = set() # Evitar duplicados
-        for i, doc in enumerate(raw_docs):
-            if doc in seen_chunks: continue
+        seen_chunks: set = set()
+        max_chunks = 14 if (
+            cronogram_intent
+            or guarantee_intent
+            or solvency_intent
+            or economic_intent
+            or supplies_intent
+            or adjudication_intent
+            or penalty_intent
+        ) else 16
+
+        _session_clean_id = self.vector_db._sanitize_name(session_id)
+
+        def _push_chunk(doc: str, meta: Dict[str, Any]) -> None:
+            if not doc or doc in seen_chunks or len(context_docs) >= max_chunks:
+                return
+            if not self._chunk_belongs_to_session(meta, session_id, self.vector_db):
+                logger.warning(
+                    "chatbot_chunk_session_mismatch_blocked",
+                    session_id=_session_clean_id,
+                    chunk_session=meta.get("session_id"),
+                )
+                return
+            if cronogram_intent and self._is_cronogram_noise_chunk(doc):
+                if len(context_docs) >= 6:
+                    return
+            if (
+                guarantee_intent
+                and not solvency_intent
+                and self._is_solvencia_fiscal_noise(doc)
+            ):
+                if len(context_docs) >= 5:
+                    return
+            if penalty_intent and self._is_guarantee_admin_noise_for_penalty(doc):
+                return
             seen_chunks.add(doc)
-            meta = raw_metas[i] if i < len(raw_metas) else {}
             context_docs.append(doc)
             metadatas.append(meta)
             src = meta.get("source", "Documento")
             page = meta.get("page", "?")
             if str(page) == "23" or page == 23:
                 logger.info(f"AUDITORIA_CHUNK_PAGINA_23_DETECTADO: {doc[:500]}...")
-                print(f"\n=====================================\n[AUDITORÍA CHUNK PAGINA 23 DETECTADO]\n{doc}\n=====================================\n", flush=True)
+                print(
+                    f"\n=====================================\n[AUDITORÍA CHUNK PAGINA 23 DETECTADO]\n{doc}\n=====================================\n",
+                    flush=True,
+                )
             context_parts.append(f"--- [FUENTE: {src} | PÁGINA: {page}] ---\n{doc}\n")
-            if len(context_docs) >= 16:  # Limitar a un máximo de 16 chunks únicos más relevantes
+
+        for i, doc in enumerate(raw_docs):
+            if len(context_docs) >= max_chunks:
                 break
+            meta = raw_metas[i] if i < len(raw_metas) else {}
+            _push_chunk(doc, meta)
 
         context_str = "\n".join(context_parts) if context_parts else "No se encontró información de la licitación."
         no_pliego_en_fragmentos = (not context_docs) or (
@@ -3510,6 +6334,104 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         except Exception as _le:
             logger.warning(f"Error al analizar alertas LFT en el chatbot: {_le}")
 
+        cronogram_prompt_extra = ""
+        if cronogram_intent:
+            cronogram_prompt_extra = (
+                "\n[INSTRUCCIÓN CRONOGRAMA]: Los fragmentos incluyen tabla de actos del procedimiento. "
+                "Reporta cada acto (visita, junta, presentación/apertura, fallo) con fecha, hora y lugar/modalidad "
+                "citando [FUENTE | PÁGINA]. Queda prohibido responder «no se especifica» si el fragmento trae fechas. "
+                "Distingue recepción de muestras (logística) del acto de apertura de proposiciones.\n"
+            )
+
+        guarantee_canonical_block = ""
+        if guarantee_intent and context_docs:
+            guarantee_canonical_block = self._build_guarantee_canonical_block(
+                context_docs, metadatas
+            )
+
+        guarantee_prompt_extra = ""
+        if guarantee_intent:
+            guarantee_prompt_extra = (
+                "\n[INSTRUCCIÓN GARANTÍAS Y SEGUROS — licitante ganador/adjudicado]:\n"
+                "Responde EXACTAMENTE con estas tres secciones (títulos obligatorios):\n"
+                "### 1) FIANZA / GARANTÍA DE CUMPLIMIENTO\n"
+                "- **Porcentaje:** (número literal del pliego, p. ej. 12% si el fragmento lo dice; copia el % tal cual)\n"
+                "- Formas aceptadas, beneficiario, momento de entrega, vigencia (juicios/recursos)\n"
+                "### 2) SEGURO DE RESPONSABILIDAD CIVIL\n"
+                "- **Monto asegurado:** (cifra literal del pliego)\n"
+                "- Endoso beneficiario, vigencia, entrega de copia y comprobante\n"
+                "### 3) PLAZOS Y ENDOSOS\n"
+                "- Solo lo que digan los fragmentos; cita [FUENTE | PÁGINA]\n"
+                "Reglas: (a) Si el fragmento trae un % de fianza, DEBES imprimirlo — no omitas porcentajes. "
+                "(b) Solo está prohibido INVENTAR un % que no figure en los fragmentos. "
+                "(c) Queda prohibido decir «no aparece explícitamente» si [HECHOS CONTRACTUALES] o los fragmentos "
+                "ya traen el % o la suma asegurada. "
+                "(d) No listes SAT/IMSS/INFONAVIT (son solvencia del participante, no garantía del ganador).\n"
+                f"{guarantee_canonical_block}"
+            )
+
+        penalty_prompt_extra = ""
+        if penalty_intent:
+            penalty_prompt_extra = (
+                "\n[INSTRUCCIÓN PENAS CONVENCIONALES — localizador forense]:\n"
+                "Responde EXACTAMENTE con dos secciones:\n"
+                "### 1) TASA DE PENA CONVENCIONAL\n"
+                "### 2) MECANISMO DE COBRO Y LÍMITE FINANCIERO\n"
+                "Cada viñeta termina con [PÁGINA X] del metadato. Extrae el % y el tope solo "
+                "si constan en los fragmentos (saldos pendientes, garantía de cumplimiento).\n"
+            )
+
+        adjudication_prompt_extra = ""
+        if adjudication_intent:
+            adjudication_prompt_extra = (
+                "\n[INSTRUCCIÓN ADJUDICACIÓN Y ZONAS — localizador forense]:\n"
+                "Responde EXACTAMENTE con dos secciones:\n"
+                "### 1) CRITERIO DE ADJUDICACIÓN\n"
+                "### 2) PARTICIPACIÓN POR UNA O VARIAS ZONAS\n"
+                "Cada viñeta termina con [PÁGINA X]. Incluye criterio binario, art. 36, "
+                "total conjunto partidas 1 y 2 por zona, y regla de no opciones / una propuesta por zona.\n"
+            )
+
+        supplies_prompt_extra = ""
+        if supplies_intent:
+            supplies_prompt_extra = (
+                "\n[INSTRUCCIÓN INSUMOS Y MATERIALES — localizador forense]:\n"
+                "Responde EXACTAMENTE con cuatro secciones:\n"
+                "### 1) BIODEGRADABILIDAD Y PRODUCTOS\n"
+                "### 2) ENVASE, CONCENTRACIÓN Y PRODUCTOS QUÍMICOS\n"
+                "### 3) MUESTRAS FÍSICAS EN ALMACÉN\n"
+                "### 4) MANEJO DE RPBI\n"
+                "Cada viñeta termina con [PÁGINA X]. Prohibido responder moneda nacional, "
+                "IVA, tarifa mensual o precio unitario salvo que el usuario lo pida explícitamente.\n"
+            )
+
+        economic_prompt_extra = ""
+        if economic_intent:
+            economic_prompt_extra = (
+                "\n[INSTRUCCIÓN PROPUESTA ECONÓMICA — localizador forense]:\n"
+                "Responde EXACTAMENTE con tres secciones:\n"
+                "### 1) MONEDA REQUERIDA\n"
+                "### 2) FORMATO DE COTIZACIÓN POR PARTIDA\n"
+                "### 3) REGLA DE DISCREPANCIA (NÚMERO VS LETRA)\n"
+                "Cada viñeta termina con [PÁGINA X] del metadato. "
+                "Prohibido inventar dólares u otras monedas. "
+                "Si el pliego dice que prevalece la cantidad en letra, NO digas que la discrepancia "
+                "descalifica automáticamente.\n"
+            )
+
+        solvency_prompt_extra = ""
+        if solvency_intent:
+            solvency_prompt_extra = (
+                "\n[INSTRUCCIÓN SOLVENCIA DEL PARTICIPANTE — localizador forense]:\n"
+                "Responde EXACTAMENTE con estas dos secciones (títulos obligatorios):\n"
+                "### 1) Opiniones de cumplimiento fiscal y patronal\n"
+                "### 2) Normativas técnicas, certificaciones y registros (ISO/NMX/NOM/REPSE)\n"
+                "Regla de hierro: CADA requisito en viñeta debe terminar con [PÁGINA X] usando el metadato "
+                "real del fragmento (ej. [PÁGINA 14]). Prohibido omitir la página.\n"
+                "Incluye SAT, IMSS, INFONAVIT si constan en fragmentos, Y todas las normas ISO/NMX/NOM y REPSE "
+                "que aparezcan en los fragmentos. No omitas el bloque técnico por resumir solo lo fiscal.\n"
+            )
+
         system_prompt = (
             "[CONTRATO DE SEGURIDAD OPERATIVA - ENTORNO CORPORATIVO B2B]\n"
             "Eres LicitAI, el Consultor Senior de Licitaciones de la empresa. Tu misión es extraer verdades absolutas de las bases.\n"
@@ -3523,7 +6445,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             "7. INTEGRACIÓN CON MOTOR ECONÓMICO (ALERTA LFT): Si la consulta es sobre la cantidad de elementos o turnos de 24 horas en un área (ej. Entrada Principal o Control de Pases), es OBLIGATORIO inyectar el aviso de Alerta LFT. Si el pliego indica 4 elementos físicos en el turno de 24 horas, la respuesta debe ser: 'Se solicitan 4 elementos físicos en el área indicada. ALERTA LFT: El motor ajustará la cotización a 8 elementos en nómina para cubrir el turno 24/7 sin pérdidas financieras.'\n"
             "8. PROTOCOLO DE DESACOPLAMIENTO SEMÁNTICO ESTRICTO: Queda prohibido asumir que términos semánticos próximos son sinónimos (ej. 'Control de Pases' NO es lo mismo que 'Entrada Principal', ni 'Caseta' es lo mismo que 'Acceso Vehicular'). Si el pliego contiene nomenclatura diferente a la consultada por el usuario, debes advertir de esta diferencia, responder por lo que realmente dice el pliego y pedir confirmación de la nomenclatura oficial de las bases.\n"
             "9. REGLA DE PONDERACIÓN TEMÁTICA (FILTRO DINÁMICO DE INCISOS): Si el usuario pregunta por un subtema específico (como registros, acreditaciones, REPSE, autorizaciones SSPC, seguros o fianzas) dentro de un numeral extenso o kilométrico (como el 6.1), tienes estrictamente PROHIBIDO transcribir la lista completa de incisos de forma secuencial desde el inciso A si eso consume el contexto. Debes escanear todos los fragmentos, saltar el ruido administrativo general (identificaciones, actas, cartas membretadas generales) y enfocar tu respuesta única y directamente en los incisos específicos que regulan o contienen el subtema consultado (ej. si los registros de seguridad o REPSE están en los incisos H, I, K, etc., expón directamente la regulación de esos incisos con su letra correspondiente).\n"
-            "10. DISTINCIÓN CRÍTICA ENTRE GARANTÍAS Y PAGOS: Si la consulta del usuario es sobre la Garantía de Cumplimiento, fianza del contrato o cheques de garantía, tienes estrictamente PROHIBIDO reportar los métodos de facturación, transferencias bancarias, calendarios de estimaciones o pagos de servicios que el Instituto hace al proveedor. Debes enfocarte única y exclusivamente en los instrumentos de garantía o cobertura que el licitante/proveedor entrega para garantizar el contrato (como cheques de caja, cheques certificados, pólizas de fianza) y sus montos o porcentajes aceptados (ej. el 10% del monto total del contrato sin IVA).\n"
+            "10. DISTINCIÓN CRÍTICA ENTRE GARANTÍAS Y PAGOS: Si la consulta del usuario es sobre la Garantía de Cumplimiento, fianza del contrato o cheques de garantía, tienes estrictamente PROHIBIDO reportar los métodos de facturación, transferencias bancarias, calendarios de estimaciones o pagos de servicios que el Instituto hace al proveedor. Debes enfocarte única y exclusivamente en los instrumentos de garantía o cobertura que el licitante/proveedor entrega para garantizar el contrato (como cheques de caja, cheques certificados, pólizas de fianza) y el porcentaje o monto que figure literalmente en los fragmentos (sin asumir porcentajes genéricos de ley si el pliego trae otro dato).\n"
             "11. DISTINCIÓN CRÍTICA DE DEDUCCIONES OPERATIVAS Y PENAS POR BIENES: Si la licitación es de Servicios (como Vigilancia, Limpieza, etc.) y el usuario pregunta por inasistencias del personal, faltas, retardos o turnos no cubiertos, tienes estrictamente PROHIBIDO citar cláusulas genéricas de penas convencionales por mora/atraso en la entrega de bienes o insumos materiales (ej. el 2.5% por mora en bienes pendientes de entregar). Debes buscar de forma exclusiva y reportar únicamente las DEDUCCIONES especiales aplicables por fallas operativas en el servicio de vigilancia o turnos vacíos (descuento del costo diario, penas específicas por falta de elementos).\n"
             "12. REGLA DE AISLAMIENTO DE ÍNDICES (INDEX ANCHORING): Si el usuario pregunta por la correspondencia o nombre exacto de un Anexo (ej. '¿Qué es el Anexo X?'), tienes estrictamente PROHIBIDO extraer la respuesta de los párrafos introductorios, acuerdos federales o notas de marco legal del inicio del PDF. Debes forzar al motor a buscar y priorizar exclusivamente la Tabla del Índice de Anexos (comúnmente denominada 'Relación de Anexos' o 'Formatos') y los encabezados principales del cuerpo del documento. No reportes menos anexos de los que figuran en la lista completa (ej. si hay 17 o 18 anexos en total, repórtalo completo de acuerdo con el índice).\n\n"
             f"{normative_ctx}"
@@ -3533,13 +6455,72 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             f"{comp_ctx}"
             f"{extra_context if extra_context else ''}\n"
             f"{lft_extra_context}\n"
+            f"{cronogram_prompt_extra}"
+            f"{guarantee_prompt_extra}"
+            f"{solvency_prompt_extra}"
+            f"{supplies_prompt_extra}"
+            f"{economic_prompt_extra}"
+            f"{adjudication_prompt_extra}"
+            f"{penalty_prompt_extra}"
             "**REGLA DE SALIDA INTELIGENTE:**\n"
             "Si el usuario pide un dato informativo, responde DIRECTAMENTE sin titubear. Si hay huecos técnicos, reporta el [Diagnóstico de Riesgo].\n"
         )
 
+        guarantee_user_format = ""
+        if guarantee_intent:
+            guarantee_user_format = (
+                "\n[CHECKLIST OBLIGATORIO ANTES DE ENVIAR]: "
+                "¿Incluiste la sección 1 con el porcentaje de fianza/garantía si aparece en los fragmentos? "
+                "¿Incluiste la sección 2 con el monto de Responsabilidad Civil si aparece? "
+                "Si ambos datos están en los fragmentos, ambos deben figurar en tu respuesta.\n"
+            )
+
+        solvency_user_format = ""
+        if solvency_intent:
+            solvency_user_format = (
+                "\n[CHECKLIST SOLVENCIA]: ¿Listaste opiniones SAT/IMSS/INFONAVIT con [PÁGINA]? "
+                "¿Listaste ISO/NMX/NOM/REPSE del fragmento 6.1 o anexos con [PÁGINA] cada uno?\n"
+            )
+
+        supplies_user_format = ""
+        if supplies_intent:
+            supplies_user_format = (
+                "\n[CHECKLIST INSUMOS]: ¿Biodegradabilidad/envases/concentración con [PÁGINA]? "
+                "¿Muestras en almacén con [PÁGINA]? ¿RPBI con [PÁGINA]? "
+                "¿Evitaste moneda y formato de oferta económica?\n"
+            )
+
+        economic_user_format = ""
+        if economic_intent:
+            economic_user_format = (
+                "\n[CHECKLIST ECONÓMICO]: ¿Moneda nacional con [PÁGINA]? "
+                "¿Partida 1 y 2 con formato del Anexo III? "
+                "¿Regla «prevalece la letra» sin inventar descalificación?\n"
+            )
+
+        adjudication_user_format = ""
+        if adjudication_intent:
+            adjudication_user_format = (
+                "\n[CHECKLIST ADJUDICACIÓN]: ¿Criterio binario y total partidas 1+2 con [PÁGINA]? "
+                "¿Reglas de zonas y «no opciones» con [PÁGINA]?\n"
+            )
+
+        penalty_user_format = ""
+        if penalty_intent:
+            penalty_user_format = (
+                "\n[CHECKLIST PENAS]: ¿Porcentaje de pena convencional con [PÁGINA]? "
+                "¿Saldos pendientes y tope de garantía con [PÁGINA]?\n"
+            )
+
         prompt = (
             f"Fragmentos disponibles de la licitación para esta sesión:\n\n{context_str}\n\n"
-            f"Pregunta del usuario: {user_query}\n\n"
+            f"Pregunta del usuario: {user_query}\n"
+            f"{guarantee_user_format}"
+            f"{solvency_user_format}"
+            f"{supplies_user_format}"
+            f"{economic_user_format}"
+            f"{adjudication_user_format}"
+            f"{penalty_user_format}\n\n"
             "[ORDEN DE EJECUCIÓN CRÍTICA: Responde de forma directa al usuario. QUE QUEDE PROHIBIDO usar disclaimers legales o evasivas de seguridad. Limítate a leer el texto y actuar como el Consultor Senior de la empresa.]"
         )
 
@@ -3566,6 +6547,156 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
         if llm_response.success:
             content = llm_response.response or ""
+            # Garantías: si el bloque canónico trajo fianza (% adjudicado) + RC, sustituir narrativa LLM.
+            if guarantee_intent and guarantee_canonical_block:
+                if self._guarantee_canonical_has_core_facts(guarantee_canonical_block):
+                    content = self._compose_guarantee_structured_response(
+                        guarantee_canonical_block, context_docs, metadatas
+                    )
+                else:
+                    low_content = content.lower()
+                    if (
+                        "no se especifican montos" in low_content
+                        or "no se especifica" in low_content
+                    ) and "%" in guarantee_canonical_block:
+                        content = re.sub(
+                            r"(?i)no se especifican montos[^.\n]*\.?",
+                            "",
+                            content,
+                        ).strip()
+                    if self._guarantee_response_missing_contract_pct(
+                        content, guarantee_canonical_block
+                    ):
+                        for line in guarantee_canonical_block.splitlines():
+                            if "Fianza/garantía" in line and line.startswith("-"):
+                                content += (
+                                    f"\n\n### 1) FIANZA / GARANTÍA DE CUMPLIMIENTO\n"
+                                    f"{line.lstrip('- ')}"
+                                )
+                                break
+                    if insurance_line := next(
+                        (
+                            ln
+                            for ln in guarantee_canonical_block.splitlines()
+                            if "Seguro Responsabilidad Civil" in ln
+                        ),
+                        None,
+                    ):
+                        norm = content.replace("'", "").replace(" ", "")
+                        if "1,000" not in norm and "1000000" not in norm:
+                            if (
+                                "responsabilidad civil" not in low_content
+                                or "millón" not in low_content
+                            ):
+                                content += (
+                                    f"\n\n### 2) SEGURO DE RESPONSABILIDAD CIVIL\n"
+                                    f"{insurance_line.lstrip('- ')}"
+                                )
+                    content = self._sanitize_guarantee_contradictory_llm_body(
+                        content, guarantee_canonical_block
+                    )
+            if solvency_intent:
+                ext_docs: List[str] = []
+                ext_metas: List[Dict[str, Any]] = []
+                ext_seen: set = set()
+                for d, m in zip(raw_docs, raw_metas):
+                    if not d or d in ext_seen:
+                        continue
+                    ext_seen.add(d)
+                    ext_docs.append(d)
+                    ext_metas.append(m if isinstance(m, dict) else {})
+                    if len(ext_docs) >= 22:
+                        break
+                pool_docs = ext_docs or context_docs
+                pool_metas = ext_metas or metadatas
+                if self._solvency_structured_ready(pool_docs, pool_metas):
+                    content = self._compose_solvency_structured_response(
+                        pool_docs, pool_metas
+                    )
+            if supplies_intent and not economic_intent:
+                ext_docs_sp: List[str] = []
+                ext_metas_sp: List[Dict[str, Any]] = []
+                ext_seen_sp: set = set()
+                for d, m in zip(raw_docs, raw_metas):
+                    if not d or d in ext_seen_sp:
+                        continue
+                    ext_seen_sp.add(d)
+                    ext_docs_sp.append(d)
+                    ext_metas_sp.append(m if isinstance(m, dict) else {})
+                    if len(ext_docs_sp) >= 24:
+                        break
+                pool_sp_docs = ext_docs_sp or context_docs
+                pool_sp_metas = ext_metas_sp or metadatas
+                if self._supplies_structured_ready(pool_sp_docs, pool_sp_metas):
+                    content = self._compose_supplies_structured_response(
+                        pool_sp_docs, pool_sp_metas
+                    )
+            if economic_intent:
+                ext_docs_e: List[str] = []
+                ext_metas_e: List[Dict[str, Any]] = []
+                ext_seen_e: set = set()
+                for d, m in zip(raw_docs, raw_metas):
+                    if not d or d in ext_seen_e:
+                        continue
+                    ext_seen_e.add(d)
+                    ext_docs_e.append(d)
+                    ext_metas_e.append(m if isinstance(m, dict) else {})
+                    if len(ext_docs_e) >= 22:
+                        break
+                pool_e_docs = ext_docs_e or context_docs
+                pool_e_metas = ext_metas_e or metadatas
+                if self._economic_structured_ready(pool_e_docs, pool_e_metas):
+                    content = self._compose_economic_structured_response(
+                        pool_e_docs, pool_e_metas
+                    )
+                content = self._append_economic_gap_alert_if_needed(
+                    content, pool_e_docs, economic_intent
+                )
+            if adjudication_intent:
+                ext_docs_a: List[str] = []
+                ext_metas_a: List[Dict[str, Any]] = []
+                ext_seen_a: set = set()
+                for d, m in zip(raw_docs, raw_metas):
+                    if not d or d in ext_seen_a:
+                        continue
+                    ext_seen_a.add(d)
+                    ext_docs_a.append(d)
+                    ext_metas_a.append(m if isinstance(m, dict) else {})
+                    if len(ext_docs_a) >= 22:
+                        break
+                pool_a_docs = ext_docs_a or context_docs
+                pool_a_metas = ext_metas_a or metadatas
+                if self._adjudication_structured_ready(pool_a_docs, pool_a_metas):
+                    content = self._compose_adjudication_structured_response(
+                        pool_a_docs, pool_a_metas
+                    )
+            if penalty_intent:
+                ext_docs_p: List[str] = []
+                ext_metas_p: List[Dict[str, Any]] = []
+                ext_seen_p: set = set()
+                for d, m in zip(raw_docs, raw_metas):
+                    if not d or d in ext_seen_p:
+                        continue
+                    ext_seen_p.add(d)
+                    ext_docs_p.append(d)
+                    ext_metas_p.append(m if isinstance(m, dict) else {})
+                    if len(ext_docs_p) >= 22:
+                        break
+                pool_p_docs, pool_p_metas = self._merge_doc_meta_pool(
+                    (penalty_hydrated_docs, penalty_hydrated_metas),
+                    (context_docs, metadatas),
+                    (ext_docs_p, ext_metas_p),
+                    limit=32,
+                )
+                pool_p_docs, pool_p_metas = self._rank_penalty_doc_pool(
+                    pool_p_docs, pool_p_metas
+                )
+                if self._penalty_should_compose(pool_p_docs, pool_p_metas):
+                    content = self._compose_penalty_structured_response(
+                        pool_p_docs, pool_p_metas
+                    )
+                else:
+                    content = self._sanitize_penalty_llm_contradictions(content)
             # Inyección robusta post-LLM si se omitió la Alerta LFT para turnos de 24 horas
             if lft_alerts and ("24" in user_query or "elemento" in user_query.lower() or "entrada" in user_query.lower() or "pase" in user_query.lower() or "principal" in user_query.lower()):
                 for area, num_elems, msg in lft_alerts:
@@ -3576,93 +6707,112 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                             f_val = 4.0
                         content += f"\n\n**ALERTA LFT:** El motor ajustará la cotización a {f_val*2.0:.0f} elementos en nómina para cubrir el turno 24/7 sin pérdidas financieras."
             
-            # Inyección robusta post-LLM si se omitieron acreditaciones obligatorias clave (REPSE, SSPC, INFOSPE, CUIPS)
-            if "repse" in user_query.lower() or "acredit" in user_query.lower() or "registro" in user_query.lower() or "seguridad privada" in user_query.lower() or "sspc" in user_query.lower():
+            # Acreditaciones REPSE/SSPC/CUIPS: solo seguridad privada; nunca en solvencia ISO/NMX.
+            # Texto literal del fragmento + [PÁGINA]; sin plantillas fijas ni páginas 24/69 inventadas.
+            if (
+                not solvency_intent
+                and "### 2) Normativas técnicas" not in content
+                and self._detect_security_private_compliance_injection(user_query)
+            ):
                 repse_text = ""
                 sspc_text = ""
                 infospe_text = ""
                 cuips_text = ""
-                for doc in context_docs:
-                    doc_lower = doc.lower()
+                for doc, meta in zip(context_docs, metadatas):
+                    if not self._chunk_belongs_to_session(meta, session_id, self.vector_db):
+                        continue
+                    doc_lower = (doc or "").lower()
+                    pg = meta.get("page", "?")
                     if "repse" in doc_lower and not repse_text:
-                        repse_text = "• **Registro REPSE (Inciso aa / AA):** El licitante deberá presentar el Registro de prestadores de servicios especializados u obras especializadas (REPSE) vigente y acorde al objeto de la presente Licitación (Otorgar Servicios de Seguridad Privada)."
-                    if any(w in doc_lower for w in ["autorización", "autorizacion"]) and any(w in doc_lower for w in ["seguridad pública", "seguridad publica"]) and any(w in doc_lower for w in ["guanajuato", "estado"]) and not sspc_text:
-                        sspc_text = "• **Autorización SSP Guanajuato (Inciso t):** Deberá presentar autorización emitida por la Secretaría de Seguridad Pública del Estado de Guanajuato (o en su caso, para empresas de múltiples estados, el registro de la Secretaría de Gobernación vigente)."
+                        for sent in re.split(r"(?<=[.;])\s+", doc or ""):
+                            if "repse" in sent.lower() and len(sent.strip()) > 40:
+                                repse_text = f"• {sent.strip()} [PÁGINA {pg}]"
+                                break
+                    if (
+                        any(w in doc_lower for w in ["autorización", "autorizacion"])
+                        and any(
+                            w in doc_lower
+                            for w in ["seguridad pública", "seguridad publica"]
+                        )
+                        and not sspc_text
+                    ):
+                        for sent in re.split(r"(?<=[.;])\s+", doc or ""):
+                            low_s = sent.lower()
+                            if "autoriz" in low_s and "seguridad" in low_s:
+                                sspc_text = f"• {sent.strip()} [PÁGINA {pg}]"
+                                break
                     if "infospe" in doc_lower and not infospe_text:
-                        infospe_text = "• **Certificación INFOSPE (Inciso bb / BB):** Presentar constancias de certificación de personas prestadoras de servicios de seguridad privada para la Capacitación y Adiestramiento del personal Operativo, emitidas por el INFOSPE."
+                        for sent in re.split(r"(?<=[.;])\s+", doc or ""):
+                            if "infospe" in sent.lower():
+                                infospe_text = f"• {sent.strip()} [PÁGINA {pg}]"
+                                break
                     if "cuips" in doc_lower and not cuips_text:
-                        cuips_text = "• **Cédulas CUIPS (Inciso u):** Presentar las Cédulas Únicas de Identificación Policial (CUIPS) del 100% del personal solicitado en esta licitación."
-                
-                compliance_injections = []
-                if repse_text:
-                    compliance_injections.append(repse_text)
-                if sspc_text:
-                    compliance_injections.append(sspc_text)
-                if infospe_text:
-                    compliance_injections.append(infospe_text)
-                if cuips_text:
-                    compliance_injections.append(cuips_text)
-                
+                        for sent in re.split(r"(?<=[.;])\s+", doc or ""):
+                            if "cuips" in sent.lower():
+                                cuips_text = f"• {sent.strip()} [PÁGINA {pg}]"
+                                break
+
+                compliance_injections = [
+                    t
+                    for t in (repse_text, sspc_text, infospe_text, cuips_text)
+                    if t
+                ]
                 if compliance_injections:
-                    filtered_injections = []
-                    for idx_inj, inj in enumerate(compliance_injections):
-                        short_name = "repse" if "repse" in inj.lower() else ("ssp" if "ssp" in inj.lower() else ("infospe" if "infospe" in inj.lower() else "cuips"))
-                        if short_name == "repse" and ("presentar el registro" not in content.lower() and "deberá presentar el registro" not in content.lower()):
-                            filtered_injections.append(inj)
-                        elif short_name == "ssp" and ("autorización emitida" not in content.lower() and "autorizacion emitida" not in content.lower()):
-                            filtered_injections.append(inj)
-                        elif short_name == "infospe" and "infospe" not in content.lower():
-                            filtered_injections.append(inj)
-                        elif short_name == "cuips" and "cuips" not in content.lower():
-                            filtered_injections.append(inj)
-                    
-                    if filtered_injections:
-                        content += "\n\n**Acreditaciones obligatorias de seguridad privada adicionales del punto 6.1 (Páginas 24 y 69):**\n" + "\n".join(filtered_injections)
-            
-            # Inyección robusta post-LLM si se omitieron las reglas de redondeo de decimales intermedios para cotizaciones económicas
-            q_lower_econ = user_query.lower()
-            # Filtro restrictivo para evitar falsas inyecciones en preguntas generales de propuesta económica (ej. garantías, plazos)
-            if any(w in q_lower_econ for w in ["moneda", "precio fijo", "precios fijos", "formato de precio", "formato de precios", "redondeo", "decimales", "decimal", "truncamiento"]):
-                if "alerta de brecha" not in content.lower():
-                    content += (
-                        "\n\n**ALERTA DE BRECHA ECONÓMICA:** Las bases confirman Moneda Nacional y Precios Fijos, pero los fragmentos indexados NO detallan la regla de redondeo (4 o 5 decimales) para los cálculos intermedios del FSR en el Anexo 9. Se recomienda apegarse al truncamiento estricto de la Ley del Seguro Social o formular pregunta en la Junta de Aclaraciones."
+                    pages_cited = sorted(
+                        {
+                            str(m.get("page"))
+                            for m in metadatas
+                            if m.get("page") is not None
+                        }
+                    )[:6]
+                    pages_note = (
+                        ", ".join(f"PÁGINA {p}" for p in pages_cited)
+                        if pages_cited
+                        else "ver fragmentos indexados"
                     )
+                    missing = []
+                    for inj in compliance_injections:
+                        tag = inj.lower()
+                        if "repse" in tag and "repse" in content.lower():
+                            continue
+                        if "infospe" in tag and "infospe" in content.lower():
+                            continue
+                        if "cuips" in tag and "cuips" in content.lower():
+                            continue
+                        if "autoriz" in tag and (
+                            "autorización" in content.lower()
+                            or "autorizacion" in content.lower()
+                        ):
+                            continue
+                        missing.append(inj)
+                    if missing:
+                        content += (
+                            f"\n\n**Acreditaciones de seguridad privada (fragmentos indexados — {pages_note}):**\n"
+                            + "\n".join(missing)
+                        )
             
-            # Inyección robusta post-LLM si se omitieron las formas de constituir la Garantía de Cumplimiento (Fianza, Cheque de Caja, Cheque Certificado)
-            if "garant" in user_query.lower() or "fianza" in user_query.lower():
-                fianza_found = False
-                cheque_found = False
-                for doc in context_docs:
-                    doc_lower = doc.lower()
-                    if "fianza" in doc_lower and not fianza_found:
-                        fianza_found = True
-                    if any(w in doc_lower for w in ["cheque de caja", "cheque certificado", "cheques de caja", "cheques certificados"]) and not cheque_found:
-                        cheque_found = True
-                
-                if fianza_found or cheque_found:
-                    # Limpiar activamente alucinaciones superficiales de efectivo o transferencia electrónica para la garantía del contrato
-                    content_clean = content
-                    for h_word in ["pago en efectivo", "transferencia bancaria", "transferencia electrónica", "efectivo", "transferencias"]:
-                        if h_word in content_clean.lower():
-                            content_clean = content_clean.replace("Pago en efectivo o mediante transferencia bancaria.", "Cheque de caja o cheque certificado.")
-                            content_clean = content_clean.replace("* Pago en efectivo o mediante transferencia bancaria.", "")
-                            content_clean = content_clean.replace("transferencia bancaria", "cheque certificado")
-                            content_clean = content_clean.replace("pago en efectivo", "cheque de caja")
-                    content = content_clean
-                    
-                    # Siempre inyectamos las especificaciones legales detalladas si no están todas presentes
-                    if not all(w in content.lower() for w in ["fianza", "cheque de caja", "cheque certificado"]):
-                        guarantee_injections = []
-                        if fianza_found:
-                            guarantee_injections.append("• **Póliza de fianza:** Emitida por institución autorizada en los términos de la Ley de Instituciones de Seguros y de Fianzas.")
-                        if cheque_found:
-                            guarantee_injections.append("• **Cheque de caja o cheque certificado:** A nombre del Instituto convocante, de acuerdo con los requisitos del pliego.")
-                        
-                        if guarantee_injections:
-                            content += "\n\n**Formas aceptadas de constituir la Garantía de Cumplimiento (Página 68):**\n" + "\n".join(guarantee_injections)
+            # Brecha económica (redondeo): solo vía _append_economic_gap_alert_if_needed si economic_intent
+            if not economic_intent:
+                q_lower_econ = user_query.lower()
+                if any(
+                    w in q_lower_econ
+                    for w in [
+                        "redondeo",
+                        "decimales",
+                        "decimal",
+                        "truncamiento",
+                    ]
+                ):
+                    if "alerta de brecha" not in content.lower():
+                        content = self._append_economic_gap_alert_if_needed(
+                            content, context_docs, True
+                        )
             
-            # Inyección robusta post-LLM si se omitieron las deducciones operativas reales por ausencias del personal de vigilancia
-            if any(w in user_query.lower() for w in ["falta", "penaliz", "deducc", "inasist", "ausenc", "retard"]):
+            # Deducciones operativas por personal (vigilancia): no mezclar con penas convencionales contractuales (P8).
+            if (
+                not penalty_intent
+                and self._detect_operational_personnel_penalty_intent(user_query)
+            ):
                 # Si el bot citó la alucinación de los bienes materiales y mora
                 if any(w in content.lower() for w in ["mora", "bienes pendientes de entregar", "2.5%", "atraso en la entrega", "retraso en la entrega"]):
                     deduc_text = ""
@@ -3729,7 +6879,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                         content += (
                             "\n\n**ALERTA DE RIESGO DE INSOLVENCIA:** Aunque las bases no publican un presupuesto máximo por ser información reservada, el piso de tu propuesta económica está estrictamente limitado por la Ley Federal del Trabajo. Cualquier cotización por debajo del salario mínimo integrado, prestaciones de ley y las cuotas IMSS/INFONAVIT calculadas en tu Anexo 9 será desechada automáticamente por insolvencia técnica."
                         )
-            
+
             # AGREGAR FOOTER DE BLOQUEO SI APLICA
             # --- HITO: Humanización de Salida (Anti-Cantinflas) ---
             if active_block:

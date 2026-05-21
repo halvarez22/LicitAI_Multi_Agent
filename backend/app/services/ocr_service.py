@@ -1,6 +1,7 @@
 import httpx
 import os
 import asyncio
+import fitz
 from typing import Dict, Any, Optional
 from app.agents.extractor_digital import DigitalExtractorAgent
 from app.agents.extractor_vision import VisionExtractorAgent
@@ -51,60 +52,114 @@ class OCRServiceClient:
         self.vision_extractor = VisionExtractorAgent()
 
     async def scan_document(self, file_path: str) -> Dict[str, Any]:
-        """Extrae texto del documento usando el mejor motor disponible."""
-        print(f"[*] [OCR] Iniciando extracción: {file_path}")
+        """Extrae texto del documento usando una estrategia híbrida página por página (Hito 12)."""
+        print(f"[*] [OCR] Iniciando extracción híbrida página por página: {file_path}")
 
-        # --- PASO 0: EXTRACCIÓN DIGITAL (vía agente dedicado) ---
-        digital_res = await self.digital_extractor.extract(file_path)
-        if digital_res.get("success"):
-            digital_norm = _normalize_extraction_result(digital_res, "pymupdf_digital")
-            # Si el texto digital es ruido (paginación/números), forzar fallback visual.
-            if not looks_like_low_signal_ocr(digital_norm.get("extracted_text", "")):
-                return digital_norm
-            print("[*] [OCR] Texto digital de baja señal; activando fallback visual.")
+        if not os.path.exists(file_path):
+            return {
+                "error": "Archivo no encontrado",
+                "success": False,
+                "pages": [],
+                "extracted_text": "",
+            }
 
-        # --- PASO 1: FALLBACK A VISIÓN (Jerarquía) ---
-        # 🧪 INTENTO 1: Microservicio Remoto (Docker ocr-vlm)
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                health_res = await client.get(f"{self.base_url}/health")
-                if health_res.status_code == 200:
-                    print("[*] [OCR] Usando motor remoto ocr-vlm...")
-                    # Lógica de polling (simplificada para robustez)
-                    resp = await client.post(f"{self.base_url}/api/v1/extract", data={"file_path": file_path}, timeout=300.0)
-                    if resp.status_code == 200:
-                        task_id = resp.json().get("task_id")
-                        for _ in range(150): # 5 mins
-                            status_res = await client.get(f"{self.base_url}/api/v1/status/{task_id}")
-                            st_data = status_res.json()
-                            if st_data.get("status") == "completed":
-                                res = st_data.get("result", {})
-                                res["method"] = "vlm_ocr_remote"
-                                return _normalize_extraction_result(res, "vlm_ocr_remote")
-                            await asyncio.sleep(2.0)
-        except Exception as e:
-            print(f"⚠️ [OCR] Motor remoto no disponible ({e}).")
+            doc = fitz.open(file_path)
+            total_pages = len(doc)
+            print(f"[*] [OCR] PDF abierto con éxito. Total páginas: {total_pages}")
+            
+            pages_extracted = []
+            full_text_parts = []
+            
+            for i, page in enumerate(doc):
+                page_num = i + 1
+                # 1. Intentar extracción digital para esta página
+                page_text_digital = self.digital_extractor.extract_page_digital(page)
+                
+                # 2. Evaluar señal digital de la página
+                # Exigimos al menos 50 caracteres significativos y que no parezca solo ruido de paginación/números sueltos
+                is_high_signal = len(page_text_digital.strip()) > 50 and not looks_like_low_signal_ocr(page_text_digital)
+                
+                if is_high_signal:
+                    print(f"[*] [OCR] Página {page_num}/{total_pages} -> EXTRAÍDA DIGITALMENTE (Señal Alta).")
+                    pages_extracted.append({
+                        "page": page_num,
+                        "text": page_text_digital,
+                        "method": "pymupdf_digital"
+                    })
+                    full_text_parts.append(f"\n--- PÁGINA {page_num} ---\n{page_text_digital}\n")
+                else:
+                    # 3. Fallback a Visión (VLM-OCR) para esta página específica
+                    print(f"[*] [OCR] Página {page_num}/{total_pages} -> BAJA SEÑAL O ESCANEADA. Iniciando VLM-OCR...")
+                    
+                    page_text_vision = ""
+                    # Intentar Microservicio Remoto ocr-vlm si está disponible
+                    if await self.health_check():
+                        try:
+                            async with httpx.AsyncClient(timeout=60.0) as client:
+                                # Usar endpoint de extracción de página única si existe
+                                resp = await client.post(
+                                    f"{self.base_url}/api/v1/extract_page", 
+                                    data={"file_path": file_path, "page_num": page_num}, 
+                                    timeout=60.0
+                                )
+                                if resp.status_code == 200:
+                                    page_text_vision = resp.json().get("text", "")
+                        except Exception as remote_err:
+                            print(f"⚠️ [OCR] Fallo al extraer página {page_num} vía microservicio remoto: {remote_err}")
+                    
+                    # Si no se pudo obtener de forma remota, usar el extractor de visión nativo
+                    if not page_text_vision.strip():
+                        page_text_vision = await self.vision_extractor.extract_page_vision(file_path, page_num)
+                        
+                    if page_text_vision.strip():
+                        print(f"[*] [OCR] Página {page_num}/{total_pages} -> EXTRAÍDA VÍA VLM-OCR con éxito.")
+                        pages_extracted.append({
+                            "page": page_num,
+                            "text": page_text_vision,
+                            "method": "vlm_ocr_vision"
+                        })
+                        full_text_parts.append(f"\n--- PÁGINA {page_num} ---\n{page_text_vision}\n")
+                    else:
+                        # Respaldo final si todo falla
+                        print(f"⚠️ [OCR] Página {page_num}/{total_pages} -> Falló extracción visual. Usando texto digital básico.")
+                        pages_extracted.append({
+                            "page": page_num,
+                            "text": page_text_digital,
+                            "method": "pymupdf_digital_fallback"
+                        })
+                        full_text_parts.append(f"\n--- PÁGINA {page_num} ---\n{page_text_digital}\n")
 
-        # 🧪 INTENTO 2: Agente Nativo (Ollama + glm-ocr) -> LA GARANTÍA FINAL
-        print("[*] [OCR] Activando Agente de Visión Nativo...")
-        try:
-            res_native = await self.vision_extractor.extract(file_path)
-            if res_native.get("success"):
-                res_native["method"] = "vlm_ocr_native_fallback"
-                return _normalize_extraction_result(res_native, "vlm_ocr_native_fallback")
-            failed = _normalize_extraction_result(res_native, "vlm_ocr_native_fallback")
-            failed["error_type"] = failed.get("error_type") or "OCR_FAILED"
-            return failed
+            full_text = "".join(full_text_parts).strip()
+            total_chars = len(full_text)
+            print(f"[*] [OCR] Extracción híbrida finalizada. Total caracteres extraídos: {total_chars}")
+            
+            return {
+                "success": total_chars > 100,
+                "method": "hybrid_page_by_page",
+                "pages": pages_extracted,
+                "total_pages": total_pages,
+                "extracted_text": full_text,
+                "stats": {
+                    "chars_total": total_chars,
+                    "pages_with_text": len([p for p in pages_extracted if p["text"].strip()]),
+                },
+                "quality_flags": [],
+                "error_type": None,
+                "error_message": None
+            }
+            
         except Exception as e:
+            print(f"❌ [OCR] Error crítico en extracción híbrida: {e}")
             return _normalize_extraction_result(
                 {
-                    "error": f"Fallo total en cadena de OCR: {str(e)}",
-                    "error_type": "OCR_EXCEPTION",
+                    "error": f"Fallo total en extracción híbrida: {str(e)}",
+                    "error_type": "HYBRID_EXCEPTION",
                     "success": False,
                     "pages": [],
                     "extracted_text": "",
                 },
-                "vlm_ocr_native_fallback",
+                "hybrid_page_by_page_failed",
             )
 
     async def health_check(self) -> bool:

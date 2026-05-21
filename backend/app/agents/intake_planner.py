@@ -625,8 +625,10 @@ class IntakePlannerAgent(BaseAgent):
         # --- BIFURCACIÓN ESTRATÉGICA (Checklist Corporativo) ---
         # Si el usuario ya firmó el Go/No-Go, silenciamos las alertas legales/administrativas
         # del Chatbot y las desviamos a un checklist estático.
+        from app.services.go_no_go_session_bridges import is_go_no_go_acknowledged
+
         go_no_go_override = session_state.get("go_no_go_override") or {}
-        already_authorized = go_no_go_override.get("authorized_by") == "user"
+        already_authorized = is_go_no_go_acknowledged(go_no_go_override)
         
         checklist_corporativo = []
         if already_authorized:

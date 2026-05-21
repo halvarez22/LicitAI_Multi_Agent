@@ -93,6 +93,50 @@ class VisionExtractorAgent:
             )
             return None
 
+    async def extract_page_vision(self, file_path: str, page_num: int) -> str:
+        """Realiza la extracción visual de una página individual (VLM-OCR)."""
+        try:
+            img_str = await self._render_page_base64(file_path, page_num)
+            if not img_str:
+                return ""
+
+            payload = {
+                "model": "glm-ocr",
+                "prompt": (
+                    "ANALIZAR Y TRANSCRIBIR DE FORMA FORENSE ESTA PÁGINA DE LICITACIÓN.\n"
+                    "INSTRUCCIONES DE ALTA FIDELIDAD:\n"
+                    "1. Extrae TODO el texto con precisión quirúrgica, palabra por palabra.\n"
+                    "2. Transcribe estrictamente todos los números, porcentajes (ej. 80%, 90%, 2%), constantes, fórmulas, fechas y valores monetarios. PROHIBIDO resumir o generalizar.\n"
+                    "3. Si hay tablas o anexos, formatéalos como tablas de Markdown estrictas (| Celda 1 | Celda 2 |). Asegura un orden de lectura lineal perfecto de izquierda a derecha y de arriba a abajo.\n"
+                    "4. No agregues introducciones, comentarios ni explicaciones. Devuelve únicamente la transcripción del texto de la imagen."
+                ),
+                "images": [img_str],
+                "stream": False,
+                "options": {
+                    "temperature": 0.0,
+                    "num_ctx": 16384,
+                    "num_predict": 4096
+                }
+            }
+
+            request_url = f"{self.ollama_url.strip('/')}/api/generate"
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                async with OllamaGuard("VLM (glm-ocr)", VLM_SEMAPHORE):
+                    print(f"[{self.name}] Procesando Pag {page_num} con GLM-OCR (Página Individual)...")
+                    res = await client.post(request_url, json=payload)
+                    res.raise_for_status()
+                    result_data = res.json()
+                    
+                    if result_data:
+                        text = (result_data.get("response", "") or "").strip()
+                        # Limpiar bloques markdown si existen
+                        text = text.replace("```markdown", "").replace("```text", "").replace("```", "").strip()
+                        return text
+            return ""
+        except Exception as e:
+            logger.error(f"[{self.name}] Error en extraccion visual de pagina {page_num}: {e}")
+            return ""
+
     async def extract(self, file_path: str) -> Dict[str, Any]:
         """
         Realiza la extracción visual de un PDF (OCR).

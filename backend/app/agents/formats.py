@@ -464,10 +464,29 @@ class FormatsAgent(BaseAgent):
         # Contador de formas numeradas por prefijo para detectar alucinaciones secuenciales
         _numbered_form_counts: Dict[str, int] = {}
 
+        from app.services.document_deliverable_filter import should_show_deliverable_in_ui
+
         for req in raw_list:
             rid = str(req.get("id", "")).strip().replace(".", "_")
             raw_name = req.get("nombre", "Documento")
             if not rid or rid in seen_ids:
+                continue
+
+            raw_name_u = str(raw_name or "")
+            desc_u = str(req.get("descripcion", "") or "")
+            if not should_show_deliverable_in_ui(
+                raw_name_u,
+                desc_u,
+                str(req.get("snippet") or ""),
+                str(req.get("tipo_accion") or ""),
+            ):
+                seen_ids.add(rid)
+                logger.info(
+                    "formats_causal_item_skipped",
+                    session_id=session_id,
+                    rid=rid,
+                    nombre=raw_name_u[:80],
+                )
                 continue
 
             # Si el compliance clasificó tipo_accion, usarlo directamente
@@ -479,8 +498,6 @@ class FormatsAgent(BaseAgent):
                 seen_ids.add(rid)
                 continue
 
-            raw_name_u = str(raw_name or "")
-            desc_u = str(req.get("descripcion", "") or "")
             blob_ids = f"{rid} {raw_name_u} {desc_u}".upper()
 
             # ── FILTRO ANTI-ALUCINACIÓN ──────────────────────────────────────────
@@ -603,58 +620,73 @@ class FormatsAgent(BaseAgent):
             filename = re.sub(r'_+', '_', filename).strip('_')
             
             template_id = self._template_id_for_requirement(req)
+            req_nombre = raw_name
+            req_desc = str(req.get("descripcion") or "")
+            req_snippet = str(req.get("snippet") or "")
+            req_source = str(req.get("archivo_fuente") or "").strip()
+            req_context = ""
+            context_type = "FRAGMENTADO (RAG)"
+            try:
+                if req_source and req_source.lower().endswith(".pdf"):
+                    logger.info(
+                        "formats_mirror_protocol_activated",
+                        session_id=session_id,
+                        source=req_source,
+                    )
+                    req_context = self.vector_db.get_full_document_text(session_id, req_source)
+                    context_type = "ESPEJO COMPLETO (TEMPLATE OFICIAL)"
+                if not req_context:
+                    rag_query = f"{req_nombre} {req_desc} {req_snippet}".strip()
+                    req_context_res = self.vector_db.query_texts(session_id, rag_query, n_results=5)
+                    docs = req_context_res.get("documents", []) if req_context_res else []
+                    req_context = "\n".join(d for d in docs[:4] if d and d.strip())
+            except Exception as _rag_err:
+                logger.warning(
+                    "formats_context_retrieval_failed",
+                    agent=self.agent_id,
+                    req_name=req_nombre[:80],
+                    error=str(_rag_err),
+                )
+
+            hint = req.get("generator_hint")
+            hint_line = f"\nGUÍA_DE_PLANTILLA_O_CLAVE: {hint}" if hint else ""
+            bases_context_block = (
+                f"\n--- INICIO DE {context_type} ---\n{req_context}\n--- FIN DE {context_type} ---\n"
+                if req_context
+                else ""
+            )
+            prompt = (
+                f"Genera el contenido legal oficial para el requisito {req.get('id')}: {req_nombre}\n"
+                f"Descripción: {req_desc}\nEmpresa: {razon_social}\n"
+                f"Representante: {representante}\nRFC: {rfc}\n"
+                f"{bases_context_block}\n"
+                f"{economic_block}\n{hint_line}"
+            )
+
+            content = ""
             if template_id:
                 tpl_data = self._template_data(session_id, master_profile, doc_metadata, user_inputs)
                 content = self.template_engine.render(template_id, tpl_data)
                 if not self.template_engine.verify_integrity(content, template_id):
                     raise TemplateIntegrityError(f"Integridad inválida para template {template_id}")
-                # ── PROTOCOLO DE ESPEJO ESTRICTO: Reconstrucción total de plantillas ──────────
-                req_nombre = raw_name
-                req_desc = str(req.get("descripcion") or "")
-                req_snippet = str(req.get("snippet") or "")
-                req_source = str(req.get("archivo_fuente") or "").strip()
-                
-                req_context = ""
-                context_type = "FRAGMENTADO (RAG)"
-                
-                try:
-                    # SI TENEMOS UN ARCHIVO FUENTE ESPECÍFICO, ACTIVAR MODO ESPEJO (DOCUMENTO COMPLETO)
-                    if req_source and req_source.lower().endswith(".pdf"):
-                        logger.info("formats_mirror_protocol_activated", session_id=session_id, source=req_source)
-                        req_context = self.vector_db.get_full_document_text(session_id, req_source)
-                        context_type = "ESPEJO COMPLETO (TEMPLATE OFICIAL)"
-                    
-                    # FALLBACK: Si no hay archivo fuente o falló la reconstrucción, usar RAG tradicional
-                    if not req_context:
-                        rag_query = f"{req_nombre} {req_desc} {req_snippet}".strip()
-                        req_context_res = self.vector_db.query_texts(session_id, rag_query, n_results=5)
-                        docs = req_context_res.get("documents", []) if req_context_res else []
-                        req_context = "\n".join(d for d in docs[:4] if d and d.strip())
-                except Exception as _rag_err:
-                    logger.warning("formats_context_retrieval_failed", agent=self.agent_id, req_name=req_nombre[:80], error=str(_rag_err))
 
-                hint = req.get("generator_hint")
-                hint_line = f"\nGUÍA_DE_PLANTILLA_O_CLAVE: {hint}" if hint else ""
-                
-                bases_context_block = (
-                    f"\n--- INICIO DE {context_type} ---\n{req_context}\n--- FIN DE {context_type} ---\n"
-                    if req_context else ""
+            resp = await llm.generate(
+                prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id
+            )
+            if not resp.success:
+                logger.error(
+                    "llm_generation_failed",
+                    agent=self.agent_id,
+                    req_name=raw_name,
+                    error=resp.error,
                 )
-                prompt = (
-                    f"Genera el contenido legal oficial para el requisito {req.get('id')}: {req_nombre}\n"
-                    f"Descripción: {req_desc}\nEmpresa: {razon_social}\n"
-                    f"Representante: {representante}\nRFC: {rfc}\n"
-                    f"{bases_context_block}\n"
-                    f"{economic_block}\n{hint_line}"
-                )
-                resp = await llm.generate(prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id)
-                if not resp.success:
-                    logger.error("llm_generation_failed", agent=self.agent_id, req_name=raw_name, error=resp.error)
-                    continue
-                content = resp.response
-                if not content.strip():
-                    logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
-                    continue
+                continue
+            llm_content = (resp.response or "").strip()
+            if llm_content:
+                content = llm_content
+            if not content.strip():
+                logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
+                continue
 
             content = _sanitize_legal_content(
                 content,

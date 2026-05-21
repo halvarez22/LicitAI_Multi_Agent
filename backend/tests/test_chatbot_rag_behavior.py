@@ -1116,3 +1116,486 @@ async def test_guardado_exitoso_avanza_indice(agent, mock_context):
     remaining_fields = [q.get("field") for q in saved_pending]
     assert "rfc" not in remaining_fields
     assert "telefono" in remaining_fields
+
+
+def test_detect_cronogram_intent_pregunta_cronograma():
+    q = (
+        "¿Cuál es el cronograma oficial de visitas, junta de aclaraciones, "
+        "apertura de proposiciones y fallo, incluyendo modalidad?"
+    )
+    assert ChatbotRAGAgent._detect_cronogram_intent(q) is True
+
+
+def test_detect_cronogram_intent_no_cronograma():
+    assert ChatbotRAGAgent._detect_cronogram_intent("¿Cuál es el monto de la fianza de cumplimiento?") is False
+
+
+def test_detect_guarantee_intent_pregunta_seguros():
+    q = (
+        "Identifica los requisitos obligatorios de seguros y garantías que debe presentar "
+        "el licitante ganador, especificando montos exactos, plazos de entrega, vigencias y endosos."
+    )
+    assert ChatbotRAGAgent._detect_guarantee_intent(q) is True
+
+
+def test_detect_adjudication_intent_pregunta_zonas():
+    q = (
+        "Explica el criterio exacto de adjudicación de este concurso y las condiciones "
+        "de participación si un licitante desea competir por una o varias zonas."
+    )
+    assert ChatbotRAGAgent._detect_adjudication_intent(q) is True
+
+
+def test_compose_adjudication_structured_includes_pages_and_zones():
+    p4 = (
+        "La adjudicación de la presente licitación será mediante el criterio binario, "
+        "previsto en el segundo párrafo del artículo 36 de la Ley."
+    )
+    p31 = (
+        "Para el Anexo III, se adjudicará por zona contemplando la partida 1 y la partida 2. "
+        "Por lo cual para éste Anexo y zona, la adjudicación será para la oferta que cumplan "
+        "con los requerimientos solicitados y constituya la mejor propuesta económica, tomando "
+        "en cuenta el total ofertado en conjunto de las partidas 1 y 2, según la zona en que participe."
+    )
+    p18 = (
+        "No se aceptarán opciones, deberá presentar una sola propuesta por Zona, "
+        "debiendo cotizar la totalidad de los renglones solicitados."
+    )
+    docs = [p4, p31, p18]
+    metas = [{"page": 4}, {"page": 31}, {"page": 18}]
+    out = ChatbotRAGAgent._compose_adjudication_structured_response(docs, metas)
+    assert "### 1) CRITERIO" in out
+    assert "### 2) PARTICIPACIÓN" in out
+    assert "criterio binario" in out.lower()
+    assert "total ofertado en conjunto" in out.lower()
+    assert "[PÁGINA 31]" in out
+    assert "[PÁGINA 4]" in out or "[PÁGINA 31]" in out
+    assert "[PÁGINA 18]" in out
+    assert "espero que esta información" not in out.lower()
+
+
+def test_detect_penalty_intent_pregunta_penas_contractuales():
+    q = (
+        "Detalla las penas convencionales aplicables por atraso o incumplimiento, "
+        "el mecanismo de cobro sobre saldos pendientes y el límite financiero "
+        "respecto a la garantía de cumplimiento."
+    )
+    assert ChatbotRAGAgent._detect_penalty_intent(q) is True
+    assert ChatbotRAGAgent._detect_operational_personnel_penalty_intent(q) is False
+
+
+def test_compose_penalty_structured_includes_rate_cap_and_pages():
+    p33_rate = (
+        "En caso de atraso en el cumplimiento de los plazos pactados en el contrato, "
+        "se aplicará una pena convencional del 2% por cada semana o fracción de semana de atraso."
+    )
+    p33_cap = (
+        "Las penalizaciones se harán efectivas contra los saldos pendientes de pago. "
+        "El monto total de las citadas sanciones no exceda la cuantía de la garantía "
+        "de cumplimiento otorgada por el proveedor."
+    )
+    docs = [p33_rate, p33_cap]
+    metas = [{"page": 33}, {"page": 33}]
+    assert ChatbotRAGAgent._penalty_structured_ready(docs, metas) is True
+    out = ChatbotRAGAgent._compose_penalty_structured_response(docs, metas)
+    assert "### 1) TASA" in out
+    assert "### 2) MECANISMO" in out
+    assert "2%" in out
+    assert "[PÁGINA 33]" in out
+    assert "saldos pendientes" in out.lower()
+    assert "garantía de cumplimiento" in out.lower() or "garantia de cumplimiento" in out.lower()
+    assert "bienes pendientes de entregar" not in out.lower()
+
+
+def test_page23_guarantee_admin_not_penalty_cap_bullets():
+    p23 = (
+        "Para efecto del cobro de la garantía de cumplimiento otorgada, las obligaciones "
+        "a cargo del licitante adjudicado, no son divisibles. "
+        "El licitante adjudicado cuenta con un plazo máximo de 10 días naturales siguientes "
+        "a la suscripción del contrato para presentar la garantía de cumplimiento al mismo."
+    )
+    metas = [{"page": 23}]
+    assert ChatbotRAGAgent._is_guarantee_admin_noise_for_penalty(p23) is True
+    assert ChatbotRAGAgent._is_penalty_contract_chunk(p23) is False
+    caps = ChatbotRAGAgent._extract_penalty_cap_and_mechanism_bullets([p23], metas)
+    assert caps == []
+
+
+def test_penalty_extracts_rate_without_pena_convencional_in_same_sentence():
+    """Chunks partidos: el % puede ir en oración distinta a «pena convencional»."""
+    doc = (
+        "Las penas convencionales aplicables en caso de atraso serán del 2% sobre el valor "
+        "de los bienes y/o servicios no suministrados o prestados por cada semana y/o "
+        "fracción de semana de atraso. "
+        "Las penalizaciones se harán efectivas directamente de los saldos pendientes de pago "
+        "a favor del licitante adjudicado. El monto total de las citadas sanciones no excederá "
+        "la cuantía de la garantía de cumplimiento del contrato otorgada por el proveedor."
+    )
+    metas = [{"page": 33}]
+    assert ChatbotRAGAgent._penalty_structured_ready([doc], metas) is True
+    out = ChatbotRAGAgent._compose_penalty_structured_response([doc], metas)
+    assert "[PÁGINA 33]" in out
+    assert "2%" in out
+    assert "saldos pendientes" in out.lower()
+
+
+def test_sanitize_penalty_llm_removes_false_no_tope_disclaimer():
+    raw = (
+        "El monto total no excederá la cuantía de la garantía de cumplimiento.\n\n"
+        "No hay información sobre un tope específico para las penalizaciones."
+    )
+    clean = ChatbotRAGAgent._sanitize_penalty_llm_contradictions(raw)
+    assert "no hay información" not in clean.lower()
+    assert "garantía de cumplimiento" in clean.lower()
+
+
+def test_detect_penalty_intent_user_p8_wording():
+    q = (
+        "¿Cuáles son las penas convencionales aplicables en caso de atraso o incumplimiento "
+        "en el servicio y qué límites financieros establece el pliego para estas sanciones?"
+    )
+    assert ChatbotRAGAgent._detect_penalty_intent(q) is True
+
+
+def test_is_penalty_contract_chunk_rejects_goods_mora_noise():
+    noise = (
+        "Se aplicará una pena convencional del 2.5% por día natural de mora sobre el valor "
+        "de los bienes pendientes de entregar."
+    )
+    assert ChatbotRAGAgent._is_penalty_contract_chunk(noise) is False
+
+
+def test_detect_economic_intent_pregunta_moneda_formato():
+    q = (
+        "Con respecto a las propuestas económicas, detalla la moneda requerida, "
+        "el formato de precios solicitado para cada partida y cómo se resolverán "
+        "las discrepancias entre montos en número y letra."
+    )
+    assert ChatbotRAGAgent._detect_economic_intent(q) is True
+
+
+def test_detect_supplies_intent_anexo_iii_partida_2_not_economic():
+    q = (
+        "NO pregunto por formato de propuesta económica ni moneda. Solo insumos y materiales "
+        "de la Partida 2 del Anexo III (limpieza): biodegradabilidad, tipo de envase, "
+        "concentración, productos químicos, muestras físicas en almacén ISAPEG, y manejo de RPBI."
+    )
+    assert ChatbotRAGAgent._detect_supplies_technical_intent(q) is True
+    assert ChatbotRAGAgent._detect_economic_intent(q) is False
+
+
+def test_detect_economic_intent_anexo_iii_with_moneda_still_economic():
+    q = (
+        "Para el Anexo III indica moneda nacional, tarifa mensual partida 1 y precio unitario partida 2."
+    )
+    assert ChatbotRAGAgent._detect_economic_intent(q) is True
+    assert ChatbotRAGAgent._detect_supplies_technical_intent(q) is False
+
+
+def test_compose_supplies_structured_excludes_moneda_sections():
+    doc_bio = (
+        "Los productos de limpieza deberán tener al menos 90% de biodegradabilidad "
+        "y ser no contaminantes."
+    )
+    doc_muestras = (
+        "El licitante deberá entregar muestras físicas en el almacén del convocante "
+        "para validación previa."
+    )
+    doc_rpbi = (
+        "El manejo de residuos peligrosos biológico-infecciosos RPBI deberá cumplir normativa."
+    )
+    docs = [doc_bio, doc_muestras, doc_rpbi]
+    metas = [{"page": 6}, {"page": 7}, {"page": 8}]
+    out = ChatbotRAGAgent._compose_supplies_structured_response(docs, metas)
+    assert "### 1) BIODEGRADABILIDAD" in out
+    assert "### 3) MUESTRAS" in out
+    assert "### 4) MANEJO DE RPBI" in out
+    assert "moneda nacional" not in out.lower()
+    assert "precio unitario" not in out.lower()
+    assert "[PÁGINA 6]" in out or "[PÁGINA 7]" in out
+
+
+def test_compose_economic_structured_prevalece_letra_not_dolares():
+    p19 = (
+        "Para el Anexo III partida 1, deberá ser presentada en moneda nacional, tarifa mensual, "
+        "incluyendo I.V.A. Para el Anexo III partida 2 deberá ser presentada en moneda nacional, "
+        "precio unitario, incluyendo I.V.A."
+    )
+    p20 = (
+        "Las cantidades descritas en su oferta deberán establecerse en número y letra, "
+        "en el entendido que si existe algún error, prevalecerá la cantidad estipulada en letra."
+    )
+    docs = [p19, p20]
+    metas = [{"page": 19}, {"page": 20}]
+    out = ChatbotRAGAgent._compose_economic_structured_response(docs, metas)
+    assert "### 1) MONEDA" in out
+    assert "### 3) REGLA" in out
+    assert "prevalecerá" in out.lower() or "prevalecera" in out.lower()
+    assert "[PÁGINA 19]" in out or "[PÁGINA 20]" in out
+    assert "dólar" not in out.lower() and "dolar" not in out.lower()
+    assert "descalific" not in out.lower()
+
+
+def test_security_private_injection_not_on_solvency_p4():
+    q = (
+        "¿Qué opiniones de cumplimiento, registros gubernamentales y normativas específicas "
+        "(ISO/NMX) se exigen con carácter obligatorio para evaluar la solvencia del participante?"
+    )
+    assert ChatbotRAGAgent._detect_solvency_intent(q) is True
+    assert ChatbotRAGAgent._detect_security_private_compliance_injection(q) is False
+
+
+def test_detect_solvency_intent_pregunta_iso_fiscal():
+    q = (
+        "¿Qué opiniones de cumplimiento, registros gubernamentales y normativas específicas "
+        "(ISO/NMX) se exigen con carácter obligatorio para evaluar la solvencia del participante?"
+    )
+    assert ChatbotRAGAgent._detect_solvency_intent(q) is True
+    assert ChatbotRAGAgent._detect_guarantee_intent(q) is False
+
+
+def test_compose_solvency_structured_includes_fiscal_norms_and_pages():
+    fiscal_doc = (
+        "Opinión positiva VIGENTE que emite el Servicio de Administración Tributaria (SAT). "
+        "Opinión del Cumplimiento de Obligaciones en materia de Seguridad Social del IMSS. "
+        "Constancia INFONAVIT sin adeudos."
+    )
+    norm_doc = (
+        "Certificación ISO 9001:2015 de calidad, ISO 14001:2015 ambiental, ISO 45001:2018 seguridad, "
+        "NMX-R-025-SCFI-2015 y NOM-035-STPS-2018. Registro REPSE vigente."
+    )
+    docs = [fiscal_doc, norm_doc]
+    metas = [{"page": 14}, {"page": 15}]
+    out = ChatbotRAGAgent._compose_solvency_structured_response(docs, metas)
+    assert "### 1)" in out
+    assert "### 2)" in out
+    assert "[PÁGINA 14]" in out
+    assert "[PÁGINA 15]" in out
+    assert "ISO 9001" in out
+    assert "REPSE" in out
+    assert "SAT" in out or "Administración Tributaria" in out
+
+
+def test_compose_guarantee_structured_response_replaces_llm_hallucination():
+    canonical = (
+        "[HECHOS CONTRACTUALES — extraídos de fragmentos indexados, obligatorios en la respuesta]\n"
+        "- Fianza/garantía de cumplimiento: 12% del monto total adjudicado (sin IVA según fragmento) [PÁGINA 22]\n"
+        "- Seguro Responsabilidad Civil — suma asegurada: 1'000,000.00 (Un millón de pesos) [PÁGINA 25]\n"
+    )
+    docs = [
+        "Fianza por el 12% del monto total adjudicado al firmar el contrato.",
+        (
+            "La fianza estará vigente durante la sustanciación de todos los recursos legales "
+            "hasta el oficio de conformidad de Gobierno."
+        ),
+        "Responsabilidad Civil suma asegurada 1'000,000.00 con endoso beneficiario al Gobierno del Estado.",
+        "El jabón líquido partida 2 requiere 65% de contenido nacional según punto 46.",
+    ]
+    metas = [{"page": 22}, {"page": 23}, {"page": 25}, {"page": 46}]
+    assert ChatbotRAGAgent._guarantee_canonical_has_core_facts(canonical) is True
+    out = ChatbotRAGAgent._compose_guarantee_structured_response(canonical, docs, metas)
+    assert "12%" in out
+    assert "1'000,000" in out or "1,000,000" in out
+    assert "65%" not in out
+    assert "partida 2" not in out.lower()
+    assert "### 1) FIANZA" in out
+    assert "### 2) SEGURO" in out
+    assert "### 3) PLAZOS" in out
+
+
+def test_sanitize_guarantee_contradictory_llm_body_keeps_structured_tail():
+    canonical = (
+        "[HECHOS CONTRACTUALES — extraídos de fragmentos indexados, obligatorios en la respuesta]\n"
+        "- Fianza/garantía de cumplimiento: 12% del monto total adjudicado (sin IVA según fragmento) [PÁGINA 22]\n"
+        "- Seguro Responsabilidad Civil — suma asegurada: 1'000,000.00 (Un millón de pesos) [PÁGINA 25]\n"
+    )
+    messy_body = (
+        "La sección 1 corresponde a la fianza/garantía. "
+        "El porcentaje de fianza/garantía no aparece explícitamente en ninguna parte del texto.\n\n"
+        "La sección 2 corresponde a la Responsabilidad Civil. "
+        "El monto exacto de la Responsabilidad Civil tampoco aparece explícitamente en los fragmentos.\n\n"
+        "En resumen, el porcentaje no aparece explícitamente y el monto tampoco aparece explícitamente.\n\n"
+        "### 1) FIANZA / GARANTÍA DE CUMPLIMIENTO\n"
+        "Fianza/garantía de cumplimiento: 12% del monto total adjudicado [PÁGINA 22]\n\n"
+        "### 2) SEGURO DE RESPONSABILIDAD CIVIL\n"
+        "Seguro Responsabilidad Civil — suma asegurada: 1'000,000.00 [PÁGINA 25]"
+    )
+    cleaned = ChatbotRAGAgent._sanitize_guarantee_contradictory_llm_body(messy_body, canonical)
+    assert "no aparece explícitamente" not in cleaned.lower()
+    assert "tampoco aparece" not in cleaned.lower()
+    assert "### 1) FIANZA" in cleaned
+    assert "12%" in cleaned
+    assert "1'000,000" in cleaned or "1,000,000" in cleaned
+
+
+def test_build_guarantee_canonical_block_extracts_pct_and_insurance():
+    docs = [
+        "Fianza por el 12% del monto total adjudicado según anexo G al firmar el contrato.",
+        "Responsabilidad Civil por daños a terceros suma asegurada de $1,000,000.00 M.N.",
+    ]
+    metas = [{"page": 22}, {"page": 25}]
+    block = ChatbotRAGAgent._build_guarantee_canonical_block(docs, metas)
+    assert "12%" in block
+    assert "PÁGINA 22" in block
+    assert "1,000,000" in block or "1'000,000" in block
+    assert "PÁGINA 25" in block
+
+
+def test_guarantee_contract_vs_fiscal_noise():
+    contract = "Fianza por el 12% del monto total adjudicado según anexo G al firmar el contrato."
+    fiscal = (
+        "La opinión del cumplimiento de obligaciones fiscales expedida por el SAT "
+        "con fecha no mayor a 30 días naturales anteriores al acto de apertura."
+    )
+    insurance = (
+        "Responsabilidad Civil por daños a terceros por suma asegurada de $1,000,000.00 M.N. "
+        "con endoso beneficiario preferente al Gobierno del Estado."
+    )
+    assert ChatbotRAGAgent._is_guarantee_contract_chunk(contract) is True
+    assert ChatbotRAGAgent._is_solvencia_fiscal_noise(fiscal) is True
+    assert ChatbotRAGAgent._is_guarantee_insurance_chunk(insurance) is True
+    assert ChatbotRAGAgent._is_solvencia_fiscal_noise(contract) is False
+
+
+def test_is_cronogram_calendar_vs_noise():
+    cal = (
+        "Visitas a instalaciones los días 06 y 07 de febrero de 2024. "
+        "Junta de aclaraciones el 12 de febrero de 2024 a las 11:00 horas."
+    )
+    noise = (
+        "19. Plan de contingencias en formato libre a través del cual se establezcan los procedimientos."
+    )
+    assert ChatbotRAGAgent._is_cronogram_calendar_chunk(cal) is True
+    assert ChatbotRAGAgent._is_cronogram_noise_chunk(noise) is True
+
+
+def test_cronogram_not_anchored_rejects_hallucinated_analyst_dates():
+    """Fechas del Analyst que no están en el pliego no deben tratarse como canónicas."""
+    cron = {
+        "visita_instalaciones": "15 de marzo de 2023",
+        "junta_aclaraciones": "22 de marzo de 2023",
+        "fallo": "5 de abril de 2023",
+    }
+    pliego = (
+        "Visitas a instalaciones los días 06 y 07 de febrero de 2024. "
+        "Junta de aclaraciones el 12 de febrero de 2024."
+    )
+    assert ChatbotRAGAgent._cronogram_anchored_in_pliego(cron, pliego) is False
+
+
+def test_cronogram_not_anchored_when_year_mismatch():
+    cron = {"junta_aclaraciones": "22 de marzo de 2023"}
+    pliego = "Junta de aclaraciones el 22 de marzo de 2024 en CompraNet."
+    assert ChatbotRAGAgent._cronogram_anchored_in_pliego(cron, pliego) is False
+
+
+def test_cronogram_anchored_accepts_matching_pliego():
+    cron = {
+        "visita_instalaciones": "06 y 07 de febrero de 2024",
+        "junta_aclaraciones": "12 de febrero de 2024",
+    }
+    pliego = (
+        "Visitas los días 06 y 07 de febrero de 2024. "
+        "Junta de aclaraciones el 12 de febrero de 2024 a las 11:00 horas."
+    )
+    assert ChatbotRAGAgent._cronogram_anchored_in_pliego(cron, pliego) is True
+
+
+def test_extract_analyst_cronogram_from_session_tasks():
+    sess = {
+        "tasks_completed": [
+            {
+                "task": "stage_completed:analysis",
+                "result": {
+                    "data": {
+                        "cronograma": {
+                            "visita_instalaciones": "06 y 07 de febrero de 2024",
+                            "junta_aclaraciones": "12 de febrero de 2024",
+                            "fallo": "No especificado",
+                        }
+                    }
+                },
+            }
+        ]
+    }
+    out = ChatbotRAGAgent._extract_analyst_cronogram_from_session(sess)
+    assert "06 y 07" in out.get("visita_instalaciones", "")
+    assert "12 de febrero" in out.get("junta_aclaraciones", "")
+
+
+@pytest.mark.asyncio
+async def test_handle_rag_cronogram_focal_search_and_analyst_block(agent, mock_context):
+    """Combo A+B: búsqueda focal Chroma + bloque Analyst en prompt del sistema."""
+    session_id = "sess_combo_ab"
+    mock_context.memory.get_session = AsyncMock(
+        return_value={
+            "tasks_completed": [
+                {
+                    "task": "stage_completed:analysis",
+                    "result": {
+                        "data": {
+                            "cronograma": {
+                                "visita_instalaciones": "06 y 07 de febrero de 2024",
+                                "junta_aclaraciones": "12 de febrero de 2024",
+                            }
+                        }
+                    },
+                }
+            ]
+        }
+    )
+    focal_q = ChatbotRAGAgent._CRONOGRAM_FOCAL_RAG_QUERY
+    filtered_queries: list = []
+
+    def _query_texts(sid, q, n_results=18):
+        return {
+            "documents": ["clausula legal pagina 22 desechamiento"] * 8,
+            "metadatas": [{"source": "bases.pdf", "page": 22}] * 8,
+        }
+
+    def _query_filtered(sid, q, source_filter=None, n_results=12):
+        filtered_queries.append(q)
+        if q == focal_q:
+            return {
+                "documents": [
+                    "Visitas 06 y 07 de febrero de 2024. Junta de aclaraciones 12 de febrero de 2024."
+                ],
+                "metadatas": [{"source": "bases_0001.pdf", "page": 5}],
+            }
+        return {
+            "documents": ["clausula legal pagina 22"],
+            "metadatas": [{"source": "bases_0001.pdf", "page": 22}],
+        }
+
+    agent.vector_db.get_sources = MagicMock(return_value=["bases_0001.pdf"])
+    agent.vector_db.query_texts = MagicMock(side_effect=_query_texts)
+    agent.vector_db.query_texts_filtered = MagicMock(side_effect=_query_filtered)
+    agent.vector_db.fetch_page_documents = MagicMock(
+        return_value=[
+            "Visitas 06 y 07 de febrero de 2024. Junta de aclaraciones 12 de febrero de 2024."
+        ]
+    )
+
+    captured_messages = []
+
+    async def _chat(messages, **kwargs):
+        captured_messages.append(messages)
+        return LLMResponse(success=True, response="cronograma ok")
+
+    agent.llm.chat = AsyncMock(side_effect=_chat)
+
+    user_q = (
+        "Indica el cronograma oficial: visitas, junta de aclaraciones, "
+        "apertura de proposiciones y fallo con fechas y horas."
+    )
+    out = await agent._handle_rag_query(session_id, user_q, correlation_id="test-ab")
+
+    assert out.status == AgentStatus.SUCCESS
+    assert focal_q in filtered_queries
+    system_content = captured_messages[0][0]["content"]
+    # Fechas ancladas en pliego mockeado → sí inyecta bloque Analyst
+    assert "CRONOGRAMA ESTRUCTURADO" in system_content
+    assert "06 y 07 de febrero" in system_content
+    assert "INSTRUCCIÓN CRONOGRAMA" in system_content
+    user_content = captured_messages[0][1]["content"]
+    assert "06 y 07 de febrero de 2024" in user_content

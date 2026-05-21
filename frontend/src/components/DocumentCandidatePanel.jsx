@@ -4,6 +4,7 @@ import {
     MessageSquare, ChevronRight, Search, FileCheck 
 } from 'lucide-react';
 import ForensicCard from './ForensicCard';
+import { countActionableDeliverables } from '../utils/auditSummary';
 
 /**
  * Panel de Documentos Detectados (Fast-Track)
@@ -15,6 +16,9 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
 
     // Extraer la lista si viene dentro del objeto de respuesta del servicio
     const isConsolidated = rawCandidates && !Array.isArray(rawCandidates) && rawCandidates.sobre_1_tecnico;
+    const isFilteredList = rawCandidates?._meta?.filtered_actionable_only === true;
+    const actionableCount = countActionableDeliverables(rawCandidates);
+    const looksUnfilteredLegacy = isConsolidated && !isFilteredList && actionableCount > 80;
     const candidatesArray = Array.isArray(rawCandidates) 
         ? rawCandidates 
         : (rawCandidates?.candidate_document_list || []);
@@ -165,7 +169,16 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '15px' }}>
                 <div>
                     <h4 style={{ fontSize: '16px', fontWeight: 800, color: '#f1f5f9', marginBottom: '4px' }}>Documentos de la Propuesta</h4>
-                    <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Lista consolidada de entregables identificados listos para generación.</p>
+                    <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        {isConsolidated
+                            ? `Entregables accionables por sobre (${actionableCount} ítems; sin causales ni procedimiento del pliego).`
+                            : 'Lista filtrada; pulsa «Actualizar análisis» para regenerar la vista por sobres.'}
+                    </p>
+                    {looksUnfilteredLegacy && (
+                        <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '6px' }}>
+                            Lista antigua sin filtrar detectada. Recarga la página (F5) o pulsa «Actualizar análisis» para ver solo entregables (~60 ítems).
+                        </p>
+                    )}
                 </div>
                 <div style={{ position: 'relative', flex: 1, maxWidth: '250px' }}>
                     <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />

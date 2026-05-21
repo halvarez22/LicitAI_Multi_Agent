@@ -9,10 +9,11 @@
 - [x] Modificar `orchestrator.py` para inyectar candidatos en `_response_with_generation_state`.
 - [x] Asegurar retornos en gaps económicos incluyan la lista.
 
-## Fase 3: Filtrado de Ruido (PENDIENTE)
-- [ ] Modificar `DocumentCandidateListService.py` para excluir ítems `informativo` de la lista final.
-- [ ] Actualizar el resumen (`candidate_summary`) para reflejar solo ítems accionables.
-- [ ] Validar con una nueva ejecución completa.
+## Fase 3: Filtrado de Ruido (COMPLETADO)
+- [x] Modificar `DocumentCandidateListService.py` para excluir ítems `informativo` de la lista final.
+- [x] Actualizar el resumen (`candidate_summary`) para reflejar solo ítems accionables.
+- [x] Propagar `filter_compliance_master_list` al pipeline de generación (`orchestrator` → writers).
+- [ ] Validar con una nueva ejecución completa en UI (Fase 4).
 
 ## Fase 4: Validación y Cierre
 - [ ] Verificar en UI que la lista de UNAQ-2026 bajó de 288 a ~83 ítems.

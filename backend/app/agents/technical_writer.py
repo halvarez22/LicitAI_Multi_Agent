@@ -402,18 +402,36 @@ class TechnicalWriterAgent(BaseAgent):
         # Las zonas administrativo/formatos se gestionan por FormatsAgent.
         all_candidates = compliance_data.get("tecnico", [])
 
-        seen_ids = set()
+        from app.services.document_deliverable_filter import (
+            normalize_deliverable_key,
+            should_show_deliverable_in_ui,
+        )
+
+        seen_ids: set[str] = set()
+        seen_sigs: set[str] = set()
         for req in all_candidates:
             action = str(req.get("tipo_accion", "unknown") or "unknown").lower()
             if action not in action_counts:
                 action = "unknown"
             action_counts[action] = action_counts.get(action, 0) + 1
+            nombre_u = str(req.get("nombre") or "")
+            desc_u = str(req.get("descripcion") or "")
+            if not should_show_deliverable_in_ui(
+                nombre_u,
+                desc_u,
+                str(req.get("snippet") or ""),
+                action,
+            ):
+                continue
             r_id = str(req.get("id", ""))
             if not r_id and req.get("nombre"):
                 r_id = str(req.get("nombre", ""))[:80]
-            if _is_technical_writable(req) and r_id not in seen_ids:
-                tech_requirements.append(req)
-                seen_ids.add(r_id)
+            sig = normalize_deliverable_key(nombre_u, "tecnico")
+            if not _is_technical_writable(req) or r_id in seen_ids or sig in seen_sigs:
+                continue
+            tech_requirements.append(req)
+            seen_ids.add(r_id)
+            seen_sigs.add(sig)
 
         total_candidates = len(all_candidates)
         evidence_true = sum(1 for r in all_candidates if bool(r.get("evidence_match")))

@@ -366,8 +366,44 @@ def _response_with_generation_state(
     candidates = base.get("fast_track_document_candidates") or session_state.get("document_candidates_v1")
     if candidates:
         out["fast_track_document_candidates"] = candidates
-        
+    consolidated = base.get("document_candidates_consolidated") or session_state.get(
+        "document_candidates_consolidated"
+    )
+    if consolidated and isinstance(consolidated, dict) and consolidated.get("sobre_1_tecnico") is not None:
+        from app.services.document_deliverable_filter import (
+            filter_consolidated_document_candidates,
+        )
+
+        out["document_candidates_consolidated"] = filter_consolidated_document_candidates(
+            consolidated
+        )
+
     return out
+
+
+def _apply_filtered_compliance_master_list(
+    input_data: Dict[str, Any],
+    agent_input: AgentInput,
+) -> tuple[Dict[str, Any], AgentInput]:
+    """
+    Propaga la lista de compliance ya filtrada (sin causales/informativos) hacia
+    TechnicalWriter, Formats y EconomicWriter en generación documental.
+    """
+    cm = input_data.get("compliance_master_list") or {}
+    if not any(cm.get(k) for k in ("administrativo", "tecnico", "formatos")):
+        return input_data, agent_input
+    from app.services.document_deliverable_filter import filter_compliance_master_list
+
+    filtered = filter_compliance_master_list(cm)
+    input_data["compliance_master_list"] = filtered
+    return input_data, agent_input.model_copy(
+        update={
+            "company_data": {
+                **(agent_input.company_data or {}),
+                "compliance_master_list": filtered,
+            }
+        }
+    )
 
 
 async def _safe_save_session(
@@ -984,6 +1020,20 @@ class OrchestratorAgent(BaseAgent):
                         comp_data = comp_res.get("data", {}) if isinstance(comp_res, dict) else (getattr(comp_res, "data", {}) if comp_res else {})
                         
                         if comp_data and (comp_data.get("administrativo") or comp_data.get("tecnico") or comp_data.get("formatos")):
+                            from app.services.document_deliverable_filter import (
+                                filter_compliance_master_list,
+                            )
+
+                            comp_data = filter_compliance_master_list(comp_data)
+                            input_data["compliance_master_list"] = comp_data
+                            agent_input = agent_input.model_copy(
+                                update={
+                                    "company_data": {
+                                        **(agent_input.company_data or {}),
+                                        "compliance_master_list": comp_data,
+                                    }
+                                }
+                            )
                             logger.info("building_fast_track_candidates", session_id=session_id)
                             fast_track_candidates = build_candidate_document_list(
                                 compliance_master_list=comp_data,
@@ -1115,9 +1165,13 @@ class OrchestratorAgent(BaseAgent):
             # --- GoNoGoAgent: Semáforo de decisión antes del EconomicAgent ---
             intake_plan_data: Optional[Dict[str, Any]] = None
             go_no_go_override = session_state.get("go_no_go_override") or {}
-            _already_authorized = go_no_go_override.get("authorized_by") == "user"
-            # Solo saltar Go/No-Go en modos de generación cuando ya fue autorizado
-            # En analysis_only y full siempre ejecutar para mostrar el panel al usuario
+            from app.services.go_no_go_session_bridges import (
+                build_silent_go_no_go_override,
+                is_go_no_go_acknowledged,
+            )
+
+            _already_authorized = is_go_no_go_acknowledged(go_no_go_override)
+            # Saltar re-ejecución en generación si ya hubo acknowledgment (user o system_auto).
             _skip_go_no_go = mode in ("generation_only", "generation") and _already_authorized
 
             if not _skip_go_no_go:
@@ -1286,52 +1340,82 @@ class OrchestratorAgent(BaseAgent):
                             )
 
                     if semaforo in ("RED", "YELLOW"):
-                        decision = OrchestratorState(
-                            stop_reason="GO_NO_GO_PENDING",
-                            aggregate_health="partial",
-                            next_steps=next_steps,
-                            correlation_id=correlation_id,
-                        ).model_dump()
-                        # Refrescar session_state desde BD para no sobreescribir tasks_completed
-                        # que record_task_completion guardó durante el compliance (Req 1.5)
-                        await _safe_save_session(
-                            self.context_manager.memory, session_id,
-                            {
-                                "last_orchestrator_decision": decision, 
-                                "go_no_go_result": gng_data,
-                                "intake_plan": intake_plan_data
-                            }
+                        _silent_analysis_ack = bool(
+                            settings.GO_NO_GO_SILENT_IN_ANALYSIS
+                            and mode in ("analysis_only", "full")
                         )
-                        fresh_state = await self.context_manager.memory.get_session(session_id) or {}
-                        session_state = fresh_state
-                        _notify_job_progress(
-                            agent_input.job_id, "go_no_go", 87,
-                            f"Semáforo {semaforo}: se detectaron brechas críticas. Esperando decisión del usuario.",
-                        )
-                        try:
-                            return {
-                                "status": "go_no_go_pending",
-                                "session_id": session_id,
-                                "go_no_go_result": gng_data,
-                                "intake_plan": intake_plan_data,
-                                "fast_track_document_candidates": fast_track_candidates,
-                                "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
-                                "orchestrator_decision": decision,
-                                "metadata": {"telemetry": telemetry},
-                            }
-                        finally:
-                            # PERSISTENCIA CRÍTICA: Asegurar que los candidatos se guarden en la sesión para el Chatbot
-                            if fast_track_candidates and session_id:
-                                try:
-                                    await _safe_save_session(
-                                        self.context_manager.memory, session_id,
-                                        {"document_candidates_v1": fast_track_candidates}
-                                    )
-                                except Exception as _save_exc:
-                                    logger.warning("orchestrator_persist_candidates_failed", error=str(_save_exc))
-                            
-                            # --- POST-PROCESO PROACTIVO (Final de Carrera) ---
-                            await self._proactive_injection_checkpoint(session_id)
+                        if _silent_analysis_ack:
+                            override_record = build_silent_go_no_go_override(
+                                gng_data or {},
+                                mode=mode,
+                            )
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                {
+                                    "go_no_go_result": gng_data,
+                                    "go_no_go_override": override_record,
+                                    "intake_plan": intake_plan_data,
+                                },
+                            )
+                            fresh_state = await self.context_manager.memory.get_session(session_id) or {}
+                            session_state = fresh_state
+                            go_no_go_override = override_record
+                            logger.info(
+                                "go_no_go_silent_ack",
+                                session_id=session_id,
+                                semaforo=semaforo,
+                                mode=mode,
+                                brechas_registradas=override_record.get("brechas_registradas"),
+                            )
+                            _notify_job_progress(
+                                agent_input.job_id,
+                                "go_no_go",
+                                87,
+                                "Viabilidad registrada (control interno). Continuando análisis…",
+                            )
+                        else:
+                            decision = OrchestratorState(
+                                stop_reason="GO_NO_GO_PENDING",
+                                aggregate_health="partial",
+                                next_steps=next_steps,
+                                correlation_id=correlation_id,
+                            ).model_dump()
+                            await _safe_save_session(
+                                self.context_manager.memory, session_id,
+                                {
+                                    "last_orchestrator_decision": decision,
+                                    "go_no_go_result": gng_data,
+                                    "intake_plan": intake_plan_data
+                                }
+                            )
+                            fresh_state = await self.context_manager.memory.get_session(session_id) or {}
+                            session_state = fresh_state
+                            _notify_job_progress(
+                                agent_input.job_id, "go_no_go", 87,
+                                f"Semáforo {semaforo}: se detectaron brechas críticas. Esperando decisión del usuario.",
+                            )
+                            try:
+                                return {
+                                    "status": "go_no_go_pending",
+                                    "session_id": session_id,
+                                    "go_no_go_result": gng_data,
+                                    "intake_plan": intake_plan_data,
+                                    "fast_track_document_candidates": fast_track_candidates,
+                                    "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
+                                    "orchestrator_decision": decision,
+                                    "metadata": {"telemetry": telemetry},
+                                }
+                            finally:
+                                if fast_track_candidates and session_id:
+                                    try:
+                                        await _safe_save_session(
+                                            self.context_manager.memory, session_id,
+                                            {"document_candidates_v1": fast_track_candidates}
+                                        )
+                                    except Exception as _save_exc:
+                                        logger.warning("orchestrator_persist_candidates_failed", error=str(_save_exc))
+                                await self._proactive_injection_checkpoint(session_id)
                 except Exception as _gng_exc:
                     logger.error(
                         "go_no_go_agent_failed",
@@ -1474,6 +1558,9 @@ class OrchestratorAgent(BaseAgent):
 
             # Generation
             if mode in ["full", "generation", "generation_only"]:
+                input_data, agent_input = _apply_filtered_compliance_master_list(
+                    input_data, agent_input
+                )
                 from app.agents.data_gap import DataGapAgent
                 gen_state = _prepare_generation_queue(
                     session_state, agent_input.resume_generation, mode
@@ -1902,6 +1989,20 @@ class OrchestratorAgent(BaseAgent):
 
                 checklist = await self._generate_checklist(session_id, input_data, execution_results)
                 session_state["checklist"] = checklist
+
+                # Ejecutar BiddingBinderAgent al final de la generación
+                try:
+                    from app.agents.bidding_binder import BiddingBinderAgent
+                    _notify_job_progress(
+                        agent_input.job_id,
+                        "generation.bidding_binder",
+                        98,
+                        "Compilando Guía de Armado de Sobres y Checklist de Integridad...",
+                    )
+                    binder_res = await BiddingBinderAgent(self.context_manager).process(agent_input)
+                    execution_results["bidding_binder"] = binder_res
+                except Exception as e:
+                    logger.error("bidding_binder_failed", session_id=session_id, error=str(e))
 
             # Confidence Summary (Restaurado Fase 1)
             confidence_summary = None

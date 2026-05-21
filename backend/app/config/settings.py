@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # --- EvidenceProfile Bridge (Go/No-Go con evidencia de sesión) ---
     ENABLE_EVIDENCE_PROFILE_BRIDGE: bool = False
 
+    # En analysis_only/full: registra semáforo y brechas sin GO_NO_GO_PENDING ni panel UI.
+    GO_NO_GO_SILENT_IN_ANALYSIS: bool = True
+
     # --- Resolución por bloques (Hito A1) ---
     ENABLE_BLOCK_RESOLUTION: bool = Field(
         default=True,

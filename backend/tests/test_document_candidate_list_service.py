@@ -35,10 +35,10 @@ def test_build_candidate_document_list_basic_summary():
         ],
     }
     out = build_candidate_document_list(compliance, require_human_confirmation=False, low_conf_threshold=0.7)
-    assert len(out["candidate_document_list"]) == 3
+    assert len(out["candidate_document_list"]) == 2
     assert out["candidate_summary"]["generar"] == 1
     assert out["candidate_summary"]["presentar_fisico"] == 1
-    assert out["candidate_summary"]["informativo"] == 1
+    assert out["candidate_summary"]["informativo"] == 0
     assert out["candidate_summary"]["no_aplica"] == 0
     assert out["unresolved_count"] == 0
     assert out["needs_human_confirmation"] is False
@@ -60,13 +60,9 @@ def test_build_candidate_document_list_marks_unknown_and_no_aplica():
         "formatos": [],
     }
     out = build_candidate_document_list(compliance, require_human_confirmation=True, low_conf_threshold=0.7)
-    assert len(out["candidate_document_list"]) == 1
-    item = out["candidate_document_list"][0]
-    assert item["no_aplica"] is True
-    assert item["tipo_accion_propuesto"] == "informativo"
-    assert out["candidate_summary"]["no_aplica"] == 1
-    assert out["unresolved_count"] == 1
-    assert out["needs_human_confirmation"] is True
+    assert out["candidate_document_list"] == []
+    assert out["candidate_summary"]["generar"] == 0
+    assert out["candidate_summary"]["informativo"] == 0
 
 
 def test_build_candidate_document_list_filters_normative_noise():

@@ -564,9 +564,76 @@ export const processAuditResults = (resultsData) => {
     if (wh && typeof wh === 'object') {
         base.economicWaitingHints = wh;
     }
+    const consolidated =
+        resultsData.document_candidates_consolidated || resultsData.documentCandidatesConsolidated;
+    if (
+        consolidated
+        && typeof consolidated === 'object'
+        && consolidated.sobre_1_tecnico
+        && consolidated._meta?.filtered_actionable_only === true
+    ) {
+        base.documentCandidatesConsolidated = consolidated;
+    }
     const ftDocs = resultsData.fast_track_document_candidates || resultsData.fastTrackDocumentCandidates;
     if (ftDocs) {
-        base.fastTrackDocumentCandidates = ftDocs;
+        if (
+            typeof ftDocs === 'object'
+            && ftDocs.sobre_1_tecnico
+            && ftDocs._meta?.filtered_actionable_only === true
+        ) {
+            base.fastTrackDocumentCandidates = ftDocs;
+            if (!base.documentCandidatesConsolidated) {
+                base.documentCandidatesConsolidated = ftDocs;
+            }
+        }
     }
     return applyInfrastructureUxOverrides(base);
 };
+
+/** Preferir CCC filtrado (meta.filtered_actionable_only); evita dictámenes viejos con 200+ ítems. */
+export function pickDocumentCandidatesForPanel(auditResults) {
+    if (!auditResults || typeof auditResults !== 'object') return [];
+    const ccc = auditResults.documentCandidatesConsolidated;
+    const ft = auditResults.fastTrackDocumentCandidates;
+    const ftIsCcc = ft && typeof ft === 'object' && ft.sobre_1_tecnico;
+    const cccFiltered = ccc?._meta?.filtered_actionable_only === true;
+    const ftFiltered = ftIsCcc && ft?._meta?.filtered_actionable_only === true;
+    const countCcc = (o) => {
+        if (!o?.sobre_1_tecnico) return Number.POSITIVE_INFINITY;
+        return (
+            (o.sobre_1_tecnico?.length || 0)
+            + (o.sobre_2_economico?.length || 0)
+            + (o.requisitos_legales?.length || 0)
+            + (o.otros_requisitos_criticos?.length || 0)
+        );
+    };
+    let consolidated = null;
+    if (cccFiltered) consolidated = ccc;
+    else if (ftFiltered) consolidated = ft;
+    else if (ccc && ftIsCcc) {
+        consolidated = countCcc(ccc) <= countCcc(ft) ? ccc : ft;
+    } else if (ccc && ccc.sobre_1_tecnico) consolidated = ccc;
+    else if (ftIsCcc) consolidated = ft;
+    if (consolidated && typeof consolidated === 'object' && consolidated.sobre_1_tecnico) {
+        return consolidated;
+    }
+    const flat = auditResults.fastTrackDocumentCandidates;
+    if (flat?.candidate_document_list) {
+        return flat;
+    }
+    return [];
+}
+
+/** Cuenta entregables accionables para subtítulo del panel. */
+export function countActionableDeliverables(candidates) {
+    if (!candidates || typeof candidates !== 'object') return 0;
+    if (candidates.sobre_1_tecnico) {
+        return (
+            (candidates.sobre_1_tecnico?.length || 0)
+            + (candidates.sobre_2_economico?.length || 0)
+            + (candidates.requisitos_legales?.length || 0)
+            + (candidates.otros_requisitos_criticos?.length || 0)
+        );
+    }
+    return candidates.candidate_document_list?.length || 0;
+}

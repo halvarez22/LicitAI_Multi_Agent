@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
     Folder, FileText, Download, Briefcase, 
     CheckSquare, Square, Archive, ChevronRight,
-    Loader2, ExternalLink, Info, AlertTriangle
+    Loader2, ExternalLink, Info, AlertTriangle, Trash2
 } from 'lucide-react';
 import axios from 'axios';
 import { API_BASE } from '../apiBase.js';
@@ -96,6 +96,43 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
     const hasDownloadableFiles = structure.some((folder) => Array.isArray(folder.files) && folder.files.length > 0);
     const canDownloadFullZip = hasDownloadableFiles || zipAvailable;
 
+    const handleClearGenerated = async () => {
+        if (!sessionId || sessionId === 'null') return;
+        const ok = window.confirm(
+            '¿Eliminar todo el expediente generado en disco?\n\n'
+            + 'Se borran carpetas SOBRE_*, propuestas técnicas/económicas y administrativos generados. '
+            + 'NO se borran las bases PDF ni el dictamen de auditoría.\n\n'
+            + 'Después pulsa «GENERAR PROPUESTA» para crear un expediente limpio.'
+        );
+        if (!ok) return;
+
+        setClearing(true);
+        try {
+            const res = await axios.delete(
+                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/generated-outputs`,
+                { data: { confirm: true } },
+            );
+            if (res.data?.success) {
+                setStructure([]);
+                setZipAvailable(false);
+                setSelectedFile(null);
+                if (typeof onExpedienteCleared === 'function') {
+                    onExpedienteCleared(res.data);
+                }
+                alert(res.data.message || 'Expediente generado eliminado.');
+            } else {
+                alert(res.data?.message || 'No se pudo limpiar el expediente.');
+            }
+        } catch (err) {
+            const msg = err?.response?.data?.detail || err?.message || 'Error al limpiar expediente';
+            alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+        } finally {
+            setClearing(false);
+            setLoading(true);
+            await fetchStructure();
+        }
+    };
+
     const handleDownloadZip = async () => {
         if (!canDownloadFullZip) {
             alert("Aun no hay expediente generado para esta sesion. Completa la generacion antes de descargar.");
@@ -156,22 +193,48 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                     <h3 style={{ fontSize: '20px', fontWeight: 800, color: 'var(--primary)', marginBottom: '4px' }}>Logística y Expedientes</h3>
                     <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Expediente completo organizado por sobres oficiales.</p>
                 </div>
-                <button 
-                    onClick={handleDownloadZip}
-                    disabled={downloading === 'ZIP' || !canDownloadFullZip}
-                    title={!canDownloadFullZip ? 'No hay expediente generado aun para descargar' : 'Descargar expediente completo'}
-                    style={{ 
-                        display: 'flex', alignItems: 'center', gap: '8px',
-                        padding: '10px 20px', borderRadius: '12px', background: 'var(--primary)',
-                        color: 'white', border: 'none', fontWeight: 700,
-                        cursor: (downloading === 'ZIP' || !canDownloadFullZip) ? 'not-allowed' : 'pointer',
-                        opacity: (downloading === 'ZIP' || !canDownloadFullZip) ? 0.65 : 1,
-                        boxShadow: '0 4px 15px var(--primary-glow)'
-                    }}
-                >
-                    {downloading === 'ZIP' ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                    {downloading === 'ZIP' ? 'EMPAQUETANDO...' : 'DESCARGAR EXPEDIENTE COMPLETO'}
-                </button>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', justifyContent: 'flex-end' }}>
+                    <button
+                        type="button"
+                        onClick={handleClearGenerated}
+                        disabled={clearing || downloading === 'ZIP' || !hasGeneratedOnDisk}
+                        title="Borra Word/ZIP y sobres generados para volver a empaquetar desde cero"
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '10px 16px',
+                            borderRadius: '12px',
+                            background: 'rgba(239, 68, 68, 0.12)',
+                            color: '#fca5a5',
+                            border: '1px solid rgba(239, 68, 68, 0.35)',
+                            fontWeight: 700,
+                            fontSize: '11px',
+                            cursor: clearing ? 'wait' : 'pointer',
+                            opacity: clearing ? 0.7 : 1,
+                        }}
+                    >
+                        {clearing ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                        {clearing ? 'LIMPIANDO...' : 'LIMPIAR EXPEDIENTE GENERADO'}
+                    </button>
+                    <button 
+                        type="button"
+                        onClick={handleDownloadZip}
+                        disabled={downloading === 'ZIP' || !canDownloadFullZip}
+                        title={!canDownloadFullZip ? 'No hay expediente generado aun para descargar' : 'Descargar expediente completo'}
+                        style={{ 
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                            padding: '10px 20px', borderRadius: '12px', background: 'var(--primary)',
+                            color: 'white', border: 'none', fontWeight: 700,
+                            cursor: (downloading === 'ZIP' || !canDownloadFullZip) ? 'not-allowed' : 'pointer',
+                            opacity: (downloading === 'ZIP' || !canDownloadFullZip) ? 0.65 : 1,
+                            boxShadow: '0 4px 15px var(--primary-glow)'
+                        }}
+                    >
+                        {downloading === 'ZIP' ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
+                        {downloading === 'ZIP' ? 'EMPAQUETANDO...' : 'DESCARGAR EXPEDIENTE COMPLETO'}
+                    </button>
+                </div>
             </div>
 
             {/* ALERTAS DE LOGÍSTICA (NUEVO) */}

@@ -187,3 +187,35 @@ async def test_full_orchestrator_blocked_and_resume_flow():
             
             # El estado final debe ser completed
             assert res2["generation_state"]["status"] == "completed"
+
+
+def test_apply_filtered_compliance_master_list_strips_causales():
+    from app.agents.orchestrator import _apply_filtered_compliance_master_list
+    from app.contracts.agent_contracts import AgentInput
+
+    raw = {
+        "administrativo": [
+            {
+                "id": "AD-1",
+                "nombre": "Acta constitutiva",
+                "descripcion": "Legal",
+                "snippet": "Acta",
+                "tipo_accion": "presentar_fisico",
+            },
+            {
+                "id": "AD-2",
+                "nombre": "No presentar documentación engrapada",
+                "descripcion": "Causal",
+                "snippet": "No presentar",
+                "tipo_accion": "generar",
+            },
+        ],
+        "tecnico": [],
+        "formatos": [],
+    }
+    agent_input = AgentInput(session_id="s1", company_data={})
+    input_data = {"compliance_master_list": raw}
+    out_data, out_agent = _apply_filtered_compliance_master_list(input_data, agent_input)
+    names = [x["nombre"] for x in out_data["compliance_master_list"]["administrativo"]]
+    assert names == ["Acta constitutiva"]
+    assert out_agent.company_data["compliance_master_list"]["administrativo"][0]["nombre"] == "Acta constitutiva"

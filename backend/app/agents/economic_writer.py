@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from docx import Document
 from openpyxl import Workbook
@@ -163,6 +163,7 @@ class EconomicWriterAgent(BaseAgent):
         # 4. Generación de Archivos (misma raíz que TechnicalWriter/FormatsAgent)
         output_base_dir = os.path.join("/data", "outputs", session_id, "2.propuesta_economica")
         os.makedirs(output_base_dir, exist_ok=True)
+        billing_spec = self._resolve_proportional_billing_spec(economic_data, mapeo_items)
         
         # 4.1 Generar Excel de Precios (Modo Espejo vs Genérico)
         excel_path = os.path.join(output_base_dir, "TABLA_PRECIOS_UNITARIOS.xlsx")
@@ -194,13 +195,19 @@ class EconomicWriterAgent(BaseAgent):
                 )
             except Exception as e:
                 print(f"[{self.name}] ⚠️ Falló el llenado espejo, usando generador genérico: {e}")
-                self._generate_price_excel(excel_path, mapeo_items, master_profile, resumen)
+                self._generate_price_excel(
+                    excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+                )
         else:
-            self._generate_price_excel(excel_path, mapeo_items, master_profile, resumen)
+            self._generate_price_excel(
+                excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+            )
         
         # 4.2 Generar Anexo AE (Word)
         word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
-        self._generate_anexo_ae(word_path, mapeo_items, resumen, master_profile)
+        self._generate_anexo_ae(
+            word_path, mapeo_items, resumen, master_profile, billing_spec=billing_spec
+        )
         
         # 4.3 Generar Carta Compromiso (Word)
         carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
@@ -289,7 +296,115 @@ class EconomicWriterAgent(BaseAgent):
 
 
 
-    def _generate_price_excel(self, path: str, items: List[Dict], profile: Dict, resumen: Dict):
+    @staticmethod
+    def _resolve_proportional_billing_spec(
+        economic_data: Dict[str, Any], items: List[Dict]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Especificación universal de facturación proporcional Partida 1 (sin session_id fijo).
+        Prioridad: payload del motor económico → variables de entorno → ítems mensuales P1.
+        """
+        for key in ("billing_proportional", "formula_incomplete_month"):
+            raw = economic_data.get(key)
+            if not isinstance(raw, dict):
+                continue
+            divisor = int(raw.get("days_divisor") or raw.get("divisor_dias") or 0)
+            months = int(raw.get("months") or raw.get("meses") or 9)
+            if divisor > 0:
+                tarifa = float(
+                    raw.get("tarifa_mensual")
+                    or raw.get("monthly_rate")
+                    or 0.0
+                )
+                if tarifa < 0.01:
+                    tarifa = EconomicWriterAgent._first_partida1_monthly_rate(items)
+                dias = int(raw.get("dias_transcurridos") or raw.get("days_elapsed") or 15)
+                return {
+                    "months": months,
+                    "days_divisor": divisor,
+                    "tarifa_mensual": tarifa,
+                    "dias_transcurridos": max(1, dias),
+                }
+
+        env_div = int(os.environ.get("LICITAI_PROP_BILLING_DAYS_DIVISOR", "0") or "0")
+        if env_div > 0:
+            env_months = int(os.environ.get("LICITAI_PROP_BILLING_MONTHS", "9") or "9")
+            tarifa = EconomicWriterAgent._first_partida1_monthly_rate(items)
+            if tarifa > 0:
+                return {
+                    "months": env_months,
+                    "days_divisor": env_div,
+                    "tarifa_mensual": tarifa,
+                    "dias_transcurridos": int(
+                        os.environ.get("LICITAI_PROP_BILLING_DAYS_ELAPSED", "15") or "15"
+                    ),
+                }
+        return None
+
+    @staticmethod
+    def _first_partida1_monthly_rate(items: List[Dict]) -> float:
+        for it in items:
+            partida = it.get("partida")
+            unidad = str(it.get("unidad") or "").lower()
+            if str(partida) in ("1", "1.0") and "mensual" in unidad:
+                return float(it.get("precio_unitario") or 0.0)
+        for it in items:
+            if str(it.get("partida")) in ("1", "1.0"):
+                return float(it.get("precio_unitario") or 0.0)
+        return 0.0
+
+    @staticmethod
+    def _append_proportional_billing_block(
+        ws, start_row: int, spec: Dict[str, Any], tarifa_cell: str
+    ) -> None:
+        """Bloque visible + fórmula Excel ((Tarifa*meses)/divisor)*días."""
+        months = int(spec.get("months") or 9)
+        divisor = int(spec.get("days_divisor") or 275)
+        dias = int(spec.get("dias_transcurridos") or 15)
+        r0 = start_row
+        ws.cell(row=r0, column=1, value="FACTURACIÓN PROPORCIONAL — PARTIDA 1").font = Font(
+            bold=True, size=11
+        )
+        ws.cell(
+            row=r0 + 1,
+            column=1,
+            value=(
+                "Si el servicio inicia después del 1.° día del mes, el pliego establece:"
+            ),
+        )
+        ws.cell(
+            row=r0 + 2,
+            column=1,
+            value=(
+                f"((Tarifa mensual × {months} meses) / {divisor}) × días naturales transcurridos "
+                f"(desde ingreso hasta fin de mes)"
+            ),
+        )
+        ws.cell(row=r0 + 3, column=1, value="Tarifa mensual de referencia (P. Unitario P1):")
+        ws.cell(row=r0 + 3, column=2, value=f"={tarifa_cell}")
+        ws.cell(row=r0 + 4, column=1, value="Días naturales transcurridos (ejemplo editable):")
+        dias_cell = f"B{r0 + 4}"
+        ws.cell(row=r0 + 4, column=2, value=dias)
+        formula = f"=(({tarifa_cell}*{months})/{divisor})*{dias_cell}"
+        ws.cell(row=r0 + 5, column=1, value="Importe proporcional calculado:")
+        ws.cell(row=r0 + 5, column=2, value=formula)
+        ws.cell(row=r0 + 6, column=1, value="Fórmula literal del pliego:")
+        ws.cell(
+            row=r0 + 6,
+            column=2,
+            value=(
+                f"(({months}×Tarifa)/{divisor})×Días — constantes {months} meses y {divisor} días"
+            ),
+        )
+
+    def _generate_price_excel(
+        self,
+        path: str,
+        items: List[Dict],
+        profile: Dict,
+        resumen: Dict,
+        billing_spec: Optional[Dict[str, Any]] = None,
+    ):
         """Crea un Excel profesional con fórmulas y formato."""
         wb = Workbook()
         ws = wb.active
@@ -318,6 +433,7 @@ class EconomicWriterAgent(BaseAgent):
             
         # Datos
         current_row = 4
+        first_p1_row: Optional[int] = None
         for item in items:
             ws.cell(row=current_row, column=1, value=item.get("partida")).border = border
             ws.cell(row=current_row, column=2, value=item.get("descripcion")).border = border
@@ -325,6 +441,8 @@ class EconomicWriterAgent(BaseAgent):
             ws.cell(row=current_row, column=4, value=item.get("cantidad")).border = border
             ws.cell(row=current_row, column=5, value=item.get("precio_unitario")).border = border
             ws.cell(row=current_row, column=6, value=item.get("importe")).border = border
+            if first_p1_row is None and str(item.get("partida")) in ("1", "1.0"):
+                first_p1_row = current_row
             current_row += 1
             
         # Totales desde resumen (calculados en Fase 1, no se recalculan)
@@ -335,6 +453,16 @@ class EconomicWriterAgent(BaseAgent):
         ws.cell(row=current_row + 2, column=6, value=resumen["iva"]).font = Font(bold=True)
         ws.cell(row=current_row + 3, column=5, value="TOTAL:").font = Font(bold=True)
         ws.cell(row=current_row + 3, column=6, value=resumen["total"]).font = Font(bold=True)
+
+        if billing_spec and billing_spec.get("days_divisor"):
+            tarifa_ref = (
+                f"E{first_p1_row}"
+                if first_p1_row
+                else str(round(float(billing_spec.get("tarifa_mensual") or 0), 2))
+            )
+            self._append_proportional_billing_block(
+                ws, current_row + 5, billing_spec, tarifa_ref
+            )
         
         # Ajustar anchos
         ws.column_dimensions['B'].width = 50
@@ -343,7 +471,14 @@ class EconomicWriterAgent(BaseAgent):
         
         wb.save(path)
 
-    def _generate_anexo_ae(self, path: str, items: List[Dict], resumen: Dict, profile: Dict):
+    def _generate_anexo_ae(
+        self,
+        path: str,
+        items: List[Dict],
+        resumen: Dict,
+        profile: Dict,
+        billing_spec: Optional[Dict[str, Any]] = None,
+    ):
         """Genera el Word del Anexo AE (Propuesta Económica Detallada)."""
         doc = Document()
         
@@ -373,6 +508,26 @@ class EconomicWriterAgent(BaseAgent):
             row_cells[1].text = item.get('descripcion')
             row_cells[2].text = str(item.get('cantidad'))
             row_cells[3].text = f"${item.get('importe'):,.2f}"
+
+        if billing_spec and billing_spec.get("days_divisor"):
+            months = int(billing_spec.get("months") or 9)
+            divisor = int(billing_spec.get("days_divisor") or 275)
+            tarifa = float(billing_spec.get("tarifa_mensual") or 0.0)
+            dias = int(billing_spec.get("dias_transcurridos") or 15)
+            monto = (tarifa * months) / divisor * dias if divisor else 0.0
+            doc.add_heading("Facturación proporcional — Partida 1", level=2)
+            doc.add_paragraph(
+                "Si el servicio de limpieza inicia posterior al primer día del mes, "
+                "aplica la fórmula del pliego:"
+            )
+            doc.add_paragraph(
+                f"((Tarifa mensual × {months} meses) / {divisor}) × días naturales transcurridos "
+                f"(desde la fecha de ingreso hasta el último día del mes)."
+            )
+            doc.add_paragraph(
+                f"Tarifa mensual de referencia: ${tarifa:,.2f} MXN | "
+                f"Días de ejemplo: {dias} | Importe proporcional: ${monto:,.2f} MXN"
+            )
 
         doc.add_paragraph(f"\nSUBTOTAL: ${resumen['subtotal']:,.2f}")
         # Calculamos el porcentaje real para mostrarlo en el documento

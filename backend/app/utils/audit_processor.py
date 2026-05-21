@@ -416,6 +416,22 @@ def process_audit_results_backend(
     orch_dec = results_data.get("orchestrator_decision")
     if isinstance(orch_dec, dict) and orch_dec.get("waiting_hints"):
         base["economicWaitingHints"] = orch_dec["waiting_hints"]
-    if results_data.get("fast_track_document_candidates"):
-        base["fastTrackDocumentCandidates"] = results_data["fast_track_document_candidates"]
+    def _filter_ccc_payload(raw: Any) -> Any:
+        if not isinstance(raw, dict) or raw.get("sobre_1_tecnico") is None:
+            return raw
+        from app.services.document_deliverable_filter import (
+            filter_consolidated_document_candidates,
+        )
+
+        return filter_consolidated_document_candidates(raw)
+
+    ccc = results_data.get("document_candidates_consolidated")
+    if ccc:
+        base["documentCandidatesConsolidated"] = _filter_ccc_payload(ccc)
+    ft = results_data.get("fast_track_document_candidates")
+    if ft:
+        if isinstance(ft, dict) and ft.get("sobre_1_tecnico") is not None:
+            base["fastTrackDocumentCandidates"] = _filter_ccc_payload(ft)
+        else:
+            base["fastTrackDocumentCandidates"] = ft
     return apply_infrastructure_ux_overrides(base)

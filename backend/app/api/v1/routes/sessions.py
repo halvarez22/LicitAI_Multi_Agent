@@ -70,6 +70,15 @@ class EconomicZeroTotalBaseAckRequest(BaseModel):
     reason: str = Field(..., min_length=3, description="Cita o fundamento (auditoría)")
 
 
+class ClearGeneratedOutputsRequest(BaseModel):
+    """Confirmación explícita para borrar el expediente generado en disco."""
+
+    confirm: bool = Field(
+        ...,
+        description="Debe ser true para ejecutar el borrado (evita clicks accidentales).",
+    )
+
+
 logger = get_logger(__name__)
 router = APIRouter()
 
@@ -159,12 +168,19 @@ async def get_dictamen(session_id: str):
             last_quality_hints = session_data.get("last_document_quality_waiting_hints")
             last_fill_hints = session_data.get("last_document_fill_quality_waiting_hints")
             doc_candidates = session_data.get("document_candidates_consolidated") or session_data.get("document_candidates_final") or session_data.get("document_candidates_v1")
+            if isinstance(doc_candidates, dict) and doc_candidates.get("sobre_1_tecnico") is not None:
+                from app.services.document_deliverable_filter import (
+                    filter_consolidated_document_candidates,
+                )
+
+                doc_candidates = filter_consolidated_document_candidates(doc_candidates)
             return GenericResponse(
                 success=True,
                 message="Dictamen recuperado",
                 data={
                     "dictamen": session_data["dictamen"],
                     "go_no_go_result": session_data.get("go_no_go_result"),
+                    "go_no_go_override": session_data.get("go_no_go_override"),
                     "stop_reason": decision.get("stop_reason"),
                     "last_document_quality_waiting_hints": last_quality_hints
                     if isinstance(last_quality_hints, dict)
@@ -189,6 +205,15 @@ async def save_dictamen(session_id: str, request: DictamenRequest):
     try:
         session_data = await repo.get_session(session_id) or {}
         session_data["dictamen"] = request.dictamen
+        ccc_in = request.dictamen.get("documentCandidatesConsolidated") if isinstance(request.dictamen, dict) else None
+        if isinstance(ccc_in, dict) and ccc_in.get("sobre_1_tecnico") is not None:
+            from app.services.document_deliverable_filter import (
+                filter_consolidated_document_candidates,
+            )
+
+            filtered = filter_consolidated_document_candidates(ccc_in)
+            session_data["document_candidates_consolidated"] = filtered
+            session_data["dictamen"]["documentCandidatesConsolidated"] = filtered
         await repo.save_session(session_id, session_data)
         return GenericResponse(success=True, message="Dictamen guardado en Postgres exitosamente")
     except Exception as e:
@@ -253,9 +278,9 @@ async def get_checklist(session_id: str):
         session_data = await repo.get_session(session_id)
         if session_data and "checklist" in session_data:
             return GenericResponse(
-                success=True, 
-                message="Checklist recuperado exitosamente", 
-                data={"checklist": session_data["checklist"]}
+                success=True,
+                message="Checklist recuperado exitosamente",
+                data={"checklist": session_data["checklist"]},
             )
         return GenericResponse(success=False, message="No hay checklist generado para esta sesión")
     except Exception as e:
@@ -619,5 +644,80 @@ async def revalidate_validation_events(session_id: str):
     except Exception as e:
         logger.error(f"Error revalidando validation events: {e}")
         raise HTTPException(status_code=500, detail=f"Error revalidando eventos: {str(e)}")
+    finally:
+        await repo.disconnect()
+
+
+@router.delete("/{session_id}/generated-outputs", response_model=GenericResponse)
+async def clear_generated_outputs_route(
+    session_id: str,
+    body: ClearGeneratedOutputsRequest,
+):
+    """
+    Elimina Word/ZIP/sobres bajo ``/data/outputs/{sesión}`` y resetea marcas de generación.
+
+    No elimina dictamen, candidatos CCC ni PDFs de bases subidos.
+    """
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes enviar confirm=true para limpiar el expediente generado.",
+        )
+    try:
+        from app.services.generated_outputs_cleanup import (
+            clear_generated_outputs_for_session,
+        )
+
+        result = await clear_generated_outputs_for_session(session_id)
+        n = result.get("removed_count", 0)
+        return GenericResponse(
+            success=True,
+            message=(
+                f"Expediente generado eliminado ({n} elemento(s) en disco). "
+                "Puedes volver a pulsar «GENERAR PROPUESTA»."
+            ),
+            data=result,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada")
+    except OSError as e:
+        logger.error("clear_generated_outputs_failed", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo eliminar el expediente en disco. Revisa permisos del volumen.",
+        )
+    except Exception as e:
+        logger.error(f"Error limpiando expediente generado: {e}")
+        raise HTTPException(status_code=500, detail="Error al limpiar expediente generado")
+
+
+@router.get("/{session_id}/delivery-checklist", response_model=GenericResponse)
+async def get_delivery_checklist(session_id: str):
+    """
+    Obtiene la Guía de Armado y Checklist de Integridad compilada por el BiddingBinderAgent.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+            
+        checklist = session.get("delivery_checklist")
+        if not checklist:
+            # Si no existe, podemos generarlo o devolver que no está listo
+            return GenericResponse(
+                success=False, 
+                message="El checklist de entrega final aún no ha sido compilado por el BiddingBinderAgent.", 
+                data=None
+            )
+            
+        return GenericResponse(
+            success=True,
+            message="Checklist de entrega final recuperado",
+            data={"delivery_checklist": checklist}
+        )
+    except Exception as e:
+        logger.error(f"Error recuperando delivery checklist: {e}")
+        raise HTTPException(status_code=500, detail="Error al recuperar checklist de entrega final")
     finally:
         await repo.disconnect()

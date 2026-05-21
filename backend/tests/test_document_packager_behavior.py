@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from app.agents.document_packager import DocumentPackagerAgent
+from app.agents.document_packager import (
+    DocumentPackagerAgent,
+    mapear_sobres_deterministico,
+)
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentStatus
 from app.services.resilient_llm import LLMResponse
@@ -52,9 +55,64 @@ ESTRUCTURA_LLM_VALIDA = {
 }
 
 
+def test_mapear_deterministico_dedupes_same_path(tmp_path):
+    """Un mismo archivo no debe aparecer dos veces en un sobre."""
+    session = "sess_dedup"
+    doc = tmp_path / "AD-71_Anexo_M.docx"
+    doc.write_bytes(b"x")
+    gen = {
+        "tecnica": [
+            {"nombre": "Anexo M", "ruta": str(doc)},
+            {"nombre": "Anexo M copia", "ruta": str(doc)},
+        ]
+    }
+    est = mapear_sobres_deterministico(session, gen)
+    s2_docs = est["sobre_2"]["documentos"]
+    assert len(s2_docs) == 1
+
+
+def test_mapear_deterministico_admin_en_sobre_1(tmp_path):
+    session = "sess_admin"
+    f = tmp_path / "AD-17_Carta.docx"
+    f.write_bytes(b"a")
+    est = mapear_sobres_deterministico(
+        session,
+        {"administrativa": [{"nombre": "Carta", "ruta": str(f)}]},
+    )
+    assert len(est["sobre_1"]["documentos"]) == 1
+    assert est["sobre_2"]["documentos"] == []
+
+
 @pytest.mark.asyncio
-async def test_packager_mapeo_llm_json_valido():
+async def test_packager_deterministic_no_llm_call_by_default():
+    """Sin PACKAGER_USE_LLM_MAPPING el LLM no debe invocarse."""
+    agent = _make_agent()
+    agent.llm.generate = AsyncMock(return_value=LLMResponse(success=True, response="{}"))
+
+    inp = AgentInput(
+        session_id="sess_det",
+        company_data={
+            "master_profile": {"razon_social": "Co"},
+            "documentos_generados": {
+                "tecnica": [{"nombre": "PT", "ruta": "/data/pt.docx"}],
+            },
+        },
+    )
+
+    with patch("os.makedirs"), patch("os.path.exists", return_value=False), patch(
+        "shutil.copy2"
+    ), patch.object(agent, "_generate_caratula"):
+        out = await agent.process(inp)
+
+    assert out.status == AgentStatus.SUCCESS
+    assert out.data.get("mapping_mode") == "deterministic"
+    agent.llm.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_packager_mapeo_llm_json_valido(monkeypatch):
     """LLM devuelve JSON válido → copy2 invocado y estructura_sobres en el retorno."""
+    monkeypatch.setenv("PACKAGER_USE_LLM_MAPPING", "true")
     agent = _make_agent()
     agent.llm.generate = AsyncMock(
         return_value=LLMResponse(success=True, response=json.dumps(ESTRUCTURA_LLM_VALIDA))
@@ -72,13 +130,14 @@ async def test_packager_mapeo_llm_json_valido():
 
     with patch("os.makedirs"), \
          patch("os.path.exists", return_value=True), \
+         patch("os.path.isfile", return_value=True), \
          patch("shutil.copy2") as mock_copy, \
          patch.object(agent, "_generate_caratula"):
         out = await agent.process(inp)
 
     assert out.status == AgentStatus.SUCCESS
     assert "estructura_sobres" in out.data
-    # El doc de sobre_1 existe → copy2 debe haber sido llamado al menos 1 vez
+    assert out.data.get("mapping_mode") == "llm_sanitized"
     mock_copy.assert_called()
 
 

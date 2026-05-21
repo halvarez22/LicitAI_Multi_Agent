@@ -339,8 +339,8 @@ const Dashboard = ({ sessionId, auditResults, isAnalyzing = false, auditProgress
                             {isAnalyzing
                                 ? 'Análisis en curso…'
                                 : hasTelemetry
-                                  ? `Resumen: orquestador ${orchSt || '—'}${stopReason ? ` · ${stopReason}` : ''} · pulsa para expandir.`
-                                  : 'Pulsa para ver etapas de agentes y telemetría detallada.'}
+                                  ? `Resumen: orquestador ${orchSt || '—'}${stopReason ? ` · ${stopReason}` : ''} · pulsa para expandir o contraer.`
+                                  : 'Pulsa para ver u ocultar etapas de agentes y telemetría detallada.'}
                         </p>
                     )}
                 </div>
