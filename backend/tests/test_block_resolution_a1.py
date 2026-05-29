@@ -131,6 +131,15 @@ async def test_mass_save_persists_and_trims_pending(monkeypatch):
     assert len(st.get("pending_questions") or []) == 1
     assert st["pending_questions"][0]["field"] == "price_c"
     assert st.get("current_question_index") == 0
+    user_inputs = st.get("economic_user_inputs") or {}
+    concept_prices = user_inputs.get("concept_prices") or {}
+    assert concept_prices["price_a"] == 100.0
+    assert concept_prices["price_b"] == 200.0
+    assert concept_prices["A"] == 100.0
+    assert concept_prices["B"] == 200.0
+    overrides = st.get("economic_user_overrides") or []
+    assert len(overrides) == 2
+    assert overrides[0]["source"] == "chatbot_block"
     co = await mem.get_company("c1")
     cat = co.get("catalog") or []
     assert len(cat) == 2

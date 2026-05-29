@@ -70,25 +70,31 @@ class EconomicRefresherService:
                 if lbl:
                     candidates.append(self._normalize_label(lbl))
 
-            # 0) Match por ID TÉCNICO (Máxima Precisión)
-            # El chatbot guarda los overrides por field_key (ej: price_123)
-            hit_key = None
+            # 0) Match por ID TÉCNICO (Máxima Precisión) — lookup en mapa crudo (sin normalizar).
+            price_val: Optional[float] = None
+            detail_key = ""
             concept_id = new_item.get("concepto_id")
             if concept_id:
                 technical_key = f"price_{concept_id}"
                 if technical_key in concept_prices:
-                    hit_key = technical_key
-            
-            if not hit_key:
-                # 1) Exacto / Subcadena (Label matching)
+                    try:
+                        price_val = float(concept_prices[technical_key])
+                        detail_key = technical_key
+                    except (TypeError, ValueError):
+                        price_val = None
+
+            hit_norm: Optional[str] = None
+            if price_val is None:
+                # 1) Exacto / Subcadena (Label matching) sobre claves normalizadas
                 for c in candidates:
                     for k in norm_overrides.keys():
                         if c == k or (len(c) >= 8 and c in k) or (len(k) >= 8 and k in c):
-                            hit_key = k
+                            hit_norm = k
                             break
-                    if hit_key: break
-            
-            if not hit_key:
+                    if hit_norm:
+                        break
+
+            if price_val is None and not hit_norm:
                 # 2) Fuzzy Match (Threshold 0.70)
                 best_sc = 0.0
                 for c in candidates:
@@ -96,13 +102,17 @@ class EconomicRefresherService:
                         sc = self._calculate_similarity(c, k)
                         if sc > best_sc:
                             best_sc = sc
-                            hit_key = k
+                            hit_norm = k
                 if best_sc < 0.70:
-                    hit_key = None
+                    hit_norm = None
 
-            if hit_key:
+            if price_val is None and hit_norm and hit_norm in norm_overrides:
+                price_val = norm_overrides[hit_norm]
+                detail_key = hit_norm
+
+            if price_val is not None:
                 from datetime import datetime
-                price = norm_overrides[hit_key]
+                price = price_val
                 qty = float(new_item.get("cantidad") or 1.0)
                 
                 # Hito 3: Inyectar metadatos de Autoridad y Fuente Híbrida
@@ -116,7 +126,7 @@ class EconomicRefresherService:
                     "source_type": "CHAT",
                     "authority_level": 3, # Usuario = Máxima Autoridad
                     "timestamp": datetime.utcnow().isoformat(),
-                    "detail": f"Precio validado por usuario para '{hit_key}' vía chat."
+                    "detail": f"Precio validado por usuario para '{detail_key}' vía chat."
                 }
                 
                 # UI Legacy compatibility

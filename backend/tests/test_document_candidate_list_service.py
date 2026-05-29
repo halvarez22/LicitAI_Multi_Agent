@@ -87,6 +87,36 @@ def test_build_candidate_document_list_filters_normative_noise():
     assert out["candidate_summary"]["informativo"] == 0
 
 
+def test_merge_fast_track_actions_into_consolidated_preserves_presentar_fisico():
+    from app.services.document_candidate_list_service import (
+        merge_fast_track_actions_into_consolidated,
+    )
+
+    fast_track = {
+        "candidate_document_list": [
+            {
+                "nombre": "Anexo A-I Identificación oficial",
+                "categoria": "administrativo",
+                "tipo_accion_final": "presentar_fisico",
+            }
+        ]
+    }
+    consolidated = {
+        "sobre_1_tecnico": [
+            {
+                "nombre_canonico": "Anexo A-I Identificación oficial",
+                "tipo": "generar",
+            }
+        ],
+        "sobre_2_economico": [],
+        "requisitos_legales": [],
+        "otros_requisitos_criticos": [],
+    }
+    out = merge_fast_track_actions_into_consolidated(consolidated, fast_track)
+    assert out["sobre_1_tecnico"][0]["tipo_accion_final"] == "presentar_fisico"
+    assert out["sobre_1_tecnico"][0]["tipo"] == "presentar_fisico"
+
+
 def test_build_candidate_document_list_keeps_annex_even_if_informative_wording():
     compliance = {
         "administrativo": [],

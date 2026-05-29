@@ -123,6 +123,87 @@ def select_economic_cluster(
     return econ if len(econ) >= min_n else None
 
 
+def build_interaction_block_from_capture_matrix(
+    *,
+    session_id: str,
+    session_state: Dict[str, Any],
+    company_catalog: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[InteractionBlock]:
+    """Bloque masivo desde ``capture_matrix_blocks`` (modo matriz)."""
+    if not getattr(settings, "ENABLE_BLOCK_RESOLUTION", False):
+        return None
+    from app.services.economic_capture_matrix_service import hydrate_matrix_blocks_with_inputs
+
+    blocks = hydrate_matrix_blocks_with_inputs(
+        session_state.get("capture_matrix_blocks") or [],
+        session_state.get("economic_user_inputs"),
+    )
+    if not blocks:
+        return None
+
+    catalog = company_catalog or []
+    inputs = session_state.get("economic_user_inputs") or {}
+    items: List[InteractionBlockItem] = []
+    seq = 0
+    for block in blocks:
+        for row in block.get("matrix_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            field = str(row.get("field") or "").strip()
+            if not field:
+                continue
+            label = str(row.get("label") or field).strip()
+            sug = _suggested_price_for_concept(catalog, label)
+            if field in inputs and inputs[field] is not None:
+                try:
+                    sug = float(inputs[field])
+                except (TypeError, ValueError):
+                    pass
+            elif row.get("price") not in (None, ""):
+                try:
+                    sug = float(row.get("price"))
+                except (TypeError, ValueError):
+                    pass
+            items.append(
+                InteractionBlockItem(
+                    item_id=field,
+                    label=label,
+                    unit="PU",
+                    suggested_value=sug,
+                    is_required=True,
+                    format="numeric",
+                    example="0 si no aplica costo; de lo contrario un número en pesos sin IVA",
+                    validation_rule="must_be_finite_number",
+                    block_item_seq=seq,
+                )
+            )
+            seq += 1
+
+    min_n = max(1, int(getattr(settings, "BLOCK_RESOLUTION_MIN_ITEMS", 3) or 3))
+    if len(items) < min_n:
+        return None
+
+    anchor = BlockAnchor(
+        title="Matriz de precios unitarios",
+        page=None,
+        description=str(blocks[0].get("intro_message") or "")[:500],
+        legal_reference="",
+        provenance="capture_matrix_blocks",
+    )
+    block_id = stable_block_id_for_cluster(session_id, [i.item_id for i in items])
+    return InteractionBlock(
+        block_id=block_id,
+        block_version=INTERACTION_BLOCK_SCHEMA_VERSION,
+        anchor=anchor,
+        items=items,
+        metadata=InteractionBlockMetadata(
+            total_items=len(items),
+            resolved_items=0,
+            block_type="economic_proposal_matrix",
+        ),
+    )
+
+
 def build_interaction_block(
     *,
     session_id: str,
@@ -144,6 +225,14 @@ def build_interaction_block(
     """
     if not getattr(settings, "ENABLE_BLOCK_RESOLUTION", False):
         return None
+
+    matrix_block = build_interaction_block_from_capture_matrix(
+        session_id=session_id,
+        session_state=session_state,
+        company_catalog=company_catalog,
+    )
+    if matrix_block is not None:
+        return matrix_block
 
     pending = list(session_state.get("pending_questions") or [])
     cluster = select_economic_cluster(pending, current_idx)

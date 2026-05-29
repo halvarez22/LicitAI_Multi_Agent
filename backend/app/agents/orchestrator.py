@@ -3,7 +3,7 @@ import json
 import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.core.observability import get_logger, agent_span, generate_correlation_id
@@ -37,6 +37,202 @@ def _result_message(res: Any) -> Optional[str]:
     if isinstance(res, dict):
         return res.get("message")
     return getattr(res, "message", None)
+
+
+def _tasks_completed_list(session_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [t for t in (session_state.get("tasks_completed") or []) if isinstance(t, dict)]
+
+
+def _collect_completed_stages_from_session(session_state: Dict[str, Any]) -> Set[str]:
+    """Hitos ``stage_completed:*`` persistidos en la sesión."""
+    stages: Set[str] = set()
+    for task in _tasks_completed_list(session_state):
+        name = str(task.get("task") or "")
+        if name.startswith("stage_completed:"):
+            stages.add(name.split(":", 1)[1])
+    return stages
+
+
+async def _persist_compliance_recovery_if_needed(
+    memory: Any,
+    session_id: str,
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Rehidrata ``compliance_master_list`` desde mini-dictamen u otros artefactos
+    si el índice forense se perdió por un guardado parcial de sesión.
+    """
+    if _compliance_list_from_session(session_state):
+        return session_state
+    from app.services.compliance_session_recovery import try_recover_compliance_master_list
+
+    recovered, source = try_recover_compliance_master_list(session_state)
+    if not recovered:
+        return session_state
+    session_state["compliance_master_list"] = recovered
+    session_state["compliance_recovery_source"] = source
+    await _safe_save_session(
+        memory,
+        session_id,
+        {
+            "compliance_master_list": recovered,
+            "compliance_recovery_source": source,
+        },
+    )
+    logger.info(
+        "compliance_master_list_recovered",
+        session_id=session_id,
+        source=source,
+        counts={
+            k: len(recovered.get(k) or [])
+            for k in ("administrativo", "tecnico", "formatos")
+        },
+    )
+    return session_state
+
+
+def _compliance_list_from_session(session_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Lista maestra de compliance con al menos un rubro (administrativo/técnico/formatos)."""
+    cm = session_state.get("compliance_master_list")
+    if isinstance(cm, dict) and any(
+        isinstance(cm.get(k), list) and cm.get(k)
+        for k in ("administrativo", "tecnico", "formatos")
+    ):
+        return cm
+    for task in reversed(_tasks_completed_list(session_state)):
+        tname = str(task.get("task") or "")
+        if tname not in ("stage_completed:compliance", "master_compliance_list"):
+            continue
+        res = task.get("result") or {}
+        data = res.get("data") if isinstance(res.get("data"), dict) else res
+        if isinstance(data, dict) and any(
+            isinstance(data.get(k), list) and data.get(k)
+            for k in ("administrativo", "tecnico", "formatos")
+        ):
+            return data
+    return {}
+
+
+def _session_has_compliance_evidence(session_state: Dict[str, Any]) -> bool:
+    """
+    True si hay lista de requisitos utilizable para generación (no basta Go/No-Go aislado).
+
+    Cubre sesiones donde el dictamen existe pero falta el hito ``stage_completed:compliance``.
+    """
+    from app.services.compliance_session_recovery import try_recover_compliance_master_list
+
+    recovered, _ = try_recover_compliance_master_list(session_state)
+    if recovered and not _compliance_list_from_session(session_state):
+        session_state["compliance_master_list"] = recovered
+    if _compliance_list_from_session(session_state):
+        return True
+    if session_state.get("mini_dictamen_anexos"):
+        return True
+    intake = session_state.get("intake_plan")
+    if isinstance(intake, dict) and (intake.get("questions") or intake.get("checklist_corporativo")):
+        return True
+    for task in _tasks_completed_list(session_state):
+        tname = str(task.get("task") or "").lower()
+        if tname == "stage_completed:compliance" and task.get("result"):
+            return True
+        if "compliance" in tname and task.get("result"):
+            return True
+    return False
+
+
+def _coerce_economic_data(result: Any) -> Dict[str, Any]:
+    """Obtiene data económica desde AgentOutput o dict legacy."""
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        data = result.get("data")
+    else:
+        data = getattr(result, "data", None)
+    return data if isinstance(data, dict) else {}
+
+
+def _normalize_gate_stage(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict) and "data" in raw:
+        return raw
+    if hasattr(raw, "data"):
+        return {"status": "success", "data": getattr(raw, "data") or {}}
+    return {"status": "success", "data": raw if isinstance(raw, dict) else {}}
+
+
+def _build_compliance_gate_payload(
+    session_id: str,
+    execution_results: Dict[str, Any],
+    session_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Arma el payload del ComplianceGate hidratando compliance/economic desde la sesión
+    cuando en ``generation_only`` se reutilizan hitos sin re-ejecutar agentes.
+    """
+    analysis = _normalize_gate_stage(execution_results.get("analysis") or {})
+    compliance = _normalize_gate_stage(execution_results.get("compliance") or {})
+    economic = _normalize_gate_stage(execution_results.get("economic") or {})
+
+    comp_data = _coerce_compliance_data(compliance)
+    if not any(
+        isinstance(comp_data.get(k), list) and comp_data.get(k)
+        for k in ("administrativo", "tecnico", "formatos")
+    ):
+        hydrated = _compliance_list_from_session(session_state)
+        if not hydrated:
+            from app.services.compliance_session_recovery import try_recover_compliance_master_list
+
+            recovered, _ = try_recover_compliance_master_list(session_state)
+            if recovered:
+                hydrated = recovered
+        if hydrated:
+            compliance = {"status": "success", "data": hydrated}
+
+    econ_data = _coerce_economic_data(economic)
+    if not econ_data.get("validation_result"):
+        for task in reversed(_tasks_completed_list(session_state)):
+            if str(task.get("task") or "") not in (
+                "stage_completed:economic",
+                "economic_proposal",
+            ):
+                continue
+            res = task.get("result") or {}
+            candidate = _coerce_economic_data(res)
+            if candidate.get("validation_result") or candidate.get("items"):
+                economic = {"status": "success", "data": candidate}
+                break
+
+    return {
+        "session_id": session_id,
+        "analysis": analysis,
+        "compliance": compliance,
+        "economic": economic,
+    }
+
+
+def _format_compliance_gate_blocking_message(gate_result: Any) -> str:
+    """Mensaje UX con reglas 12.1 concretas (no solo el numeral genérico)."""
+    from app.agents.compliance_gate import ComplianceGateResult
+    from app.core.disqualification_rules import get_disqualification_rules
+
+    if not isinstance(gate_result, ComplianceGateResult):
+        return "Pipeline detenido por causas deterministas de descalificación (12.1)."
+
+    rules_by_code = {r.code: r.description for r in get_disqualification_rules()}
+    lines = ["Pipeline detenido por causas deterministas de descalificación (12.1):"]
+    for code in gate_result.failed_rules:
+        ev = next(
+            (x for x in (gate_result.evidence or {}).get("rules", []) if x.get("code") == code),
+            {},
+        )
+        reason = str(ev.get("reason") or "").strip() or rules_by_code.get(code, code)
+        lines.append(f"- **{code}**: {reason}")
+
+    if any(c in gate_result.failed_rules for c in ("12.1.A", "12.1.P")):
+        lines.append(
+            "\nSi importaste precios en el chat y la sesión quedó incompleta, ejecuta de nuevo "
+            "**Analizar Bases** para restaurar el índice de requisitos antes de **Generar**."
+        )
+    return "\n".join(lines)
 
 
 def _economic_waiting_hints_from_output(res: Any) -> Optional[Dict[str, Any]]:
@@ -98,6 +294,20 @@ def _document_fill_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[
     }
 
 
+def _economic_company_data_for_run(
+    agent_input: AgentInput,
+    *,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Datos de empresa para EconomicAgent; en generación no aplica silencio por inventario legal."""
+    cd = dict(agent_input.company_data or {})
+    if extra:
+        cd.update(extra)
+    if (agent_input.mode or "") in ("generation_only", "generation"):
+        cd["skip_economic_silence"] = True
+    return cd
+
+
 async def _ensure_economic_snapshot_ready(
     context_manager: MCPContextManager,
     session_id: str,
@@ -108,9 +318,9 @@ async def _ensure_economic_snapshot_ready(
     Tarea 4: Verifica que el snapshot económico esté listo para generación de documentos.
 
     Flujo:
-    1. Si no existe snapshot → retorna error MISSING_ECONOMIC_PROPOSAL.
+    1. Si no existe snapshot → ejecuta EconomicAgent (p. ej. tras limpiar expediente en disco).
     2. Si snapshot tiene total_base >= 0.01 o allow_zero_total_base_ack → listo.
-    3. Si snapshot está desactualizado (total_base ~0) → re-ejecuta EconomicAgent con overrides.
+    3. Si snapshot está desactualizado (total_base ~0) → re-sincroniza o re-ejecuta EconomicAgent.
     4. Si EconomicAgent retorna SUCCESS → listo.
     5. Si EconomicAgent retorna WAITING_FOR_DATA → retorna error con lista de precios pendientes.
 
@@ -123,60 +333,64 @@ async def _ensure_economic_snapshot_ready(
             snapshot = task.get("result") if isinstance(task.get("result"), dict) else None
             break
 
-    if not snapshot:
-        logger.warning(
-            "orchestrator_economic_snapshot_missing",
-            session_id=session_id,
-        )
-        return False, {
-            "status": "error",
-            "stop_reason": "MISSING_ECONOMIC_PROPOSAL",
-            "message": (
-                "No se encontró una propuesta económica calculada. "
-                "Regresa al chat y captura los precios antes de generar documentos."
-            ),
-        }
-
     user_inputs = (session_state.get("economic_user_inputs") or {})
     allow_zero = bool(user_inputs.get("allow_zero_total_base_ack"))
-    total_base = float(snapshot.get("total_base") or 0.0)
-    snap_status = str(snapshot.get("status") or "")
 
-    if snap_status == "complete" and (total_base >= 0.01 or allow_zero):
-        return True, None  # Snapshot listo, no hay nada que hacer
-
-    # Snapshot desactualizado: intentar re-sincronizar primero con el refresher
-    # (más rápido que re-ejecutar el LLM completo)
-    try:
-        from app.economic_validation.service import refresh_economic_validations_for_session
-        await refresh_economic_validations_for_session(context_manager.memory, session_id)
-        # Releer snapshot tras el refresh
-        fresh_session = await context_manager.memory.get_session(session_id) or {}
-        fresh_tasks = list(fresh_session.get("tasks_completed") or [])
-        for task in reversed(fresh_tasks):
-            if task.get("task") == "economic_proposal":
-                refreshed = task.get("result") if isinstance(task.get("result"), dict) else {}
-                new_total = float(refreshed.get("total_base") or 0.0)
-                new_status = str(refreshed.get("status") or "")
-                if new_status == "complete" and (new_total >= 0.01 or allow_zero):
-                    logger.info(
-                        "orchestrator_economic_snapshot_refreshed_ok",
-                        session_id=session_id,
-                        total_base=new_total,
-                    )
-                    return True, None
-                break
-    except Exception as _refresh_err:
+    if snapshot:
+        total_base = float(snapshot.get("total_base") or 0.0)
+        snap_status = str(snapshot.get("status") or "")
+        has_items = _economic_snapshot_has_line_items(snapshot)
+        if snap_status == "complete" and (total_base >= 0.01 or allow_zero):
+            if has_items or allow_zero:
+                return True, None  # Snapshot listo para EconomicWriter
+            logger.warning(
+                "orchestrator_economic_snapshot_complete_without_items",
+                session_id=session_id,
+                total_base=total_base,
+            )
+    else:
+        total_base = 0.0
+        snap_status = ""
         logger.warning(
-            "orchestrator_economic_snapshot_refresh_failed",
+            "orchestrator_economic_snapshot_missing_will_run_agent",
             session_id=session_id,
-            error=str(_refresh_err),
         )
 
-    # Refresh no fue suficiente: re-ejecutar EconomicAgent completo
+    # Snapshot ausente o desactualizado: intentar re-sincronizar primero con el refresher
+    # (más rápido que re-ejecutar el LLM completo)
+    if snapshot:
+        try:
+            from app.economic_validation.service import refresh_economic_validations_for_session
+            await refresh_economic_validations_for_session(context_manager.memory, session_id)
+            # Releer snapshot tras el refresh
+            fresh_session = await context_manager.memory.get_session(session_id) or {}
+            fresh_tasks = list(fresh_session.get("tasks_completed") or [])
+            for task in reversed(fresh_tasks):
+                if task.get("task") == "economic_proposal":
+                    refreshed = task.get("result") if isinstance(task.get("result"), dict) else {}
+                    new_total = float(refreshed.get("total_base") or 0.0)
+                    new_status = str(refreshed.get("status") or "")
+                    if new_status == "complete" and (new_total >= 0.01 or allow_zero):
+                        if _economic_snapshot_has_line_items(refreshed) or allow_zero:
+                            logger.info(
+                                "orchestrator_economic_snapshot_refreshed_ok",
+                                session_id=session_id,
+                                total_base=new_total,
+                            )
+                            return True, None
+                    break
+        except Exception as _refresh_err:
+            logger.warning(
+                "orchestrator_economic_snapshot_refresh_failed",
+                session_id=session_id,
+                error=str(_refresh_err),
+            )
+
+    # Sin snapshot o refresh insuficiente: ejecutar EconomicAgent
     logger.info(
-        "orchestrator_economic_snapshot_stale_rerunning_agent",
+        "orchestrator_economic_agent_run_for_generation",
         session_id=session_id,
+        had_snapshot=bool(snapshot),
         total_base=total_base,
         snap_status=snap_status,
     )
@@ -185,9 +399,18 @@ async def _ensure_economic_snapshot_ready(
         econ_input = AgentInput(
             session_id=session_id,
             company_id=agent_input.company_id,
-            company_data=dict(agent_input.company_data or {}),
+            company_data=_economic_company_data_for_run(
+                agent_input,
+                extra={
+                    "compliance_master_list": (agent_input.company_data or {}).get(
+                        "compliance_master_list"
+                    )
+                    or {},
+                },
+            ),
             correlation_id=agent_input.correlation_id,
             job_id=agent_input.job_id,
+            mode=agent_input.mode,
         )
         econ_result = await EconomicAgent(context_manager).process(econ_input)
 
@@ -355,6 +578,37 @@ def _set_gen_job_status(gen_state: Optional[Dict[str, Any]], job_id: str, status
             return
 
 
+def _unblock_generation_jobs_for_economic_retry(gen_state: Optional[Dict[str, Any]]) -> None:
+    """Tras snapshot económico listo, reintentar etapas que quedaron ``blocked`` en corridas previas."""
+    if not gen_state:
+        return
+    for job_id in ("economic_writer", "packager", "delivery"):
+        if _gen_job_status(gen_state, job_id) in ("blocked", "error"):
+            _set_gen_job_status(gen_state, job_id, "pending")
+
+
+def _economic_snapshot_has_line_items(snapshot: Dict[str, Any]) -> bool:
+    items = snapshot.get("items")
+    return isinstance(items, list) and len(items) > 0
+
+
+def _can_continue_generation_past_economic_failure(
+    step: str, gen_state: Optional[Dict[str, Any]]
+) -> bool:
+    """Si técnico y formatos ya están en disco, no abortar todo el pipeline por fallo económico."""
+    if step != "economic_writer" or not gen_state:
+        return False
+    return (
+        _gen_job_status(gen_state, "technical") == "done"
+        and _gen_job_status(gen_state, "formats") == "done"
+    )
+
+
+def _agent_output_user_message(res: Any) -> str:
+    msg = getattr(res, "message", None) or getattr(res, "error", None)
+    return str(msg).strip() if msg else "Error desconocido"
+
+
 def _response_with_generation_state(
     base: Dict[str, Any], session_state: Dict[str, Any], mode: str
 ) -> Dict[str, Any]:
@@ -392,9 +646,25 @@ def _apply_filtered_compliance_master_list(
     cm = input_data.get("compliance_master_list") or {}
     if not any(cm.get(k) for k in ("administrativo", "tecnico", "formatos")):
         return input_data, agent_input
-    from app.services.document_deliverable_filter import filter_compliance_master_list
+    from app.config.settings import settings
+    from app.services.document_deliverable_filter import (
+        filter_compliance_for_generation,
+        filter_compliance_master_list,
+    )
 
-    filtered = filter_compliance_master_list(cm)
+    if getattr(settings, "GENERATION_FILTER_ENABLED", True):
+        filtered = filter_compliance_for_generation(cm)
+        gen_meta = dict(filtered.pop("_generation_filter_meta", None) or {})
+        if gen_meta:
+            input_data["generation_filter_meta"] = gen_meta
+            logger.info(
+                "compliance_generation_filter_applied",
+                output_generable=gen_meta.get("output_generable"),
+                deduped=gen_meta.get("deduped"),
+                skipped_causal=gen_meta.get("skipped_causal"),
+            )
+    else:
+        filtered = filter_compliance_master_list(cm)
     input_data["compliance_master_list"] = filtered
     return input_data, agent_input.model_copy(
         update={
@@ -429,7 +699,10 @@ async def _safe_save_session(
         
         # DEBUG LOG: Monitorear cambios en la cola de preguntas
         if key == "pending_questions":
-            q_list = value or []
+            from app.services.hitl_queue_service import normalize_pending_queue
+
+            q_list = normalize_pending_queue(value or [])
+            value = q_list
             logger.info("safe_save_pending_questions", 
                         session_id=session_id, 
                         count=len(q_list),
@@ -493,18 +766,21 @@ class OrchestratorAgent(BaseAgent):
             fresh = await self.context_manager.memory.get_session(session_id)
             if not fresh: return
             
-            plan = fresh.get("intake_plan", {})
-            planner_questions = list(plan.get("questions") or [])
+            plan_raw = fresh.get("intake_plan")
+            plan = plan_raw if isinstance(plan_raw, dict) else {}
+            planner_questions = [q for q in list(plan.get("questions") or []) if isinstance(q, dict)]
             if not planner_questions or bool(settings.INTAKE_PLANNER_SHADOW_MODE):
                 return
                 
-            existing_pending = list(fresh.get("pending_questions") or [])
+            existing_pending = [q for q in list(fresh.get("pending_questions") or []) if isinstance(q, dict)]
             
             def _get_q_key(q):
+                if not isinstance(q, dict):
+                    return ""
                 return str(q.get("question_id") or q.get("field") or q.get("field_target") or "")
 
             # HITO: Purgar de la cola actual cualquier pregunta que el Planner haya movido al checklist corporativo
-            corp_checklist = list(plan.get("checklist_corporativo") or [])
+            corp_checklist = [c for c in list(plan.get("checklist_corporativo") or []) if isinstance(c, dict)]
             corp_keys = {_get_q_key(c) for c in corp_checklist if _get_q_key(c)}
             
             existing_pending = [q for q in existing_pending if _get_q_key(q) not in corp_keys]
@@ -514,8 +790,10 @@ class OrchestratorAgent(BaseAgent):
             # Pero las ponemos al INICIO (unshift)
             new_to_add = [q for q in planner_questions if _get_q_key(q) not in existing_keys]
             
-            merged = new_to_add + existing_pending
-            
+            from app.services.hitl_queue_service import merge_pending_queues
+
+            merged = merge_pending_queues(existing_pending, new_to_add)
+
             # Guardamos siempre porque pudo haber purgas de checklist_corporativo
             await _safe_save_session(self.context_manager.memory, session_id, {"pending_questions": merged})
             logger.info("proactive_injection_success", session_id=session_id, added=len(new_to_add), purged_corp=len(corp_keys))
@@ -667,6 +945,23 @@ class OrchestratorAgent(BaseAgent):
                     }
                     session_state.update(reset_fields)
                     await _safe_save_session(self.context_manager.memory, session_id, reset_fields)
+
+            if not agent_input.company_id:
+                _session_company_id = (
+                    session_state.get("company_id")
+                    or (session_state.get("initial_data") or {}).get("company_id")
+                    or (session_state.get("global_inputs") or {}).get("company_id")
+                )
+                if _session_company_id:
+                    agent_input = agent_input.model_copy(
+                        update={"company_id": str(_session_company_id)}
+                    )
+                    logger.info(
+                        "orchestrator_company_id_hydrated_from_session",
+                        session_id=session_id,
+                        company_id=str(_session_company_id),
+                        resume_generation=bool(agent_input.resume_generation),
+                    )
             
             context = await self.context_manager.get_global_context(session_id)
             tasks_completed = context.get("session_state", {}).get("tasks_completed", [])
@@ -674,6 +969,9 @@ class OrchestratorAgent(BaseAgent):
             next_steps = []
             telemetry: Dict[str, Any] = {"stages": {}, "llm_calls_estimate": 0}
             fast_track_candidates: Optional[Dict[str, Any]] = None
+            # Cola de generación: se reasigna en modo generation*; en analysis_only puede quedar None.
+            _raw_gen = session_state.get("generation_state")
+            gen_state: Optional[Dict[str, Any]] = _raw_gen if isinstance(_raw_gen, dict) else None
 
             doc_profile = self._profile_document(input_data, session_state)
             pipeline_config = PipelineConfigurator.configure(doc_profile, mode=mode)
@@ -682,24 +980,38 @@ class OrchestratorAgent(BaseAgent):
             # para no volver a ejecutar ~15 min de Map-Reduce antes de generar documentos.
             stages_executed, stages_skipped, rules_triggered = [], [], []
             completed_stages = set()
-            reuse_prior_stages = agent_input.resume_generation or (
-                mode in ("generation_only", "generation") and agent_input.resume_generation
+            reuse_prior_stages = agent_input.resume_generation or mode in (
+                "generation_only",
+                "generation",
             )
             # Si no es resume_generation, forzamos la ejecución de análisis incluso en modo full
             if not agent_input.resume_generation and mode in ("full", "analysis_only"):
                 reuse_prior_stages = False
             if reuse_prior_stages:
-                for task in tasks_completed:
-                    task_name = task.get("task", "")
-                    if task_name.startswith("stage_completed:"):
-                        completed_stage = task_name.split(":", 1)[1]
-                        completed_stages.add(completed_stage)
-                        logger.info(
-                            "resume_skip_stage",
-                            stage=completed_stage,
-                            session_id=session_id,
-                            mode=mode,
-                        )
+                completed_stages = _collect_completed_stages_from_session(session_state)
+                for completed_stage in sorted(completed_stages):
+                    logger.info(
+                        "resume_skip_stage",
+                        stage=completed_stage,
+                        session_id=session_id,
+                        mode=mode,
+                    )
+                if (
+                    mode in ("generation_only", "generation")
+                    and "compliance" not in completed_stages
+                    and _session_has_compliance_evidence(session_state)
+                ):
+                    completed_stages.add("compliance")
+                    logger.info(
+                        "compliance_inferred_from_session_artifacts",
+                        session_id=session_id,
+                    )
+                if (
+                    mode in ("generation_only", "generation")
+                    and "analysis" not in completed_stages
+                    and _session_has_compliance_evidence(session_state)
+                ):
+                    completed_stages.add("analysis")
 
             # --- VALIDACIÓN PREREQUISITO 1: generation_only/generation requiere company_id ---
             # Sin empresa no hay master_profile → los agentes de generación no pueden
@@ -730,35 +1042,53 @@ class OrchestratorAgent(BaseAgent):
                     "orchestrator_decision": decision,
                 }
 
+            session_state = await _persist_compliance_recovery_if_needed(
+                self.context_manager.memory, session_id, session_state
+            )
+            if _compliance_list_from_session(session_state) and "compliance" not in completed_stages:
+                completed_stages.add("compliance")
+                logger.info(
+                    "compliance_stage_inferred_from_recovery",
+                    session_id=session_id,
+                    source=session_state.get("compliance_recovery_source"),
+                )
+
             # --- VALIDACIÓN PREREQUISITO 2: generation_only requiere compliance previo ---
             # Sin datos de compliance no hay lista maestra → los agentes de generación
             # no pueden producir documentos correctos. Req 1.3, 1.5
             if mode in ("generation_only", "generation") and "compliance" not in completed_stages:
-                logger.error(
-                    "generation_missing_prior_compliance",
-                    session_id=session_id,
-                    mode=mode,
-                    completed_stages=list(completed_stages),
-                )
-                decision = OrchestratorState(
-                    stop_reason="MISSING_PRIOR_ANALYSIS",
-                    aggregate_health="failed",
-                    next_steps=[],
-                    correlation_id=correlation_id,
-                ).model_dump()
-                await _safe_save_session(
-                    self.context_manager.memory, session_id,
-                    {"last_orchestrator_decision": decision}
-                )
-                return {
-                    "status": "error",
-                    "session_id": session_id,
-                    "message": (
-                        "No se puede generar documentos sin un análisis de compliance previo. "
-                        "Ejecuta primero 'Analizar Bases' para indexar los requisitos de la licitación."
-                    ),
-                    "orchestrator_decision": decision,
-                }
+                if _session_has_compliance_evidence(session_state):
+                    completed_stages.add("compliance")
+                    logger.warning(
+                        "generation_compliance_inferred_late",
+                        session_id=session_id,
+                    )
+                else:
+                    logger.error(
+                        "generation_missing_prior_compliance",
+                        session_id=session_id,
+                        mode=mode,
+                        completed_stages=list(completed_stages),
+                    )
+                    decision = OrchestratorState(
+                        stop_reason="MISSING_PRIOR_ANALYSIS",
+                        aggregate_health="failed",
+                        next_steps=[],
+                        correlation_id=correlation_id,
+                    ).model_dump()
+                    await _safe_save_session(
+                        self.context_manager.memory, session_id,
+                        {"last_orchestrator_decision": decision}
+                    )
+                    return {
+                        "status": "error",
+                        "session_id": session_id,
+                        "message": (
+                            "No se puede generar documentos sin un análisis de compliance previo. "
+                            "Ejecuta primero 'Analizar Bases' para indexar los requisitos de la licitación."
+                        ),
+                        "orchestrator_decision": decision,
+                    }
 
             # ── FIX LOGO: Enriquecer company_data con perfil fresco de la DB ──────────
             # El frontend envía company_data con docs como entero (conteo) y master_profile
@@ -812,6 +1142,13 @@ class OrchestratorAgent(BaseAgent):
                             has_logo=bool(_current_profile.get("logo")),
                             logo_path=str(_current_profile.get("logo") or "")[:80],
                         )
+                        if agent_input.company_id and not session_state.get("company_id"):
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                {"company_id": str(agent_input.company_id)},
+                            )
+                            session_state["company_id"] = str(agent_input.company_id)
                 except Exception as _enrich_err:
                     # No bloquear el pipeline si el enriquecimiento falla
                     logger.warning(
@@ -947,6 +1284,23 @@ class OrchestratorAgent(BaseAgent):
                             session_id=session_id,
                             error=str(e),
                         )
+                    try:
+                        from app.services.junta_aclaraciones_questions_service import (
+                            build_and_persist_junta_aclaraciones_questions,
+                        )
+
+                        _snap_junta = await self.context_manager.memory.get_session(session_id) or {}
+                        await build_and_persist_junta_aclaraciones_questions(
+                            self.context_manager.memory,
+                            session_id,
+                            session_state=_snap_junta,
+                        )
+                    except Exception as _junta_a:
+                        logger.warning(
+                            "junta_questions_after_analysis_skipped",
+                            session_id=session_id,
+                            error=str(_junta_a)[:120],
+                        )
                     _notify_job_progress(
                         agent_input.job_id,
                         "analysis",
@@ -992,6 +1346,25 @@ class OrchestratorAgent(BaseAgent):
                             task_name="stage_completed:compliance",
                             result=res if isinstance(res, dict) else res.model_dump(),
                         )
+                        try:
+                            from app.services.junta_aclaraciones_questions_service import (
+                                build_and_persist_junta_aclaraciones_questions,
+                            )
+
+                            _snap_junta_c = (
+                                await self.context_manager.memory.get_session(session_id) or {}
+                            )
+                            await build_and_persist_junta_aclaraciones_questions(
+                                self.context_manager.memory,
+                                session_id,
+                                session_state=_snap_junta_c,
+                            )
+                        except Exception as _junta_c:
+                            logger.warning(
+                                "junta_questions_after_compliance_skipped",
+                                session_id=session_id,
+                                error=str(_junta_c)[:120],
+                            )
                     except Exception as e:
                         logger.error("compliance_stage_failed", session_id=session_id, error=str(e))
                         execution_results["compliance"] = {
@@ -1025,6 +1398,39 @@ class OrchestratorAgent(BaseAgent):
                             )
 
                             comp_data = filter_compliance_master_list(comp_data)
+                            try:
+                                from app.services.compliance_source_enrichment import (
+                                    enrich_compliance_archivo_fuente,
+                                )
+                                from app.services.session_template_catalog import (
+                                    build_session_template_catalog,
+                                )
+
+                                _docs_for_catalog = (
+                                    await self.context_manager.memory.get_documents(
+                                        session_id
+                                    )
+                                )
+                                comp_data = enrich_compliance_archivo_fuente(
+                                    comp_data, _docs_for_catalog
+                                )
+                                _catalog = build_session_template_catalog(
+                                    session_id, _docs_for_catalog
+                                )
+                                await _safe_save_session(
+                                    self.context_manager.memory,
+                                    session_id,
+                                    {
+                                        "compliance_master_list": comp_data,
+                                        "session_template_catalog": _catalog,
+                                    },
+                                )
+                            except Exception as _enrich_exc:
+                                logger.warning(
+                                    "compliance_catalog_enrich_failed",
+                                    session_id=session_id,
+                                    error=str(_enrich_exc),
+                                )
                             input_data["compliance_master_list"] = comp_data
                             agent_input = agent_input.model_copy(
                                 update={
@@ -1072,55 +1478,22 @@ class OrchestratorAgent(BaseAgent):
                                     "document_candidates_consolidated": consolidated,        # CCC: lista limpia
                                 },
                             )
+                            try:
+                                from app.services.delivery_coverage_report import (
+                                    build_and_persist_coverage,
+                                )
+
+                                await build_and_persist_coverage(
+                                    self.context_manager.memory, session_id
+                                )
+                            except Exception as _cov_exc:
+                                logger.warning(
+                                    "coverage_report_after_compliance_failed",
+                                    session_id=session_id,
+                                    error=str(_cov_exc),
+                                )
                     except Exception as _ft_exc:
                         logger.warning("fast_track_document_candidates_failed", session_id=session_id, error=str(_ft_exc))
-
-                # ComplianceGate determinista (12.1): corta pipeline antes de evaluación económica.
-                from app.agents.compliance_gate import ComplianceGate
-                gate_payload = {
-                    "session_id": session_id,
-                    "analysis": execution_results.get("analysis", {}),
-                    "compliance": execution_results.get("compliance", {}),
-                    "economic": execution_results.get("economic", {}),
-                }
-                gate_result = ComplianceGate().evaluate(gate_payload)
-                gate_result_dict = ComplianceGate.to_dict(gate_result)
-                session_state["compliance_gate_result"] = gate_result_dict
-                execution_results["compliance_gate"] = {
-                    "status": "success",
-                    "agent_id": "compliance_gate_001",
-                    "session_id": session_id,
-                    "data": gate_result_dict,
-                    "message": "Evaluación determinista 12.1 completada.",
-                }
-                if gate_result.is_blocking:
-                    final_metadata = {"telemetry": telemetry}
-                    decision = OrchestratorState(
-                        stop_reason="COMPLIANCE_GATE_BLOCKING",
-                        aggregate_health="failed",
-                        next_steps=next_steps,
-                        correlation_id=correlation_id,
-                    ).model_dump()
-                    session_state["last_orchestrator_decision"] = decision
-                    session_state["last_orchestrator_metadata"] = final_metadata
-                    await _safe_save_session(
-                        self.context_manager.memory, session_id,
-                        {
-                            "last_orchestrator_decision": decision,
-                            "last_orchestrator_metadata": final_metadata,
-                            "compliance_gate_result": gate_result_dict,
-                        }
-                    )
-                    self._persist_latest_job_metadata(session_id, "hard_disqualification", final_metadata, decision)
-                    return {
-                        "status": "hard_disqualification",
-                        "session_id": session_id,
-                        "message": "Pipeline detenido por causas deterministas de descalificación (12.1).",
-                        "fast_track_document_candidates": fast_track_candidates,
-                        "results": {k: (v if isinstance(v, dict) else v.model_dump()) for k, v in execution_results.items()},
-                        "orchestrator_decision": decision,
-                        "metadata": final_metadata,
-                    }
 
                 # Error check (Legacy Support)
                 comp_res = execution_results.get("compliance")
@@ -1489,10 +1862,15 @@ class OrchestratorAgent(BaseAgent):
                     )
                     econ_input = agent_input.model_copy(
                         update={
-                            "company_data": {
-                                **agent_input.company_data,
-                                "compliance_master_list": input_data.get("compliance_master_list") or {},
-                            }
+                            "company_data": _economic_company_data_for_run(
+                                agent_input,
+                                extra={
+                                    "compliance_master_list": input_data.get(
+                                        "compliance_master_list"
+                                    )
+                                    or {},
+                                },
+                            ),
                         }
                     )
                     res = await EconomicAgent(self.context_manager).process(econ_input)
@@ -1555,6 +1933,82 @@ class OrchestratorAgent(BaseAgent):
                     (t["result"] for t in reversed(tasks_completed) if t.get("task") == "stage_completed:economic"),
                     {"status": "resumed"},
                 )
+
+            # ComplianceGate 12.1: tras compliance + economic (validaciones y precios actuales).
+            session_state = await self.context_manager.memory.get_session(session_id) or session_state
+            session_state = await _persist_compliance_recovery_if_needed(
+                self.context_manager.memory, session_id, session_state
+            )
+            try:
+                from app.services.economic_capture_matrix_service import economic_capture_status
+
+                if economic_capture_status(session_state).get("capture_complete"):
+                    from app.economic_validation.service import refresh_economic_validations_for_session
+
+                    await refresh_economic_validations_for_session(
+                        self.context_manager.memory, session_id
+                    )
+                    session_state = await self.context_manager.memory.get_session(session_id) or session_state
+                    for task in reversed(_tasks_completed_list(session_state)):
+                        if str(task.get("task") or "") == "economic_proposal":
+                            execution_results["economic"] = task.get("result") or execution_results.get(
+                                "economic", {}
+                            )
+                            break
+            except Exception as _gate_ref_exc:
+                logger.info(
+                    "compliance_gate_economic_refresh_skipped",
+                    session_id=session_id,
+                    error=str(_gate_ref_exc)[:160],
+                )
+
+            from app.agents.compliance_gate import ComplianceGate
+
+            gate_payload = _build_compliance_gate_payload(
+                session_id, execution_results, session_state
+            )
+            gate_result = ComplianceGate().evaluate(gate_payload)
+            gate_result_dict = ComplianceGate.to_dict(gate_result)
+            session_state["compliance_gate_result"] = gate_result_dict
+            execution_results["compliance_gate"] = {
+                "status": "success",
+                "agent_id": "compliance_gate_001",
+                "session_id": session_id,
+                "data": gate_result_dict,
+                "message": "Evaluación determinista 12.1 completada.",
+            }
+            if gate_result.is_blocking:
+                final_metadata = {"telemetry": telemetry}
+                decision = OrchestratorState(
+                    stop_reason="COMPLIANCE_GATE_BLOCKING",
+                    aggregate_health="failed",
+                    next_steps=next_steps,
+                    correlation_id=correlation_id,
+                ).model_dump()
+                await _safe_save_session(
+                    self.context_manager.memory,
+                    session_id,
+                    {
+                        "last_orchestrator_decision": decision,
+                        "last_orchestrator_metadata": final_metadata,
+                        "compliance_gate_result": gate_result_dict,
+                    },
+                )
+                self._persist_latest_job_metadata(
+                    session_id, "hard_disqualification", final_metadata, decision
+                )
+                return {
+                    "status": "hard_disqualification",
+                    "session_id": session_id,
+                    "message": _format_compliance_gate_blocking_message(gate_result),
+                    "fast_track_document_candidates": fast_track_candidates,
+                    "results": {
+                        k: (v if isinstance(v, dict) else v.model_dump())
+                        for k, v in execution_results.items()
+                    },
+                    "orchestrator_decision": decision,
+                    "metadata": final_metadata,
+                }
 
             # Generation
             if mode in ["full", "generation", "generation_only"]:
@@ -1674,6 +2128,9 @@ class OrchestratorAgent(BaseAgent):
                     agent_input,
                     _fresh_session_for_econ,
                 )
+                if _econ_ready and gen_state:
+                    _unblock_generation_jobs_for_economic_retry(gen_state)
+
                 if not _econ_ready and _econ_error:
                     _stop_reason = str(_econ_error.get("stop_reason") or "ECONOMIC_PRICES_INCOMPLETE")
                     _econ_decision = OrchestratorState(
@@ -1722,6 +2179,34 @@ class OrchestratorAgent(BaseAgent):
                             tender_category=_triage_for_gen.get("tender_category"),
                             law=_triage_for_gen.get("law"),
                         )
+
+                # Evitar mezclar archivos de corridas fallidas con la salida nueva (conteo/ZIP).
+                if getattr(settings, "GENERATION_WIPE_OUTPUTS_BEFORE_WRITERS", True):
+                    if gen_state and _gen_job_status(gen_state, "technical") != "done":
+                        try:
+                            from app.services.generated_outputs_cleanup import (
+                                wipe_session_output_disk_only,
+                            )
+
+                            wipe_res = await wipe_session_output_disk_only(session_id)
+                            logger.info(
+                                "orchestrator_generation_disk_wiped",
+                                session_id=session_id,
+                                removed=wipe_res.get("removed_count"),
+                            )
+                        except Exception as _wipe_exc:
+                            logger.warning(
+                                "orchestrator_generation_disk_wipe_failed",
+                                session_id=session_id,
+                                error=str(_wipe_exc)[:120],
+                            )
+                _gfm = input_data.get("generation_filter_meta")
+                if isinstance(_gfm, dict):
+                    logger.info(
+                        "orchestrator_generation_filter_meta",
+                        session_id=session_id,
+                        **_gfm,
+                    )
 
                 for step, a_cls in [
                     ("technical", "TechnicalWriterAgent"),
@@ -1783,6 +2268,14 @@ class OrchestratorAgent(BaseAgent):
                                     stage=step,
                                     session_id=session_id,
                                 )
+                                if _can_continue_generation_past_economic_failure(step, gen_state):
+                                    if gen_state:
+                                        _set_gen_job_status(gen_state, step, "blocked")
+                                    logger.warning(
+                                        "generation_economic_waiting_continuing_pipeline",
+                                        session_id=session_id,
+                                    )
+                                    continue
                                 quality_hints = _document_quality_waiting_hints_from_output(res)
                                 fill_hints = _document_fill_quality_waiting_hints_from_output(res)
                                 waiting_hints = fill_hints or quality_hints
@@ -1811,7 +2304,7 @@ class OrchestratorAgent(BaseAgent):
                                     {
                                         "status": "waiting_for_data",
                                         "session_id": session_id,
-                                        "chatbot_message": res.message,
+                                        "chatbot_message": _agent_output_user_message(res),
                                         "results": {
                                             k: (v if isinstance(v, dict) else v.model_dump())
                                             for k, v in execution_results.items()
@@ -1824,12 +2317,22 @@ class OrchestratorAgent(BaseAgent):
 
                             # CORTAR SI UN AGENTE REPORTA ERROR (EVITA GENERACIÓN CORRUPTA)
                             if hasattr(res, "status") and res.status == AgentStatus.ERROR:
+                                detail = _agent_output_user_message(res)
                                 logger.error(
                                     "generation_step_reported_error",
                                     stage=step,
                                     session_id=session_id,
-                                    message=getattr(res, "message", "Error desconocido"),
+                                    message=detail,
                                 )
+                                if _can_continue_generation_past_economic_failure(step, gen_state):
+                                    if gen_state:
+                                        _set_gen_job_status(gen_state, step, "blocked")
+                                    logger.warning(
+                                        "generation_economic_error_continuing_pipeline",
+                                        session_id=session_id,
+                                        detail=detail[:200],
+                                    )
+                                    continue
                                 decision = OrchestratorState(
                                     stop_reason=f"ERROR_REPORTED_IN_{step.upper()}",
                                     aggregate_health="failed",
@@ -1837,13 +2340,23 @@ class OrchestratorAgent(BaseAgent):
                                 ).model_dump()
                                 _updates_8: Dict[str, Any] = {"last_orchestrator_decision": decision}
                                 if gen_state:
+                                    _set_gen_job_status(gen_state, step, "blocked")
                                     _updates_8["generation_state"] = gen_state
                                 await _safe_save_session(self.context_manager.memory, session_id, _updates_8)
+                                user_msg = (
+                                    f"No se pudo generar la propuesta económica: {detail}. "
+                                    "Revisa precios en el chat (`generar propuesta económica`) o vuelve a intentar."
+                                )
                                 return _response_with_generation_state(
                                     {
                                         "status": "error",
                                         "session_id": session_id,
-                                        "message": f"El agente de {step} reportó un error crítico: {getattr(res, 'message', 'Sin detalle')}",
+                                        "message": user_msg,
+                                        "chatbot_message": user_msg,
+                                        "results": {
+                                            k: (v if isinstance(v, dict) else v.model_dump())
+                                            for k, v in execution_results.items()
+                                        },
                                         "orchestrator_decision": decision,
                                     },
                                     session_state,
@@ -1867,10 +2380,61 @@ class OrchestratorAgent(BaseAgent):
                                     CompraNetPackager,
                                     build_pack_session_data_from_outputs,
                                 )
+                                from app.services.mini_dictamen_anexos_service import (
+                                    build_and_persist_mini_dictamen,
+                                    get_blocking_annex_rows_for_stage,
+                                )
 
                                 pdata = res.data if hasattr(res, "data") else {}
                                 if not isinstance(pdata, dict):
                                     pdata = {}
+                                try:
+                                    await build_and_persist_mini_dictamen(
+                                        self.context_manager.memory, session_id
+                                    )
+                                    _fresh_session = (
+                                        await self.context_manager.memory.get_session(session_id)
+                                        or {}
+                                    )
+                                    _mini_blocking = get_blocking_annex_rows_for_stage(
+                                        _fresh_session, "packager"
+                                    )
+                                    if _mini_blocking:
+                                        decision = OrchestratorState(
+                                            stop_reason="MINI_DICTAMEN_BLOCKED",
+                                            aggregate_health="waiting_for_data",
+                                            next_steps=next_steps,
+                                            correlation_id=correlation_id,
+                                        ).model_dump()
+                                        await _safe_save_session(
+                                            self.context_manager.memory,
+                                            session_id,
+                                            {"last_orchestrator_decision": decision},
+                                        )
+                                        return _response_with_generation_state(
+                                            {
+                                                "status": "waiting_for_data",
+                                                "session_id": session_id,
+                                                "message": (
+                                                    "El expediente no puede cerrarse porque el mini dictamen "
+                                                    "detectó anexos obligatorios aún bloqueados."
+                                                ),
+                                                "missing": _mini_blocking,
+                                                "results": {
+                                                    k: (v if isinstance(v, dict) else v.model_dump())
+                                                    for k, v in execution_results.items()
+                                                },
+                                                "orchestrator_decision": decision,
+                                            },
+                                            session_state,
+                                            mode,
+                                        )
+                                except Exception as _mini_exc:
+                                    logger.warning(
+                                        "orchestrator_mini_dictamen_pack_guard_failed",
+                                        session_id=session_id,
+                                        error=str(_mini_exc),
+                                    )
                                 pack_session = build_pack_session_data_from_outputs(
                                     session_id=session_id,
                                     packager_agent_data=pdata,
@@ -1918,6 +2482,50 @@ class OrchestratorAgent(BaseAgent):
                                         "message": "Empaque CompraNet validado (manifiesto SHA-256).",
                                     },
                                 )
+                                try:
+                                    from app.services.delivery_coverage_report import (
+                                        build_and_persist_coverage,
+                                    )
+
+                                    await build_and_persist_coverage(
+                                        self.context_manager.memory, session_id
+                                    )
+                                except Exception as _cov_pack_exc:
+                                    logger.warning(
+                                        "coverage_report_after_pack_failed",
+                                        session_id=session_id,
+                                        error=str(_cov_pack_exc),
+                                    )
+                                if getattr(
+                                    settings,
+                                    "GENERATION_PRUNE_DUPLICATE_OUTPUTS_AFTER_PACK",
+                                    True,
+                                ):
+                                    try:
+                                        from app.api.v1.routes.downloads import (
+                                            resolve_outputs_root,
+                                        )
+                                        from app.services.output_delivery_view import (
+                                            prune_duplicate_output_copies,
+                                        )
+
+                                        out_root = await resolve_outputs_root(session_id)
+                                        if out_root:
+                                            prune_res = prune_duplicate_output_copies(
+                                                out_root
+                                            )
+                                            logger.info(
+                                                "orchestrator_generation_duplicates_pruned",
+                                                session_id=session_id,
+                                                removed=prune_res.get("removed_count"),
+                                                names=prune_res.get("removed_names"),
+                                            )
+                                    except Exception as _prune_exc:
+                                        logger.warning(
+                                            "orchestrator_generation_prune_failed",
+                                            session_id=session_id,
+                                            error=str(_prune_exc)[:200],
+                                        )
                         except Exception as e:
                             logger.error(
                                 "generation_step_failed",
@@ -1980,6 +2588,9 @@ class OrchestratorAgent(BaseAgent):
                             error=str(_sync_exc),
                         )
 
+                econ_documents = _extract_documentos(execution_results.get("economic_writer"))
+                if gen_state and _gen_job_status(gen_state, "economic_writer") == "blocked" and econ_documents:
+                    _set_gen_job_status(gen_state, "economic_writer", "done")
                 if gen_state:
                     gen_state["status"] = "completed"
                     await _safe_save_session(
@@ -2038,6 +2649,57 @@ class OrchestratorAgent(BaseAgent):
                 "telemetry": telemetry,
             }
             agg_health = _aggregate_health_from_results(execution_results)
+            fresh_for_gate = await self.context_manager.memory.get_session(session_id) or session_state
+            from app.services.economic_coverage_gate import (
+                evaluate_economic_coverage_before_final_ok,
+            )
+            from app.agents.economic import _build_structured_price_pending_questions
+
+            coverage_block = evaluate_economic_coverage_before_final_ok(
+                fresh_for_gate, session_id
+            )
+            if coverage_block:
+                line_items = list(fresh_for_gate.get("session_line_items") or [])
+                from app.services.structured_economic_price_mapper import (
+                    build_structured_price_slots,
+                )
+
+                slots = build_structured_price_slots(
+                    line_items, fresh_for_gate.get("economic_user_inputs")
+                )
+                missing_slots = [s for s in slots if s.get("captured_price") is None]
+                pending_add = _build_structured_price_pending_questions(missing_slots)
+                from app.services.hitl_queue_service import normalize_pending_queue
+
+                merged_pending = normalize_pending_queue(
+                    list(fresh_for_gate.get("pending_questions") or []) + pending_add
+                )
+                gate_decision = OrchestratorState(
+                    stop_reason="ECONOMIC_COVERAGE_GAP",
+                    aggregate_health=agg_health,
+                    next_steps=[
+                        "Completa los precios pendientes en el chat o en resolución por bloque.",
+                    ],
+                    correlation_id=correlation_id,
+                ).model_dump()
+                await _safe_save_session(
+                    self.context_manager.memory,
+                    session_id,
+                    {
+                        "last_orchestrator_decision": gate_decision,
+                        "pending_questions": merged_pending,
+                        "current_question_index": 0,
+                        "economic_coverage_gate": coverage_block,
+                    },
+                )
+                return {
+                    "status": "waiting_for_data",
+                    "session_id": session_id,
+                    "message": coverage_block.get("message"),
+                    "orchestrator_decision": gate_decision,
+                    "correlation_id": correlation_id,
+                }
+
             decision = OrchestratorState(
                 stop_reason="FINAL_OK",
                 aggregate_health=agg_health,
@@ -2046,14 +2708,36 @@ class OrchestratorAgent(BaseAgent):
             ).model_dump()
             # Refrescar desde BD para preservar tasks_completed escritos por los agentes
             await _safe_save_session(
-                self.context_manager.memory, session_id,
-                {"last_orchestrator_decision": decision, "last_orchestrator_metadata": final_metadata}
+                self.context_manager.memory,
+                session_id,
+                {
+                    "last_orchestrator_decision": decision,
+                    "last_orchestrator_metadata": final_metadata,
+                    "pending_questions": [],
+                    "current_question_index": 0,
+                    "last_document_quality_waiting_hints": None,
+                    "last_document_fill_quality_waiting_hints": None,
+                    **({"generation_state": gen_state} if gen_state else {}),
+                },
             )
-            self._persist_latest_job_metadata(session_id, "success", final_metadata, decision)
+            econ_blocked = (
+                gen_state is not None
+                and _gen_job_status(gen_state, "economic_writer") == "blocked"
+            )
+            final_status = "partial" if econ_blocked else "success"
+            final_chatbot = None
+            if econ_blocked:
+                final_chatbot = (
+                    "Expediente generado con advertencias: la propuesta técnica y los formatos "
+                    "administrativos están listos, pero la propuesta económica no se materializó. "
+                    "Ejecuta `generar propuesta económica` en el chat y vuelve a pulsar **Generar Documentos**."
+                )
+            self._persist_latest_job_metadata(session_id, final_status, final_metadata, decision)
             return _response_with_generation_state(
                 {
-                    "status": "success",
+                    "status": final_status,
                     "session_id": session_id,
+                    "chatbot_message": final_chatbot,
                     "fast_track_document_candidates": fast_track_candidates,
                     "results": {
                         k: (v if isinstance(v, dict) else v.model_dump())

@@ -28,11 +28,18 @@ def test_reset_session_clears_generation_flags():
         "compranet_packaging": {"validation_passed": True},
         "tasks_completed": [
             {"task": "stage_completed:analysis"},
+            {"task": "stage_completed:compliance"},
+            {"task": "economic_proposal", "result": {"status": "complete", "total_base": 1000.0}},
+            {"task": "technical_writing_COMPLETED"},
+            {"task": "formats_generation_COMPLETED"},
+            {"task": "stage_completed:economic"},
             {"task": "stage_completed:compranet_pack"},
         ],
     }
     out = reset_session_after_output_wipe(raw)
     assert "generation_state" not in out
     assert "compranet_packaging" not in out
-    assert len(out["tasks_completed"]) == 1
-    assert out["tasks_completed"][0]["task"] == "stage_completed:analysis"
+    remaining = [t["task"] for t in out["tasks_completed"]]
+    assert "economic_proposal" in remaining
+    assert "technical_writing_COMPLETED" not in remaining
+    assert remaining.count("stage_completed:analysis") == 1

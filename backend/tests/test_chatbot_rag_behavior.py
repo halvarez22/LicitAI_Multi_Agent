@@ -581,6 +581,59 @@ async def test_blocking_pending_usa_modo_seguridad(agent, mock_context):
 
 
 @pytest.mark.asyncio
+async def test_blocking_pending_price_source_reply_includes_page_and_snippet(agent, mock_context):
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": [
+            {
+                "field": "economic_price_source",
+                "label": "Fuente económica real",
+                "question": "Necesito el catálogo real.",
+                "type": "economic_validation_blocking",
+                "input_mode": "price_source",
+                "detected_structure_summary": {
+                    "zones": {"A": {"elements": 6, "sites": 1}},
+                    "material_rows": 37,
+                },
+                "blocking_items": [
+                    {
+                        "concepto_label": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "page_number": 3,
+                        "context_snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                        "source_name": "bases_isapeg.pdf",
+                        "requested_input": "price_source",
+                    }
+                ],
+            }
+        ],
+        "current_question_index": 0,
+    }
+
+    resp = await agent.process(_inp("sess_1", "que te falta para seguir?"))
+
+    assert resp.status == AgentStatus.SUCCESS
+    assert resp.data.get("tipo") == "economic_validation_blocking_info"
+    txt = (resp.data.get("respuesta") or "").lower()
+    assert "fuente real de precios" in txt
+    assert "zona a" in txt
+    assert "6 elementos" in txt
+    assert "catálogo de conceptos" in txt or "catalogo de conceptos" in txt
+    assert "página 3" in txt or "pagina 3" in txt
+    assert "fragmento" in txt
+
+
+def test_pending_has_verifiable_anchor_accepts_row_index():
+    q = {
+        "type": "economic_price",
+        "original_item": {
+            "source": "32. Anexo III P1-2 ZA_Propuesta economica.xlsx",
+            "row_index": 11,
+            "snippet": "32. Anexo III P1-2 ZA | hoja PARTIDA 1 ZONA A | fila 11 | CAISES GUANAJUATO",
+        },
+    }
+    assert ChatbotRAGAgent._pending_has_verifiable_anchor(q) is True
+
+
+@pytest.mark.asyncio
 async def test_blocking_pending_rescue_solo_signo_interrogacion(agent, mock_context):
     """«?» o «¿» deben disparar el mismo rescate que «qué precio falta» (antes se normalizaban a vacío)."""
     mock_context.memory.get_session.return_value = {
@@ -1403,6 +1456,36 @@ def test_compose_guarantee_structured_response_replaces_llm_hallucination():
     assert "### 3) PLAZOS" in out
 
 
+def test_guarantee_response_excludes_anexo_g_template_from_plazos():
+    canonical = (
+        "[HECHOS CONTRACTUALES — extraídos de fragmentos indexados, obligatorios en la respuesta]\n"
+        "- Fianza/garantía de cumplimiento: 12% del monto total adjudicado (sin IVA según fragmento) [PÁGINA 22]\n"
+        "- Seguro Responsabilidad Civil — suma asegurada: 1'000,000.00 (Un millón de pesos) [PÁGINA 25]\n"
+    )
+    contract = (
+        "El licitante adjudicado presentará garantía de cumplimiento por el 12% del monto total "
+        "adjudicado mediante fianza conforme al Anexo G o cheque certificado a favor del Gobierno."
+    )
+    plazo = (
+        "La fianza estará vigente durante la sustanciación de todos los recursos legales "
+        "hasta el oficio de conformidad de Gobierno."
+    )
+    insurance = "Responsabilidad Civil por daños a terceros suma asegurada 1'000,000.00 M.N."
+    template = (
+        "Anexo G Formato de Fianza.doc | TIPO: DOC\n"
+        "MODELO DE PÓLIZA DE FIANZA\nDENOMINACIÓN SOCIAL: __________.\nNÚMERO: ____________________."
+    )
+    docs = [contract, plazo, insurance, template]
+    metas = [{"page": 22}, {"page": 23}, {"page": 25}, {"page": "doc", "source": "Anexo G Formato de Fianza.doc"}]
+    out = ChatbotRAGAgent._compose_guarantee_structured_response(canonical, docs, metas)
+    assert "MODELO DE PÓLIZA" not in out
+    assert "[PÁGINA doc]" not in out
+    assert "### 4) FORMATOS ACEPTADOS" in out
+    assert "Anexo G" in out
+    assert "Cheque certificado" in out
+    assert "12%" in out
+
+
 def test_sanitize_guarantee_contradictory_llm_body_keeps_structured_tail():
     canonical = (
         "[HECHOS CONTRACTUALES — extraídos de fragmentos indexados, obligatorios en la respuesta]\n"
@@ -1599,3 +1682,144 @@ async def test_handle_rag_cronogram_focal_search_and_analyst_block(agent, mock_c
     assert "INSTRUCCIÓN CRONOGRAMA" in system_content
     user_content = captured_messages[0][1]["content"]
     assert "06 y 07 de febrero de 2024" in user_content
+
+
+def test_is_mission_llm_refusal_detects_spanish_privacy():
+    assert ChatbotRAGAgent._is_mission_llm_refusal(
+        "Lo siento, pero no puedo proporcionar información personal sin una razón válida."
+    )
+    assert not ChatbotRAGAgent._is_mission_llm_refusal("¿Cuántos años de experiencia tiene su empresa?")
+
+
+def test_canonical_pending_question_prefers_data_gap_question():
+    pending = {
+        "type": "profile_field",
+        "field": "cedula_representante",
+        "question": "¿Cuál es el **número de INE** del representante?",
+    }
+    text = ChatbotRAGAgent._canonical_pending_question_text(pending, {"por_que_importa": "fallback"})
+    assert "INE" in text
+    assert text == pending["question"]
+
+
+@pytest.mark.asyncio
+async def test_mission_question_profile_field_skips_llm(agent):
+    pending = {
+        "type": "profile_field",
+        "field": "cedula_representante",
+        "question": "¿Cuál es el número de INE del representante?",
+    }
+    ctx = {
+        "dato_solicitado": "Número de INE",
+        "por_que_importa": "Para declaraciones formales.",
+        "impacto": "complementario",
+    }
+    agent.llm.chat = AsyncMock(return_value=LLMResponse(success=True, response="no debería llamarse"))
+    out = await agent._generate_mission_question(
+        ctx, "modo_recoleccion_inicial", pending_question=pending
+    )
+    assert "INE" in out
+    agent.llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mission_question_refusal_falls_back_to_canonical(agent):
+    pending = {
+        "type": "intake_planner",
+        "field": "custom_field",
+        "question": "¿Cuál es el valor del campo X?",
+    }
+    ctx = {"dato_solicitado": "Campo X", "por_que_importa": "", "impacto": "complementario"}
+    agent.llm.chat = AsyncMock(
+        return_value=LLMResponse(
+            success=True,
+            response="Lo siento, pero no puedo proporcionar información personal sin una razón válida.",
+        )
+    )
+    out = await agent._generate_mission_question(
+        ctx, "modo_recoleccion_inicial", pending_question=pending
+    )
+    assert "Campo X" in out or "campo x" in out.lower()
+    assert "no puedo proporcionar" not in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_data_intake_after_save_no_refusal_on_profile_transition(agent, mock_context):
+    """Tras guardar años de experiencia, la transición a cédula no debe incluir refusal del LLM."""
+    pending = [
+        {
+            "type": "profile_field",
+            "field": "anos_experiencia",
+            "label": "Años de experiencia en el giro",
+            "question": "¿Cuántos años de experiencia tiene la empresa?",
+        },
+        {
+            "type": "profile_field",
+            "field": "cedula_representante",
+            "label": "Número de INE/Cédula del Representante Legal",
+            "question": "¿Cuál es el número de INE del representante?",
+        },
+    ]
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": pending,
+        "current_question_index": 0,
+        "tasks_completed": [],
+    }
+    mock_context.memory.get_company.return_value = {
+        "id": "comp_1",
+        "master_profile": {},
+    }
+
+    async def _classify_side_effect(query, *args, **kwargs):
+        if "12" in query:
+            return "DATA_INTAKE"
+        return "QUERY"
+
+    agent._classify_message = AsyncMock(side_effect=_classify_side_effect)
+    agent.llm.generate = AsyncMock(return_value=LLMResponse(success=True, response="12"))
+    agent.llm.chat = AsyncMock(
+        return_value=LLMResponse(
+            success=True,
+            response="Lo siento, pero no puedo proporcionar información personal.",
+        )
+    )
+
+    resp = await agent.process(_inp("sess_hitl_1", "12 años"))
+    assert resp.status == AgentStatus.SUCCESS
+    body = resp.data.get("respuesta") or ""
+    assert "guardé" in body.lower()
+    assert "no puedo proporcionar" not in body.lower()
+    assert "INE" in body
+
+
+@pytest.mark.asyncio
+async def test_data_intake_last_pending_confirms_save_and_full_generation_cta(agent, mock_context):
+    """Al cerrar la cola (último pendiente), debe confirmar guardado y CTA de expediente completo."""
+    pending = [
+        {
+            "type": "profile_field",
+            "field": "cedula_representante",
+            "label": "Número de INE/Cédula del Representante Legal",
+            "question": "¿Cuál es el número de INE del representante?",
+        },
+    ]
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": pending,
+        "current_question_index": 0,
+        "tasks_completed": [],
+    }
+    mock_context.memory.get_company.return_value = {
+        "id": "comp_1",
+        "master_profile": {"representante_legal": "ENRIQUE TADEO TORRES DORANTES"},
+    }
+    agent._classify_message = AsyncMock(return_value="DATA_INTAKE")
+    agent.llm.generate = AsyncMock(
+        return_value=LLMResponse(success=True, response="IDABC123456HDFRRR01")
+    )
+
+    resp = await agent.process(_inp("sess_last_1", "IDABC123456HDFRRR01"))
+    body = (resp.data.get("respuesta") or "").lower()
+    assert "listo, guardé" in body
+    assert "propuesta económica" not in body
+    assert "generar documentos" in body
+    assert resp.data.get("intake_active") is False

@@ -14,6 +14,10 @@ from app.post_clarification.carta_33_bis_generator import (
     write_carta_docx,
 )
 from app.post_clarification.models import PostClarificationContextModel, TipoJunta
+from app.services.mini_dictamen_anexos_service import (
+    build_and_persist_mini_dictamen,
+    revalidate_mini_dictamen_after_acta,
+)
 
 logger = get_logger(__name__)
 
@@ -138,6 +142,7 @@ async def process_acta_document(
 
     session[SESSION_KEY] = _storable(model)
     await memory.save_session(session_id, session)
+    await revalidate_mini_dictamen_after_acta(memory, session_id, text or "")
     return model
 
 
@@ -177,4 +182,5 @@ async def generate_carta_33_bis(
     ctx.ultima_actualizacion = datetime.utcnow()
     session[SESSION_KEY] = _storable(ctx)
     await memory.save_session(session_id, session)
+    await build_and_persist_mini_dictamen(memory, session_id)
     return ctx

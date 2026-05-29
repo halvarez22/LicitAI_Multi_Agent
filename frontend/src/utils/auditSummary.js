@@ -20,6 +20,31 @@ const BUCKET_TO_FALLBACK_ZONA = {
     formatos: 'FORMATOS/ANEXOS',
 };
 
+const TABULAR_ALERT_ITEM_ID = 'base-tabular-alert';
+const TABULAR_ALERT_CATEGORY = 'bases_datos_tabulares';
+
+/**
+ * Cuenta efectiva de partidas (vivo o snapshot en datos_tabulares).
+ * @param {number|null|undefined} lineItemsCount
+ * @param {object|null|undefined} datosTab
+ */
+export function resolveLineItemsCount(lineItemsCount, datosTab) {
+    if (lineItemsCount != null && Number.isFinite(Number(lineItemsCount))) {
+        return Math.max(0, Number(lineItemsCount));
+    }
+    const snap = datosTab?.line_items_count;
+    if (snap != null && Number.isFinite(Number(snap))) {
+        return Math.max(0, Number(snap));
+    }
+    return 0;
+}
+
+/** Alerta tabular solo si aún no hay filas en session_line_items. */
+export function shouldShowTabularMissingAlert(datosTab, lineItemsCount) {
+    if (!datosTab?.alerta_faltante) return false;
+    return resolveLineItemsCount(lineItemsCount, datosTab) <= 0;
+}
+
 /**
  * MVP documentado: si `zona_origen` falta (dictámenes antiguos o ítem sin estampar),
  * se usa el bucket de lista (administrativo/tecnico/formatos) como zona aproximada.
@@ -441,13 +466,16 @@ export const processAuditResults = (resultsData) => {
             };
         })
         .filter((x) => x.texto);
-    const datosTabAlert = analysisPayload.datos_tabulares?.alerta_faltante
+    const datosTab = analysisPayload.datos_tabulares;
+    const lineItemsCount =
+        resultsData.line_items_count ?? resultsData.lineItemsCount ?? null;
+    const datosTabAlert = shouldShowTabularMissingAlert(datosTab, lineItemsCount)
         ? [
               {
                   tipo: '⚠️ ALERTA PARTIDAS / ANEXOS',
-                  texto: analysisPayload.datos_tabulares.alerta_faltante,
-                  category: 'bases_datos_tabulares',
-                  id: 'base-tabular-alert',
+                  texto: datosTab.alerta_faltante,
+                  category: TABULAR_ALERT_CATEGORY,
+                  id: TABULAR_ALERT_ITEM_ID,
                   agent_id: 'analyst_001',
                   zona_origen: null,
                   categoria_llm: null,
@@ -570,29 +598,49 @@ export const processAuditResults = (resultsData) => {
         consolidated
         && typeof consolidated === 'object'
         && consolidated.sobre_1_tecnico
-        && consolidated._meta?.filtered_actionable_only === true
     ) {
         base.documentCandidatesConsolidated = consolidated;
     }
     const ftDocs = resultsData.fast_track_document_candidates || resultsData.fastTrackDocumentCandidates;
     if (ftDocs) {
-        if (
-            typeof ftDocs === 'object'
-            && ftDocs.sobre_1_tecnico
-            && ftDocs._meta?.filtered_actionable_only === true
-        ) {
+        if (typeof ftDocs === 'object' && ftDocs.sobre_1_tecnico) {
             base.fastTrackDocumentCandidates = ftDocs;
             if (!base.documentCandidatesConsolidated) {
                 base.documentCandidatesConsolidated = ftDocs;
             }
+        } else if (ftDocs.candidate_document_list?.length) {
+            base.fastTrackDocumentCandidates = ftDocs;
         }
     }
     return applyInfrastructureUxOverrides(base);
 };
 
-/** Preferir CCC filtrado (meta.filtered_actionable_only); evita dictámenes viejos con 200+ ítems. */
+/** Panel Documentos detectados: solo credenciales empresariales en presentación física. */
 export function pickDocumentCandidatesForPanel(auditResults) {
     if (!auditResults || typeof auditResults !== 'object') return [];
+    const corp =
+        auditResults.corporatePhysicalDocumentCandidates
+        || auditResults.corporate_physical_document_candidates;
+    if (corp?.candidate_document_list?.length) {
+        return corp;
+    }
+    if (Array.isArray(corp) && corp.length) {
+        return {
+            candidate_document_list: corp,
+            _meta: { filtered_corporate_physical_only: true, total: corp.length },
+        };
+    }
+    return {
+        candidate_document_list: [],
+        _meta: { filtered_corporate_physical_only: true, total: 0 },
+    };
+}
+
+/** Inventario previo: formatos y anexos del pliego detectados (sobre técnico + económico). */
+export function pickDetectedFormatsForPanel(auditResults) {
+    if (!auditResults || typeof auditResults !== 'object') {
+        return { sobre_1_tecnico: [], sobre_2_economico: [], _meta: { filtered_actionable_only: true, total: 0 } };
+    }
     const ccc = auditResults.documentCandidatesConsolidated;
     const ft = auditResults.fastTrackDocumentCandidates;
     const ftIsCcc = ft && typeof ft === 'object' && ft.sobre_1_tecnico;
@@ -618,15 +666,24 @@ export function pickDocumentCandidatesForPanel(auditResults) {
         return consolidated;
     }
     const flat = auditResults.fastTrackDocumentCandidates;
-    if (flat?.candidate_document_list) {
+    if (flat?.candidate_document_list?.length) {
         return flat;
     }
-    return [];
+    return {
+        sobre_1_tecnico: [],
+        sobre_2_economico: [],
+        requisitos_legales: [],
+        otros_requisitos_criticos: [],
+        _meta: { filtered_actionable_only: true, total: 0 },
+    };
 }
 
-/** Cuenta entregables accionables para subtítulo del panel. */
+/** Cuenta credenciales empresariales físicas para subtítulo del panel. */
 export function countActionableDeliverables(candidates) {
     if (!candidates || typeof candidates !== 'object') return 0;
+    if (candidates.candidate_document_list) {
+        return candidates.candidate_document_list.length || 0;
+    }
     if (candidates.sobre_1_tecnico) {
         return (
             (candidates.sobre_1_tecnico?.length || 0)
@@ -635,5 +692,5 @@ export function countActionableDeliverables(candidates) {
             + (candidates.otros_requisitos_criticos?.length || 0)
         );
     }
-    return candidates.candidate_document_list?.length || 0;
+    return 0;
 }

@@ -71,6 +71,16 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
                 params: { session_id: sessionId, company_id: companyId },
             });
             const body = res.data;
+            if (body?.success && body?.data?.capture_complete) {
+                const cap = body.data.capture_status || {};
+                setBlock(null);
+                setInfo(
+                    body.message ||
+                        `Cotización registrada (${cap.filled ?? '?'}/${cap.total ?? '?'} precios). Usa Generar propuesta en el panel.`
+                );
+                setErr(null);
+                return;
+            }
             if (!body?.success || !body?.data) {
                 const msg = body?.message || 'No hay bloque disponible en este momento.';
                 setBlock(null);
@@ -156,7 +166,7 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
                     <div style={{ minWidth: 0 }}>
                         <div style={{ fontSize: '12px', fontWeight: 800, color: '#e0f2fe' }}>Resolución por bloque</div>
                         <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                            Precios agrupados (misma sesión de bases). Requiere flag en servidor.
+                            Vista masiva de precios (opcional si ya importaste Excel en el chat).
                         </div>
                     </div>
                 </div>
@@ -172,7 +182,15 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
             </div>
 
             {info && !block && (
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.45 }}>{info}</div>
+                <div
+                    style={{
+                        fontSize: '11px',
+                        color: info.includes('registrada') || info.includes('lista') ? '#86efac' : 'var(--text-muted)',
+                        lineHeight: 1.45,
+                    }}
+                >
+                    {info}
+                </div>
             )}
             {err && (
                 <div

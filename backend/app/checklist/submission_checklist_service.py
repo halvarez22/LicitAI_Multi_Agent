@@ -88,11 +88,114 @@ async def upsert_checklist_from_cronograma(
     return model
 
 
+async def _persist_cronograma_in_session(
+    memory: Any,
+    session_id: str,
+    cronograma: Dict[str, str],
+) -> None:
+    """Actualiza cronograma en ``tasks_completed:analysis`` y reconstruye checklist."""
+    session = await memory.get_session(session_id) or {}
+    tasks = session.get("tasks_completed") or []
+    updated_tasks: List[Dict[str, Any]] = []
+    touched = False
+    for t in tasks:
+        if not isinstance(t, dict):
+            updated_tasks.append(t)
+            continue
+        if t.get("task") != "stage_completed:analysis":
+            updated_tasks.append(t)
+            continue
+        result = t.get("result")
+        if not isinstance(result, dict):
+            updated_tasks.append(t)
+            continue
+        data = result.get("data")
+        if not isinstance(data, dict):
+            updated_tasks.append(t)
+            continue
+        new_data = dict(data)
+        new_data["cronograma"] = dict(cronograma)
+        new_result = dict(result)
+        new_result["data"] = new_data
+        updated_tasks.append({**t, "result": new_result})
+        touched = True
+    if touched:
+        session["tasks_completed"] = updated_tasks
+        await memory.save_session(session_id, session)
+    await upsert_checklist_from_cronograma(
+        memory,
+        session_id,
+        cronograma,
+        licitation_id=session.get("name"),
+        merge=bool(session.get("submission_checklist")),
+    )
+
+
+def _checklist_has_placeholder_dates(block: Dict[str, Any]) -> bool:
+    """True si la mayoría de hitos guardados no tienen fecha utilizable."""
+    from app.services.cronograma_enrichment_service import is_placeholder_cronograma_value
+
+    hitos = block.get("hitos") if isinstance(block.get("hitos"), list) else []
+    if not hitos:
+        return True
+    bad = sum(
+        1
+        for h in hitos
+        if isinstance(h, dict) and is_placeholder_cronograma_value(h.get("fecha_texto_raw"))
+    )
+    return bad >= max(2, (len(hitos) + 1) // 2)
+
+
+async def ensure_session_cronograma_and_checklist(
+    memory: Any,
+    session_id: str,
+) -> Optional[SubmissionChecklistModel]:
+    """
+    Enriquece cronograma desde RAG si quedó en placeholders y sincroniza checklist.
+    """
+    from app.services.cronograma_enrichment_service import (
+        cronograma_improved,
+        cronograma_needs_enrichment,
+        enrich_cronograma_from_rag,
+    )
+
+    session = await memory.get_session(session_id)
+    if not session:
+        return None
+
+    cron: Optional[Dict[str, Any]] = None
+    tasks = session.get("tasks_completed") or []
+    for t in reversed(tasks):
+        if t.get("task") != "stage_completed:analysis":
+            continue
+        cron = _cronograma_from_analysis_result(t.get("result"))
+        break
+
+    if cron is None and isinstance(session.get("submission_checklist"), dict):
+        return await get_submission_checklist(memory, session_id, auto_sync=False)
+
+    if cronograma_needs_enrichment(cron):
+        enriched = enrich_cronograma_from_rag(session_id, cron)
+        if cronograma_improved(cron, enriched):
+            await _persist_cronograma_in_session(memory, session_id, enriched)
+            logger.info(
+                "cronograma_enriched_from_rag",
+                session_id=session_id,
+                hitos_con_fecha=sum(
+                    1 for v in enriched.values() if str(v).strip() and str(v) != "No especificado"
+                ),
+            )
+    return await get_submission_checklist(
+        memory, session_id, auto_sync=True, refresh_placeholders=False
+    )
+
+
 async def get_submission_checklist(
     memory: Any,
     session_id: str,
     *,
     auto_sync: bool = True,
+    refresh_placeholders: bool = True,
 ) -> Optional[SubmissionChecklistModel]:
     """
     Obtiene el checklist persistido. Si no existe y auto_sync, intenta generarlo desde
@@ -102,6 +205,15 @@ async def get_submission_checklist(
     if not session:
         return None
     block = session.get(SESSION_KEY)
+    if (
+        refresh_placeholders
+        and isinstance(block, dict)
+        and block.get("hitos")
+        and _checklist_has_placeholder_dates(block)
+    ):
+        await ensure_session_cronograma_and_checklist(memory, session_id)
+        session = await memory.get_session(session_id) or session
+        block = session.get(SESSION_KEY)
     if isinstance(block, dict) and block.get("hitos"):
         try:
             m = SubmissionChecklistModel.model_validate(block)

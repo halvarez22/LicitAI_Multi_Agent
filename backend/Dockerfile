@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     curl \
     poppler-utils \
+    antiword \
+    libreoffice-writer-nogui \
     && rm -rf /var/lib/apt/lists/*
 
 # Configura y crea el directorio de trabajo

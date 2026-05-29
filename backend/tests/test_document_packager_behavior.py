@@ -67,8 +67,110 @@ def test_mapear_deterministico_dedupes_same_path(tmp_path):
         ]
     }
     est = mapear_sobres_deterministico(session, gen)
-    s2_docs = est["sobre_2"]["documentos"]
-    assert len(s2_docs) == 1
+    # Anexo M es administrativo aunque venga de carpeta técnica de generación.
+    s1_docs = est["sobre_1"]["documentos"]
+    assert len(s1_docs) == 1
+
+
+def test_mapear_deterministico_anexo_tecnico_en_sobre_2_aunque_ruta_admin(tmp_path):
+    """El Anexo Técnico de propuesta no debe quedar en complementario por carpeta admin."""
+    session = "sess_at"
+    f = tmp_path / "ANEXO_TECNICO_2026.docx"
+    f.write_bytes(b"x" * 2000)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {
+                    "nombre": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "source_filename": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "ruta": str(f),
+                }
+            ],
+        },
+    )
+    assert len(est["sobre_2"]["documentos"]) == 1
+    assert len(est["sobre_1"]["documentos"]) == 0
+
+
+def test_mapear_deterministico_dedup_anexo_m_por_nombre(tmp_path):
+    session = "sess_m"
+    a = tmp_path / "m1.docx"
+    b = tmp_path / "m2.docx"
+    a.write_bytes(b"aa")
+    b.write_bytes(b"bbbb")
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {"nombre": "12. Anexo M (Declaración de Integridad).docx", "ruta": str(a)},
+                {"nombre": "12. Anexo M (Declaración de Integridad) (2).docx", "ruta": str(b)},
+            ],
+        },
+    )
+    assert len(est["sobre_1"]["documentos"]) == 1
+
+
+def test_mapear_deterministico_reubica_anexo_tecnico_unicode_descompuesto(tmp_path):
+    session = "sess_at_unicode"
+    f = tmp_path / "anexo_tecnico.docx"
+    f.write_bytes(b"x" * 10)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {
+                    "nombre": "ANEXO TE\u0301CNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "source_filename": "ANEXO TE\u0301CNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "ruta": str(f),
+                }
+            ]
+        },
+    )
+    assert len(est["sobre_2"]["documentos"]) == 1
+    assert len(est["sobre_1"]["documentos"]) == 0
+
+
+def test_mapear_deterministico_excluye_espejo_pdf_referencia(tmp_path):
+    session = "sess_pdf_ref"
+    f = tmp_path / "anexo_tecnico_pdf_mirror.docx"
+    f.write_bytes(b"x" * 10)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {
+                    "nombre": "ANEXO TÉCNICO.pdf",
+                    "source_filename": "ANEXO TÉCNICO.pdf",
+                    "ruta": str(f),
+                }
+            ]
+        },
+    )
+    assert len(est["sobre_1"]["documentos"]) == 0
+    assert len(est["sobre_2"]["documentos"]) == 0
+    assert len(est["sobre_3"]["documentos"]) == 0
+
+
+def test_mapear_deterministico_excluye_espejo_pdf_referencia_unicode_descompuesto(tmp_path):
+    session = "sess_pdf_ref_nfd"
+    f = tmp_path / "anexo_tecnico_pdf_mirror_nfd.docx"
+    f.write_bytes(b"x" * 10)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {
+                    "nombre": "ANEXO TE\u0301CNICO.pdf",
+                    "source_filename": "ANEXO TE\u0301CNICO.pdf",
+                    "ruta": str(f),
+                }
+            ]
+        },
+    )
+    assert len(est["sobre_1"]["documentos"]) == 0
+    assert len(est["sobre_2"]["documentos"]) == 0
+    assert len(est["sobre_3"]["documentos"]) == 0
 
 
 def test_mapear_deterministico_admin_en_sobre_1(tmp_path):
@@ -231,3 +333,40 @@ async def test_packager_usa_session_name_en_ruta():
     # El código usa AgentInput.session_id para el path
     assert any("test_session" in d for d in captured_dirs), \
         f"test_session no encontrado en dirs: {captured_dirs}"
+
+
+@pytest.mark.asyncio
+async def test_packager_preserva_lineage_en_estructura_sobres():
+    agent = _make_agent()
+    inp = AgentInput(
+        session_id="sess_lineage_packager",
+        company_data={
+            "master_profile": {"razon_social": "Test Co"},
+            "documentos_generados": {
+                "tecnica": [
+                    {
+                        "nombre": "Anexo Técnico",
+                        "ruta": "/data/pt.docx",
+                        "source_doc_id": "doc-9",
+                        "source_filename": "ANEXO TÉCNICO 2026.docx",
+                        "template_id": "anexo_tecnico",
+                        "mirror_mode": "copy_docx_filled",
+                        "materialization_route": "mirror",
+                    }
+                ],
+            },
+        },
+    )
+
+    with patch("os.makedirs"), \
+         patch("os.path.exists", return_value=True), \
+         patch("os.path.isfile", return_value=True), \
+         patch("shutil.copy2"), \
+         patch.object(agent, "_generate_caratula"):
+        out = await agent.process(inp)
+
+    doc = out.data["estructura_sobres"]["sobre_2"]["documentos"][0]
+    assert doc["source_doc_id"] == "doc-9"
+    assert doc["template_id"] == "anexo_tecnico"
+    assert doc["materialization_route"] == "mirror"
+    assert out.data["materialization_metrics"]["files_count"] == 1

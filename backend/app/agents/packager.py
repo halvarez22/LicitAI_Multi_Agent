@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.services.deliverable_filename_service import (
+    build_canonical_filename,
+    prefer_convocante_filenames,
+    resolve_deliverable_filename,
+)
+
 
 def _env_csv(name: str, default: str) -> List[str]:
     raw = os.getenv(name, default).strip()
@@ -89,7 +95,10 @@ class CompraNetPackager:
     """
 
     def __init__(self) -> None:
-        exts = _env_csv("COMPRANET_ALLOWED_EXT", ".doc,.docx,.pdf,.jpg,.jpeg,.png,.xlsx")
+        exts = _env_csv(
+            "COMPRANET_ALLOWED_EXT",
+            ".doc,.docx,.pdf,.jpg,.jpeg,.png,.xlsx,.xls",
+        )
         self._allowed = {e if e.startswith(".") else f".{e}" for e in exts}
         self._max_bytes = int(os.getenv("COMPRANET_PACKAGE_MAX_BYTES", str(50 * 1024 * 1024)))
 
@@ -129,7 +138,8 @@ class CompraNetPackager:
             shutil.rmtree(staged)
         staged.mkdir(parents=True, exist_ok=True)
 
-        collected: List[Tuple[Path, str, str]] = []  # src, sobre_label, seq_name
+        collected: List[Dict[str, Any]] = []
+        used_names_by_sobre: Dict[str, set[str]] = {}
 
         if estructura:
             for sobre_key, info in estructura.items():
@@ -141,6 +151,7 @@ class CompraNetPackager:
                 docs = info.get("documentos") or []
                 if not isinstance(docs, list):
                     continue
+                used = used_names_by_sobre.setdefault(label, set())
                 for doc in docs:
                     if not isinstance(doc, dict):
                         continue
@@ -155,9 +166,45 @@ class CompraNetPackager:
                     if ext not in self._allowed:
                         errors.append(f"Extensión no permitida ({ext}): {src.name}")
                         continue
-                    seq = f"{int(doc.get('orden', 0)):02d}" if str(doc.get("orden", "")).isdigit() else "00"
-                    canonical = f"{rfc_s}_{lic_s}_{label}_{seq}{ext}"
-                    collected.append((src, label, canonical))
+                    orden_raw = doc.get("orden", 0)
+                    try:
+                        orden_i = int(orden_raw)
+                    except (TypeError, ValueError):
+                        orden_i = len(used) + 1
+                    if orden_i < 1:
+                        orden_i = len(used) + 1
+                    canonical = build_canonical_filename(
+                        rfc_s, lic_s, label, orden_i, ext
+                    )
+                    dest_name, naming_mode, conv_label = resolve_deliverable_filename(
+                        doc,
+                        rfc_token=rfc_s,
+                        licitacion_token=lic_s,
+                        sobre_label=label,
+                        orden=orden_i,
+                        ext=ext,
+                        used_names=used,
+                    )
+                    collected.append(
+                        {
+                            "src": src,
+                            "label": label,
+                            "dest_name": dest_name,
+                            "naming_mode": naming_mode,
+                            "nombre_convocante": conv_label,
+                            "canonical_fallback": canonical,
+                            "lineage": {
+                                "source_doc_id": doc.get("source_doc_id"),
+                                "source_filename": doc.get("source_filename"),
+                                "source_path": doc.get("source_path"),
+                                "source_hash": doc.get("source_hash"),
+                                "template_id": doc.get("template_id"),
+                                "mirror_mode": doc.get("mirror_mode"),
+                                "materialization_route": doc.get("materialization_route"),
+                                "provenance_ui": doc.get("provenance_ui"),
+                            },
+                        }
+                    )
         else:
             # Recorrido por carpetas estándar si no hay estructura en memoria
             for name, label in (
@@ -183,10 +230,39 @@ class CompraNetPackager:
                     clean_stem = re.sub(r"^\d+_", "", src.stem)
                     seen_stems[clean_stem] = src  # sobreescribe con el más reciente
 
+                used = used_names_by_sobre.setdefault(label, set())
                 for idx, (clean_stem, src) in enumerate(seen_stems.items(), start=1):
                     ext = src.suffix.lower()
-                    canonical = f"{rfc_s}_{lic_s}_{label}_{idx:02d}{ext}"
-                    collected.append((src, label, canonical))
+                    canonical = build_canonical_filename(
+                        rfc_s, lic_s, label, idx, ext
+                    )
+                    doc_stub = {
+                        "nombre": clean_stem.replace("_", " "),
+                        "archivo": src.name,
+                    }
+                    dest_name, naming_mode, conv_label = resolve_deliverable_filename(
+                        doc_stub,
+                        rfc_token=rfc_s,
+                        licitacion_token=lic_s,
+                        sobre_label=label,
+                        orden=idx,
+                        ext=ext,
+                        used_names=used,
+                    )
+                    collected.append(
+                        {
+                            "src": src,
+                            "label": label,
+                            "dest_name": dest_name,
+                            "naming_mode": naming_mode,
+                            "nombre_convocante": conv_label,
+                            "canonical_fallback": canonical,
+                            "lineage": {
+                                "source_filename": doc_stub.get("source_filename"),
+                                "template_id": doc_stub.get("template_id"),
+                            },
+                        }
+                    )
 
         if errors:
             return PackResult(success=False, errors=errors, validation_passed=False)
@@ -198,34 +274,70 @@ class CompraNetPackager:
                 validation_passed=False,
             )
 
-        # Copia con nombre canónico por sobre
-        for src, label, canonical in collected:
+        # Copia con nombre de convocante (o fallback canónico) por sobre
+        index_rows: List[Dict[str, Any]] = []
+        for item in collected:
+            src = item["src"]
+            label = item["label"]
+            dest_name = item["dest_name"]
             dest_dir = staged / label
             dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest_dir / canonical)
+            dest_path = dest_dir / dest_name
+            shutil.copy2(src, dest_path)
+            rel = f"{label}/{dest_name}".replace("\\", "/")
+            digest = _file_sha256(dest_path)
+            sz = dest_path.stat().st_size
+            index_rows.append(
+                {
+                    "sobre": label,
+                    "path": rel,
+                    "nombre_entrega": dest_name,
+                    "nombre_convocante": item.get("nombre_convocante") or "",
+                    "naming_mode": item.get("naming_mode") or "canonical_fallback",
+                    "canonical_fallback": item.get("canonical_fallback") or "",
+                    "sha256": digest,
+                    "output_hash": digest,
+                    "bytes": sz,
+                    "source_doc_id": (item.get("lineage") or {}).get("source_doc_id"),
+                    "source_filename": (item.get("lineage") or {}).get("source_filename"),
+                    "source_path": (item.get("lineage") or {}).get("source_path"),
+                    "source_hash": (item.get("lineage") or {}).get("source_hash"),
+                    "template_id": (item.get("lineage") or {}).get("template_id"),
+                    "mirror_mode": (item.get("lineage") or {}).get("mirror_mode"),
+                    "materialization_route": (item.get("lineage") or {}).get("materialization_route"),
+                    "provenance_ui": (item.get("lineage") or {}).get("provenance_ui"),
+                }
+            )
 
         files_meta: List[Dict[str, Any]] = []
         total = 0
-        for path in sorted(staged.rglob("*")):
-            if not path.is_file() or path.name == "MANIFIESTO_SHA256.json":
-                continue
-            rel = str(path.relative_to(staged)).replace("\\", "/")
-            digest = _file_sha256(path)
-            sz = path.stat().st_size
-            total += sz
-            files_meta.append(
-                {
-                    "path": rel,
-                    "sha256": digest,
-                    "bytes": sz,
-                }
-            )
+        for row in sorted(index_rows, key=lambda r: r.get("path") or ""):
+            total += int(row.get("bytes") or 0)
+            files_meta.append(dict(row))
+
+        indice = {
+            "schema_version": "1.0.0",
+            "session_id": lic_s,
+            "rfc_token": rfc_s,
+            "prefer_convocante_filenames": prefer_convocante_filenames(),
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "files": files_meta,
+        }
+        (staged / "INDICE_ENTREGA.json").write_text(
+            json.dumps(indice, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
         manifest = {
             "algorithm": "SHA-256",
             "rfc_token": rfc_s,
             "licitacion_token": lic_s,
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "naming_policy": (
+                "convocante_first"
+                if prefer_convocante_filenames()
+                else "canonical_rfc_only"
+            ),
             "files": files_meta,
             "total_bytes": total,
             "zip_compatible": "ZIP_DEFLATED level 6 (stdlib zipfile)",

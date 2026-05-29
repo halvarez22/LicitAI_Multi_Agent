@@ -147,11 +147,25 @@ async def audit_session(session_id: str) -> Dict[str, Any]:
 
     docx = [f for f in files if f["ext"] == ".docx"]
     xlsx = [f for f in files if f["ext"] == ".xlsx"]
+    pdf = [f for f in files if f["ext"] == ".pdf"]
+    sha_counts: Dict[str, int] = {}
+    by_top_folder: Dict[str, int] = {}
+    by_sobre: Dict[str, int] = {}
+    for f in files:
+        sha_counts[f["sha256"]] = sha_counts.get(f["sha256"], 0) + 1
+        rel = f["path"]
+        top = rel.split("/")[0] if "/" in rel else rel
+        by_top_folder[top] = by_top_folder.get(top, 0) + 1
+        if "SOBRE_" in rel:
+            parte = rel.split("/")[0]
+            by_sobre[parte] = by_sobre.get(parte, 0) + 1
+    duplicate_sha_groups = sum(1 for c in sha_counts.values() if c > 1)
+    duplicate_extra_files = sum(c - 1 for c in sha_counts.values() if c > 1)
     any_275 = any(f.get("keywords", {}).get("has_275") for f in files)
     any_formula = any(f.get("keywords", {}).get("has_formula_parcial") for f in files)
 
     allowed_ext = os.environ.get(
-        "COMPRANET_ALLOWED_EXT", ".doc,.docx,.pdf,.jpg,.jpeg,.png,.xlsx"
+        "COMPRANET_ALLOWED_EXT", ".doc,.docx,.pdf,.jpg,.jpeg,.png,.xlsx,.xls"
     )
 
     verdict_parts: List[str] = []
@@ -184,8 +198,20 @@ async def audit_session(session_id: str) -> Dict[str, Any]:
             "total_files": len(files),
             "docx_count": len(docx),
             "xlsx_count": len(xlsx),
-            "has_sobre_folders": any("/SOBRE_" in f["path"] for f in files),
+            "pdf_count": len(pdf),
+            "unique_sha256": len(sha_counts),
+            "duplicate_sha256_groups": duplicate_sha_groups,
+            "duplicate_extra_files": duplicate_extra_files,
+            "files_by_top_folder": dict(sorted(by_top_folder.items())),
+            "files_by_sobre_folder": dict(sorted(by_sobre.items())),
+            "has_sobre_folders": any(
+                f["path"].startswith("SOBRE_") or "/SOBRE_" in f["path"] for f in files
+            ),
             "has_compranet_validated_dir": (root / "_compranet_validated").is_dir(),
+            "economic_folder_present": (root / "2.propuesta_economica").is_dir(),
+            "economic_folder_files": sum(
+                1 for f in files if f["path"].startswith("2.propuesta_economica/")
+            ),
             "keyword_275_in_office_files": any_275,
             "keyword_formula_in_office_files": any_formula,
         },
@@ -200,7 +226,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Auditoría de entregables LicitAI")
     parser.add_argument("--session", required=True, help="ID de sesión (ej. isapeg)")
     parser.add_argument("--json", help="Ruta de salida JSON del reporte")
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="Elimina copias SOBRE_* y carpetas de generación; conserva _compranet_validated",
+    )
     args = parser.parse_args()
+
+    if args.prune:
+        from app.services.output_delivery_view import prune_duplicate_output_copies
+
+        root = BASE_OUTPUT / args.session
+        if root.is_dir():
+            pr = prune_duplicate_output_copies(str(root))
+            print(json.dumps({"prune": pr}, indent=2, ensure_ascii=False), file=sys.stderr)
 
     report = asyncio.run(audit_session(args.session))
     text = json.dumps(report, indent=2, ensure_ascii=False)

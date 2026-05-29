@@ -30,7 +30,13 @@ class BlockAnchor(BaseModel):
         default="",
         description="Fragmento literal o referencia tomada de analisis_bases / requisito, sin inferencia.",
     )
-    provenance: Literal["analisis_bases", "compliance_item", "pending_only", "none"] = Field(
+    provenance: Literal[
+        "analisis_bases",
+        "compliance_item",
+        "pending_only",
+        "capture_matrix_blocks",
+        "none",
+    ] = Field(
         default="none",
         description="Origen del anclaje mostrado al usuario.",
     )

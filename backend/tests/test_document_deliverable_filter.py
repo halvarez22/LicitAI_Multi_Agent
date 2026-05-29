@@ -1,6 +1,9 @@
 from app.services.document_deliverable_filter import (
+    enforce_deterministic_tipo_accion,
+    filter_compliance_for_generation,
     filter_compliance_master_list,
     filter_consolidated_document_candidates,
+    is_company_credential_present_only,
     is_pliego_causal_or_prohibition,
     should_show_deliverable_in_ui,
 )
@@ -137,3 +140,157 @@ def test_filter_compliance_master_list():
     filtered = filter_compliance_master_list(raw)
     assert len(filtered["administrativo"]) == 1
     assert filtered["administrativo"][0]["nombre"] == "Opinión SAT"
+
+
+def test_filter_compliance_for_generation_excludes_fisico_and_causales():
+    raw = {
+        "administrativo": [
+            {
+                "nombre": "Acta constitutiva",
+                "descripcion": "Legal",
+                "snippet": "Acta constitutiva",
+                "tipo_accion": "presentar_fisico",
+            },
+            {
+                "nombre": "Carta de declaración de integridad",
+                "descripcion": "Formato",
+                "snippet": "Carta bajo protesta",
+                "tipo_accion": "generar",
+            },
+            {
+                "nombre": "No presentar documentación engrapada",
+                "descripcion": "Causal",
+                "snippet": "No presentar",
+                "tipo_accion": "generar",
+            },
+            {
+                "nombre": "Propuesta económica en sobre cerrado",
+                "descripcion": "Econ",
+                "snippet": "propuesta economica",
+                "tipo_accion": "generar",
+            },
+        ],
+        "tecnico": [
+            {
+                "nombre": "Propuesta técnica describiendo especificaciones",
+                "descripcion": "Tec",
+                "snippet": "propuesta tecnica",
+                "tipo_accion": "generar",
+            },
+            {
+                "nombre": "Propuesta técnica describiendo especificaciones del servicio",
+                "descripcion": "Dup",
+                "snippet": "propuesta tecnica",
+                "tipo_accion": "generar",
+            },
+        ],
+        "formatos": [],
+    }
+    out = filter_compliance_for_generation(raw)
+    admin_names = [x["nombre"] for x in out["administrativo"]]
+    assert len(admin_names) == 1
+    assert "integridad" in admin_names[0].lower()
+    assert len(out["tecnico"]) == 1
+    assert out.get("_generation_filter_meta", {}).get("output_generable") == 2
+
+
+def test_company_credential_blocks_generation_not_convocante_letters():
+    assert is_company_credential_present_only("Constancia de situación fiscal SAT")
+    assert is_company_credential_present_only("Constancia IMSS de cumplimiento")
+    assert is_company_credential_present_only("Identificación oficial vigente INE")
+    assert not is_company_credential_present_only(
+        "Carta de declaración de integridad", "Formato Anexo M"
+    )
+
+
+def test_corporate_physical_panel_excludes_pliego_annexes():
+    from app.services.document_deliverable_filter import (
+        is_corporate_physical_credential_for_panel,
+        filter_corporate_physical_consolidated,
+    )
+
+    assert not is_corporate_physical_credential_for_panel(
+        "11. Anexo L Comprobante de Muestras.doc", "", "comprobante de muestras"
+    )
+    assert not is_corporate_physical_credential_for_panel(
+        "1. Anexo A-I Acreditación de Personalidad. Persona Física.doc", "", ""
+    )
+    assert not is_corporate_physical_credential_for_panel(
+        "7. Anexo F Constancia de Visitas.xlsx", "", "visita instalaciones"
+    )
+    assert is_corporate_physical_credential_for_panel(
+        "Constancia de situación fiscal SAT",
+        "",
+        "Impresión de la Constancia de situación fiscal",
+        "presentar_fisico",
+    )
+    assert is_corporate_physical_credential_for_panel(
+        "Opinión del Cumplimiento de Obligaciones Fiscales expedida por el SAT",
+        "",
+        "opinión positiva vigente",
+    )
+
+    consolidated = {
+        "sobre_1_tecnico": [
+            {"nombre_canonico": "Anexo L Comprobante de Muestras.doc", "tipo": "informativo"},
+            {"nombre_canonico": "Constancia IMSS", "tipo": "presentar_fisico", "snippet_representativo": "constancia imss"},
+        ],
+        "sobre_2_economico": [],
+        "requisitos_legales": [],
+        "otros_requisitos_criticos": [],
+    }
+    out = filter_corporate_physical_consolidated(consolidated)
+    names = [x["nombre"] for x in out["candidate_document_list"]]
+    assert len(names) == 1
+    assert "IMSS" in names[0]
+
+
+def test_company_credential_blocks_generation_not_convocante_letters_enforced():
+    raw = {
+        "administrativo": [
+            {
+                "nombre": "Opinión del Cumplimiento de Obligaciones Fiscales expedida por el SAT",
+                "descripcion": "Solvencia",
+                "snippet": "opinión positiva del sat",
+                "tipo_accion": "generar",
+            },
+            {
+                "nombre": "Carta de declaración de integridad",
+                "descripcion": "Formato",
+                "snippet": "Carta bajo protesta Anexo M",
+                "tipo_accion": "generar",
+            },
+        ],
+        "tecnico": [],
+        "formatos": [],
+    }
+    out = filter_compliance_for_generation(raw)
+    admin_names = [x["nombre"] for x in out["administrativo"]]
+    assert len(admin_names) == 1
+    assert "integridad" in admin_names[0].lower()
+    assert out["_generation_filter_meta"]["skipped_company_credential"] >= 1
+
+
+def test_enforce_deterministic_tipo_accion_causal_and_fisico():
+    causal = enforce_deterministic_tipo_accion(
+        {"nombre": "No presentar documentación engrapada", "tipo_accion": "generar", "quality_flags": []}
+    )
+    assert causal["tipo_accion"] == "informativo"
+    fisico = enforce_deterministic_tipo_accion(
+        {
+            "nombre": "Opinión del cumplimiento SAT",
+            "descripcion": "Opinión positiva",
+            "tipo_accion": "generar",
+            "quality_flags": [],
+        }
+    )
+    assert fisico["tipo_accion"] == "presentar_fisico"
+    imss = enforce_deterministic_tipo_accion(
+        {
+            "nombre": "Constancia de cumplimiento IMSS",
+            "tipo_accion": "generar",
+            "quality_flags": [],
+        }
+    )
+    assert imss["tipo_accion"] == "presentar_fisico"
+    assert "enforced_company_credential_fisico" in (imss.get("quality_flags") or [])

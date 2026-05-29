@@ -4,6 +4,9 @@ Rutas Hito A1: vista previa de bloque de interacción y guardado masivo validado
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_connected_memory
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 from app.api.schemas.responses import GenericResponse
 from app.config.settings import settings
 from app.contracts.interaction_block import (
@@ -43,6 +46,9 @@ async def preview_interaction_block(
         company = await memory.get_company(company_id) or {}
         catalog = company.get("catalog") if isinstance(company.get("catalog"), list) else []
         cur = int(session_state.get("current_question_index") or 0)
+        from app.services.economic_capture_matrix_service import economic_capture_status
+
+        cap = economic_capture_status(session_state)
         block = build_interaction_block(
             session_id=session_id,
             session_state=session_state,
@@ -50,15 +56,38 @@ async def preview_interaction_block(
             current_idx=cur,
         )
         if block is None:
+            if cap.get("capture_complete"):
+                return GenericResponse(
+                    success=True,
+                    message=(
+                        f"Cotización económica registrada ({cap.get('filled')}/{cap.get('total')} precios). "
+                        "Usa **Generar propuesta** — no hace falta rellenar el bloque manualmente."
+                    ),
+                    data={
+                        "capture_complete": True,
+                        "capture_status": cap,
+                    },
+                )
             return GenericResponse(
                 success=False,
                 message="No hay bloque económico agrupable (pendientes insuficientes o cluster por debajo del mínimo).",
-                data=None,
+                data={"capture_status": cap},
             )
         return GenericResponse(
             success=True,
             message="Bloque generado.",
             data=block.model_dump(mode="json"),
+        )
+    except Exception as exc:
+        logger.exception(
+            "interaction_block_preview_failed",
+            session_id=session_id,
+            company_id=company_id,
+        )
+        return GenericResponse(
+            success=False,
+            message=f"Error al generar vista previa del bloque: {str(exc)[:240]}",
+            data=None,
         )
     finally:
         await memory.disconnect()

@@ -2,6 +2,7 @@ import os
 import re
 import unicodedata
 import json
+import time
 import docx
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -21,8 +22,16 @@ from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
 from app.core.observability import get_logger
 from app.utils.doc_formatting import ANTI_PLACEHOLDER_PROMPT_RULE, strip_markdown_for_docx
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
-from app.services.document_fill_quality_gate import validate_generated_documents_fill
+from app.services.document_fill_quality_gate import (
+    detect_cross_tender_marker,
+    validate_generated_documents_fill,
+)
 from app.services.validation_service import validation_mapping_service
+from app.services.document_traceability import (
+    attach_traceability,
+    build_materialization_metrics,
+    safe_file_sha256,
+)
 from app.config.settings import settings as app_settings
 
 logger = get_logger(__name__)
@@ -32,12 +41,203 @@ logger = get_logger(__name__)
 TECH_ID_PREFIXES = ("2.",)
 
 
+def _clean_profile_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s*\|\s*", ", ", text)
+    text = re.sub(r"\bOTRA NO ESPECIFICADA EN EL\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bN/?A\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*,\s*,+", ", ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ,;-")
+
+
+def _build_carta_presentacion_text(
+    *,
+    razon_social: str,
+    rfc: str,
+    representante: str,
+    domicilio: str,
+    tender_name: str,
+    fecha_es: str,
+) -> str:
+    domicilio_line = _clean_profile_text(domicilio) or "No disponible"
+    return (
+        "LUGAR Y FECHA\n"
+        f"{fecha_es}\n\n"
+        "COMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\n"
+        "PRESENTE.-\n\n"
+        f"Por medio de la presente, {razon_social}, con RFC {rfc}, "
+        f"por conducto de su representante legal {representante}, con domicilio en {domicilio_line}, "
+        f"presenta su propuesta técnica para {tender_name}.\n\n"
+        "Manifestamos bajo protesta de decir verdad que la documentación técnica adjunta "
+        "se integra conforme a los requisitos, anexos y especificaciones solicitados en las bases, "
+        "y que contamos con capacidad legal, técnica, operativa y material para cumplir con las obligaciones "
+        "que deriven del procedimiento y, en su caso, del contrato correspondiente.\n\n"
+        "Asimismo, nos comprometemos a sostener el contenido de la propuesta técnica presentada "
+        "y a atender los requerimientos de aclaración, evaluación y formalización que emita la convocante "
+        "conforme a la normatividad aplicable.\n\n"
+        "ATENTAMENTE\n\n"
+        f"{representante}\n"
+        f"Representante Legal de {razon_social}"
+    )
+
+
+def _extract_te12_threshold(req_context: str) -> str:
+    ctx = str(req_context or "")
+    m = re.search(
+        r"(cuando\s+menos\s+\d+\s+de\s+(?:los|un)\s+\d+\s+m[aá]ximos?\s+que\s+se\s+pueden\s+obtener)",
+        ctx,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip().rstrip(".") + "."
+    m = re.search(
+        r"(\d+\s+de\s+\d+\s+m[aá]ximos?)",
+        ctx,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return f"La puntuación mínima requerida será de {m.group(1).strip()}."
+    return "La puntuación mínima requerida será la prevista expresamente en las bases del procedimiento."
+
+
+def _build_te12_text(
+    *,
+    razon_social: str,
+    rfc: str,
+    representante: str,
+    domicilio: str,
+    tender_name: str,
+    fecha_es: str,
+    req_context: str,
+) -> str:
+    domicilio_line = _clean_profile_text(domicilio) or "No disponible"
+    threshold_line = _extract_te12_threshold(req_context)
+    return (
+        "PUNTUACIÓN O UNIDADES PORCENTUALES A OBTENER EN LA PROPUESTA TÉCNICA\n\n"
+        "LUGAR Y FECHA\n"
+        f"{fecha_es}\n\n"
+        "COMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\n"
+        "PRESENTE.-\n\n"
+        f"Quien suscribe, {representante}, en representación de {razon_social}, RFC {rfc}, "
+        f"con domicilio en {domicilio_line}, comparece para manifestar que conoce y acepta "
+        f"el criterio de evaluación técnica aplicable a {tender_name}.\n\n"
+        f"{threshold_line}\n\n"
+        "Bajo protesta de decir verdad, manifestamos que la propuesta técnica presentada se integra "
+        "conforme a los requisitos y criterios de evaluación establecidos por la convocante, "
+        "por lo que solicitamos sea considerada para su revisión y dictaminación.\n\n"
+        "ATENTAMENTE\n\n"
+        f"{representante}\n"
+        f"Representante Legal de {razon_social}"
+    )
+
+
+def _normalized_blob(value: Any) -> str:
+    raw = unicodedata.normalize("NFD", str(value or ""))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    return raw.lower()
+
+
+def _mirror_source_has_cross_tender_marker(ref: Any, session_hint: str) -> bool:
+    text = str(getattr(ref, "extracted_text", "") or "")
+    return bool(detect_cross_tender_marker([text], session_hint))
+
+
+def _infer_participation_zones(documents: List[Dict[str, Any]]) -> List[str]:
+    zones: Set[str] = set()
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        content = doc.get("content") if isinstance(doc.get("content"), dict) else {}
+        meta = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        filename = str(content.get("filename") or meta.get("filename") or "")
+        blob = _normalized_blob(filename)
+        if "zona a" in blob or " za " in f" {blob} " or blob.endswith(" za.xlsx"):
+            zones.add("A")
+        if "zona b" in blob or " zb " in f" {blob} " or blob.endswith(" zb.xlsx"):
+            zones.add("B")
+        if "zona c" in blob or " zc " in f" {blob} " or blob.endswith(" zc.xlsx"):
+            zones.add("C")
+        if "zona d" in blob or " zd " in f" {blob} " or blob.endswith(" zd.xlsx"):
+            zones.add("D")
+    return sorted(zones)
+
+
+def _infer_contenido_nacional_pct(vector_db: VectorDbServiceClient, session_id: str) -> str:
+    try:
+        res = vector_db.query_texts(session_id, "contenido nacional 65% anexo iii-k punto 46", n_results=4)
+        for doc in res.get("documents") or []:
+            text = str(doc or "")
+            if "contenido nacional" not in text.lower():
+                continue
+            m = re.search(r"(\d{1,3})\s*%", text)
+            if m:
+                return m.group(1)
+    except Exception as exc:
+        logger.warning("technical_writer_contenido_nacional_pct_failed", session_id=session_id, error=str(exc))
+    return ""
+
+
+def _build_contenido_nacional_text(
+    *,
+    razon_social: str,
+    rfc: str,
+    representante: str,
+    session_id: str,
+    tender_name: str,
+    fecha_es: str,
+    zonas: List[str],
+    porcentaje: str,
+) -> str:
+    zonas_txt = ", ".join(zonas) if zonas else "correspondientes a la propuesta presentada"
+    if len(zonas) == 1:
+        zona_clause = f"la zona {zonas_txt}"
+    elif len(zonas) > 1:
+        zona_clause = f"las zonas {zonas_txt}"
+    else:
+        zona_clause = "la zona en que participo"
+    porcentaje_txt = porcentaje or "65"
+    proc_ref = tender_name.strip() or session_id.replace("_", " ").upper()
+    return (
+        "MANIFESTACIÓN DE NACIONALIDAD MEXICANA, PRODUCCIÓN EN MÉXICO Y GRADO DE CONTENIDO NACIONAL\n\n"
+        f"{fecha_es}\n\n"
+        "Comité de Adquisiciones, Arrendamientos y Contratación\n"
+        "de Servicios de la Administración Pública Estatal\n"
+        "PRESENTE.-\n\n"
+        f"Me refiero al procedimiento de contratación identificado como {proc_ref}, "
+        f"en el que mi representada, la empresa {razon_social}, RFC {rfc}, participa a través de la propuesta contenida en el presente sobre.\n\n"
+        "Sobre el particular y en términos de lo previsto por el Acuerdo por el que se establecen las reglas para la determinación "
+        "del grado de contenido nacional, tratándose de procedimientos de contratación de carácter nacional, el suscrito manifiesta "
+        "bajo protesta de decir verdad que los bienes ofertados para la partida 2 correspondiente a "
+        f"{zona_clause}, serán producidos en México y contendrán un grado de contenido nacional de cuando menos el {porcentaje_txt} por ciento, "
+        "en el supuesto de que sea adjudicado el pedido respectivo. Asimismo, manifiesto bajo protesta de decir verdad ser de nacionalidad mexicana.\n\n"
+        "De igual forma, manifiesto tener conocimiento de lo previsto en el artículo 57 de la Ley de Adquisiciones, "
+        "Arrendamientos y Servicios del Sector Público y me comprometo, en caso de ser requerido, a aceptar una verificación "
+        "del cumplimiento de los requisitos sobre el contenido nacional de los bienes ofertados mediante la exhibición de la "
+        "información documental correspondiente y/o a través de una inspección física de la planta industrial en la que se producen.\n\n"
+        "ATENTAMENTE\n\n"
+        f"{razon_social}\n\n"
+        f"{representante}\n"
+        "Representante Legal"
+    )
+
+
 def _is_technical_writable(req: Dict[str, Any]) -> bool:
     """Incluye requisitos técnicos aunque el id no sea 2.x (p. ej. Forma AT- en cap. 7)."""
     r_id = str(req.get("id", ""))
-    nombre = str(req.get("nombre", "")).upper()
-    descripcion = str(req.get("descripcion", "")).upper()
+    nombre_raw = str(req.get("nombre", "") or "")
+    desc_raw = str(req.get("descripcion", "") or "")
+    snippet_raw = str(req.get("snippet", "") or "")
+    nombre = nombre_raw.upper()
+    descripcion = desc_raw.upper()
     blob = f"{r_id} {nombre} {descripcion}".upper()
+
+    from app.services.document_deliverable_filter import is_company_credential_present_only
+
+    if is_company_credential_present_only(nombre_raw, desc_raw, snippet_raw):
+        return False
 
     # Si el compliance ya clasificó el tipo_accion, usarlo directamente
     tipo_accion = str(req.get("tipo_accion", "")).lower()
@@ -271,6 +471,7 @@ class TechnicalWriterAgent(BaseAgent):
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
         correlation_id = agent_input.correlation_id or "no-id"
+        started_at = time.perf_counter()
         llm = self.llm
         vector_db = self.vector_db
         context = await self.context_manager.get_global_context(session_id)
@@ -367,6 +568,40 @@ class TechnicalWriterAgent(BaseAgent):
         if econ_parts:
             economic_block = "\nDATOS ECONÓMICOS CONFIRMADOS (USAR ESTOS VALORES SI EL DOCUMENTO LO REQUIERE):\n" + "\n".join(econ_parts)
 
+        try:
+            from app.services.mini_dictamen_anexos_service import (
+                build_and_persist_mini_dictamen,
+                build_stage_blocking_questions,
+                get_blocking_annex_rows_for_stage,
+            )
+
+            await build_and_persist_mini_dictamen(self.context_manager.memory, session_id)
+            fresh_state = await self.context_manager.memory.get_session(session_id) or session_state
+            blocking_rows = get_blocking_annex_rows_for_stage(fresh_state, "technical")
+            if blocking_rows:
+                fresh_state["pending_questions"] = build_stage_blocking_questions(
+                    "technical", blocking_rows
+                ) + list(fresh_state.get("pending_questions") or [])
+                fresh_state["current_question_index"] = 0
+                await self.context_manager.memory.save_session(session_id, fresh_state)
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=(
+                        "La generación técnica quedó bloqueada por anexos obligatorios con "
+                        "fuente inválida, referencial o pendiente de aclaración."
+                    ),
+                    data={"missing": blocking_rows},
+                    correlation_id=correlation_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "technical_writer_mini_dictamen_guard_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
         # 2. SELECCIÓN DE REQUISITOS (Sincronización Total con Auditor + inventario canónico)
         tasks = session_state.get("tasks_completed", [])
         compliance_data: Dict[str, Any] = {}
@@ -402,7 +637,9 @@ class TechnicalWriterAgent(BaseAgent):
         # Las zonas administrativo/formatos se gestionan por FormatsAgent.
         all_candidates = compliance_data.get("tecnico", [])
 
+        from app.config.settings import settings
         from app.services.document_deliverable_filter import (
+            is_generable_tipo_accion,
             normalize_deliverable_key,
             should_show_deliverable_in_ui,
         )
@@ -414,6 +651,8 @@ class TechnicalWriterAgent(BaseAgent):
             if action not in action_counts:
                 action = "unknown"
             action_counts[action] = action_counts.get(action, 0) + 1
+            if not is_generable_tipo_accion(action):
+                continue
             nombre_u = str(req.get("nombre") or "")
             desc_u = str(req.get("descripcion") or "")
             if not should_show_deliverable_in_ui(
@@ -433,6 +672,23 @@ class TechnicalWriterAgent(BaseAgent):
             seen_ids.add(r_id)
             seen_sigs.add(sig)
 
+        tech_requirements.sort(
+            key=lambda r: (
+                0 if str(r.get("tipo_accion") or "").lower() == "generar" else 1,
+                0 if r.get("evidence_match") else 1,
+                -len(str(r.get("snippet") or "")),
+            )
+        )
+
+        from app.services.session_template_catalog import build_catalog_mirror_reqs
+
+        catalog_tech = build_catalog_mirror_reqs(
+            session_state,
+            seen_ids,
+            exclude_sobre=("administrativo", "economico"),
+        )
+        tech_requirements = catalog_tech + tech_requirements
+
         total_candidates = len(all_candidates)
         evidence_true = sum(1 for r in all_candidates if bool(r.get("evidence_match")))
         evidence_ratio = (evidence_true / total_candidates) if total_candidates else 1.0
@@ -451,7 +707,7 @@ class TechnicalWriterAgent(BaseAgent):
             has_anything_to_do = (
                 action_counts.get("generar", 0) > 0
                 or action_counts.get("presentar_fisico", 0) > 0
-                or len(reqs_to_process) > 0
+                or len(tech_requirements) > 0
             )
             logger.warning(
                 "technical_writer_quality_gate_triggered",
@@ -492,7 +748,151 @@ class TechnicalWriterAgent(BaseAgent):
             company_data, tech_dir, tech_requirements, seen_ids
         )
 
-        if not tech_requirements:
+        from app.services.ingested_file_resolver import (
+            build_ingested_file_index,
+            resolve_ingested_file,
+        )
+        from app.services.template_mirror_service import mirror_template_to_output
+
+        session_documents: List[Dict[str, Any]] = []
+        try:
+            session_documents = await self.context_manager.memory.get_documents(session_id)
+        except Exception as doc_exc:
+            logger.warning("tech_get_documents_failed", session_id=session_id, error=str(doc_exc))
+
+        file_index = build_ingested_file_index(session_documents)
+        participation_zones = _infer_participation_zones(session_documents)
+        contenido_nacional_pct = _infer_contenido_nacional_pct(vector_db, session_id)
+        mirror_enabled = bool(getattr(settings, "TEMPLATE_MIRROR_ENABLED", True))
+        mirror_max = int(getattr(settings, "TEMPLATE_MIRROR_MAX_ADMIN", 40) or 40)
+        tech_mirror_queue: List[tuple] = []
+        tech_llm_queue: List[Dict[str, Any]] = []
+        unresolved_catalog_mirrors: List[str] = []
+        session_hint = f"{session_id} {session_state.get('name', '')}"
+        for req in tech_requirements:
+            q = str(req.get("archivo_fuente") or req.get("nombre") or "")
+            ref = resolve_ingested_file(
+                q,
+                file_index,
+                doc_id=req.get("source_doc_id"),
+                source_path=req.get("source_path"),
+            )
+            ext = (ref.file_path.rsplit(".", 1)[-1].lower() if ref and ref.file_path else "")
+            if bool(req.get("from_session_catalog")) and not ref:
+                unresolved_catalog_mirrors.append(str(req.get("nombre") or q or "sin_nombre"))
+                logger.warning(
+                    "technical_catalog_source_unresolved_skip_llm",
+                    session_id=session_id,
+                    requested=q,
+                    source_doc_id=str(req.get("source_doc_id") or ""),
+                    source_path=str(req.get("source_path") or ""),
+                )
+                continue
+            if mirror_enabled and ref and ext in ("doc", "docx", "xls", "xlsx"):
+                if _mirror_source_has_cross_tender_marker(ref, session_hint):
+                    logger.warning(
+                        "technical_mirror_cross_tender_fallback",
+                        session_id=session_id,
+                        requested=q,
+                        source_filename=ref.filename,
+                        from_session_catalog=bool(req.get("from_session_catalog")),
+                    )
+                    if bool(req.get("from_session_catalog")):
+                        # La plantilla catalogada se descarta para espejado y dejamos que
+                        # el inventario/documento técnico canónico tome el relevo.
+                        continue
+                    fallback_req = dict(req)
+                    fallback_req["archivo_fuente"] = ""
+                    fallback_req["cross_tender_mirror_skipped"] = True
+                    fallback_req["mirror_conflict_source"] = ref.filename
+                    tech_llm_queue.append(fallback_req)
+                    continue
+                tech_mirror_queue.append((req, ref))
+            else:
+                tech_llm_queue.append(req)
+
+        if unresolved_catalog_mirrors:
+            logger.warning(
+                "technical_catalog_mirror_sources_unresolved",
+                session_id=session_id,
+                count=len(unresolved_catalog_mirrors),
+                names=unresolved_catalog_mirrors[:10],
+            )
+
+        if mirror_max > 0 and len(tech_mirror_queue) > mirror_max:
+            tech_mirror_queue = tech_mirror_queue[:mirror_max]
+
+        max_tech = int(getattr(settings, "TECH_WRITER_MAX_GENERABLE_DOCS", 12) or 12)
+        if max_tech > 0 and len(tech_llm_queue) > max_tech:
+            tech_llm_queue = tech_llm_queue[:max_tech]
+
+        tech_requirements = tech_llm_queue
+        pre_mirror_files: List[Dict[str, Any]] = []
+        profile_fill = {
+            "rfc": rfc,
+            "razon_social": razon_social,
+            "representante_legal": representante,
+            "domicilio": master_profile.get("domicilio_fiscal") or master_profile.get("domicilio"),
+            "fecha": fecha_es,
+            "licitacion": tender_name,
+        }
+        for idx_m, (req, ref) in enumerate(tech_mirror_queue, start=1):
+            raw_name = req.get("nombre", "Documento")
+            safe = re.sub(r"[^\w\s-]", "", str(raw_name).replace(" ", "_"))[:50].strip("_")
+            src_ext = ref.file_path.rsplit(".", 1)[-1].lower()
+            out_ext = ".docx" if src_ext == "doc" else f".{src_ext}"
+            if out_ext not in (".docx", ".xlsx", ".xls"):
+                out_ext = ".docx"
+            filepath = os.path.join(tech_dir, f"mirror_{idx_m:02d}_{safe}{out_ext}")
+            try:
+                normalized_name = _normalized_blob(raw_name or ref.filename)
+                if "contenido nacional" in normalized_name:
+                    contenido_text = _build_contenido_nacional_text(
+                        razon_social=razon_social,
+                        rfc=rfc,
+                        representante=representante,
+                        session_id=session_id,
+                        tender_name=tender_name,
+                        fecha_es=fecha_es,
+                        zonas=participation_zones,
+                        porcentaje=contenido_nacional_pct,
+                    )
+                    _save_docx(raw_name, contenido_text, filepath, doc_metadata)
+                    meta = {
+                        "ruta": filepath,
+                        "mirror_mode": "deterministic_contenido_nacional",
+                        "source_filename": ref.filename,
+                    }
+                else:
+                    meta = mirror_template_to_output(ref, filepath, profile_fill, fill_profile=True)
+                pre_mirror_files.append(
+                    attach_traceability(
+                        {
+                            "nombre": raw_name,
+                            "ruta": meta["ruta"],
+                            "status": "OK",
+                            "tipo": "tecnico_mirror",
+                        },
+                        source_doc_id=str(ref.doc_id or req.get("source_doc_id") or "") or None,
+                        source_filename=ref.filename,
+                        source_path=meta.get("source_path") or ref.file_path,
+                        source_hash=meta.get("source_hash"),
+                        mirror_mode=meta.get("mirror_mode"),
+                        materialization_route=meta.get("materialization_route") or "mirror",
+                        output_hash=meta.get("output_hash") or safe_file_sha256(meta.get("ruta")),
+                        provenance_ui=req.get("provenance_ui") if isinstance(req.get("provenance_ui"), dict) else None,
+                    )
+                )
+            except Exception as mir_exc:
+                logger.warning(
+                    "technical_mirror_failed",
+                    session_id=session_id,
+                    source=ref.filename,
+                    error=str(mir_exc),
+                )
+                tech_requirements.append(req)
+
+        if not tech_requirements and not pre_mirror_files:
             tender_cat = str((agent_input.triage_context or {}).get("tender_category") or "").upper()
             if tender_cat == "OBRA":
                 logger.info(
@@ -546,43 +946,38 @@ class TechnicalWriterAgent(BaseAgent):
                 correlation_id=correlation_id,
             )
 
-        generated_files = []
+        generated_files = list(pre_mirror_files)
         descriptions_map = {}
 
         # 3. Generar CARTA DE PRESENTACIÓN (PRODUCCIÓN)
         print(f"[TechWriter] Redactando Carta de Presentación Real para {razon_social}...")
-        carta_prompt = f"""Redacta una Carta de Presentación de Propuesta Técnica FORMAL Y ESPECÍFICA para:
-
-EMPRESA LICITANTE: {razon_social}
-RFC: {rfc}
-REPRESENTANTE LEGAL: {representante}
-DOMICILIO: {master_profile.get('domicilio_fiscal', 'S/D')}
-LICITACIÓN: {tender_name}
-FECHA: {fecha_es}
-
-CONTEXTO DE LAS BASES (usa esta información para hacer el documento específico):
-{tender_context[:2000]}
-
-INSTRUCCIONES:
-- Redacta en nombre de {razon_social}, firmado por {representante}
-- Menciona el objeto específico de la licitación basándote en el contexto
-- NO uses placeholders como [Nombre del Proyecto] o [Fecha actual]
-- Usa datos reales: empresa, representante, RFC, fecha
-- Formato: carta formal mexicana de licitación pública
-- Máximo 3 párrafos concisos y profesionales"""
-        carta_resp = await llm.generate(prompt=carta_prompt, system_prompt=system_prompt, correlation_id=correlation_id)
-        carta_text = carta_resp.response if carta_resp.success else "Error en generación."
+        carta_text = _build_carta_presentacion_text(
+            razon_social=razon_social,
+            rfc=rfc,
+            representante=representante,
+            domicilio=master_profile.get("domicilio_fiscal", "S/D"),
+            tender_name=tender_name,
+            fecha_es=fecha_es,
+        )
         
         carta_path = os.path.join(tech_dir, "01_CARTA_PRESENTACION_PROPUESTA_TECNICA.docx")
         _save_docx("CARTA DE PRESENTACIÓN DE PROPUESTA TÉCNICA", carta_text, carta_path, doc_metadata)
+        _carta_display = "Carta de Presentación de Propuesta Técnica.docx"
         generated_files.append(
-            {
-                "nombre": "Carta de Presentación",
-                "ruta": carta_path,
-                "status": "OK",
-                "tipo": "tecnico_carta",
-                "template_id": "",
-            }
+            attach_traceability(
+                {
+                    "nombre": "Carta de Presentación",
+                    "source_filename": _carta_display,
+                    "ruta": carta_path,
+                    "status": "OK",
+                    "tipo": "tecnico_carta",
+                    "template_id": "",
+                },
+                source_filename=_carta_display,
+                template_id="",
+                materialization_route="deterministic",
+                output_hash=safe_file_sha256(carta_path),
+            )
         )
 
         # 4. Generar documentos del Auditor
@@ -653,8 +1048,21 @@ INSTRUCCIONES CRÍTICAS:
             if _needs_economic and economic_block:
                 doc_prompt += f"\n\nDATOS ECONÓMICOS CONFIRMADOS (usar en este documento):\n{economic_block}"
 
-            resp = await llm.generate(prompt=doc_prompt, system_prompt=system_prompt, correlation_id=correlation_id)
-            doc_text = resp.response if resp.success else f"Contenido para {req_nombre}"
+            req_id_upper = str(req_id).upper()
+            req_nombre_upper = str(req_nombre).upper()
+            if "TE-12" in req_id_upper or "TE-12" in req_nombre_upper:
+                doc_text = _build_te12_text(
+                    razon_social=razon_social,
+                    rfc=rfc,
+                    representante=representante,
+                    domicilio=master_profile.get("domicilio_fiscal", "S/D"),
+                    tender_name=tender_name,
+                    fecha_es=fecha_es,
+                    req_context=req_context,
+                )
+            else:
+                resp = await llm.generate(prompt=doc_prompt, system_prompt=system_prompt, correlation_id=correlation_id)
+                doc_text = resp.response if resp.success else f"Contenido para {req_nombre}"
 
             # Transliterar acentos y caracteres especiales antes de sanitizar.
             # unicodedata.normalize('NFD') descompone 'á' → 'a' + combining accent,
@@ -665,14 +1073,26 @@ INSTRUCCIONES CRÍTICAS:
             file_path = os.path.join(tech_dir, f"{i:02d}_{req_id.replace('.','_')}_{safe_nombre}.docx")
 
             _save_docx(req_nombre, doc_text, file_path, doc_metadata)
+            _te_display = f"{req_id}: {req_nombre}.docx" if req_id else f"{req_nombre}.docx"
             generated_files.append(
-                {
-                    "nombre": f"{req_id}: {req_nombre}",
-                    "ruta": file_path,
-                    "status": "OK",
-                    "tipo": "tecnico",
-                    "template_id": "",
-                }
+                attach_traceability(
+                    {
+                        "nombre": f"{req_id}: {req_nombre}",
+                        "source_filename": _te_display,
+                        "ruta": file_path,
+                        "status": "OK",
+                        "tipo": "tecnico",
+                        "template_id": "",
+                    },
+                    source_doc_id=str(req.get("source_doc_id") or "") or None,
+                    source_filename=str(req.get("archivo_fuente") or _te_display).strip() or _te_display,
+                    source_path=str(req.get("source_path") or "") or None,
+                    source_hash=safe_file_sha256(str(req.get("source_path") or "")),
+                    template_id="",
+                    materialization_route="generate_controlled",
+                    output_hash=safe_file_sha256(file_path),
+                    provenance_ui=req.get("provenance_ui") if isinstance(req.get("provenance_ui"), dict) else None,
+                )
             )
             descriptions_map[os.path.basename(file_path)] = req_desc
 
@@ -682,13 +1102,18 @@ INSTRUCCIONES CRÍTICAS:
             "documentos": generated_files,
             "descriptions": descriptions_map,
             "action_type_stats": action_counts,
+            "materialization_metrics": build_materialization_metrics(
+                stage="technical",
+                documents=generated_files,
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
         }
 
         fill_gate = validate_generated_documents_fill(
             stage="technical",
             generated_documents=generated_files,
             master_profile=master_profile,
-            provenance_context={"source": "technical_writer", "confidence": 0.9},
+            provenance_context={"source": "technical_writer", "confidence": 0.9, "session_hint": session_hint},
         )
         result_data["document_fill_quality_gate"] = fill_gate
         result_data["validation_events"] = [

@@ -153,6 +153,21 @@ def test_filename_looks_like_bases():
     assert DataGapAgent._filename_looks_like_bases("mi_cif_sat.pdf") is False
 
 
+def test_truth_source_filter_excluye_plantillas_de_oferta():
+    assert DataGapAgent._source_looks_like_truth_source("CIF_EMPRESA.pdf") is True
+    assert DataGapAgent._source_looks_like_truth_source("Anexo III P 1 Zona A.xlsx") is False
+    assert DataGapAgent._source_looks_like_truth_source("Anexo F Constancia de Visitas.xlsx") is False
+    assert DataGapAgent._source_looks_like_truth_source("Aclaraciones.pdf") is False
+    assert DataGapAgent._source_looks_like_truth_source("Bases_Licitacion.pdf") is False
+
+
+def test_representante_legal_descarta_valores_genericos():
+    agent = DataGapAgent(MCPContextManager(_memory_stub({})))
+    assert agent._is_data_valid("representante_legal", "PERSONAL") is False
+    assert agent._is_data_valid("representante_legal", "Representante Legal") is False
+    assert agent._is_data_valid("representante_legal", "Juan Pérez") is True
+
+
 @pytest.mark.asyncio
 async def test_data_gap_skips_valid_data():
     mock_company = {
@@ -179,6 +194,61 @@ async def test_data_gap_skips_valid_data():
     assert result.status == AgentStatus.SUCCESS
     assert len(result.data["missing"]) == 0
     assert "expediente está completo" in (result.message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_data_gap_filtra_fuentes_de_sesion_y_no_usa_anexos_como_verdad_corporativa():
+    mock_company = {
+        "id": "co_truth",
+        "master_profile": {
+            "razon_social": "Empresa Truth SA",
+            "representante_legal": "Juan Perez",
+            "rfc": "TES123456ABC",
+            "domicilio_fiscal": "Calle 1, CDMX",
+            "email": "",
+        },
+    }
+    mem = _memory_stub(mock_company)
+    mem.get_session = AsyncMock(return_value={"compliance_slot_cache": {}})
+    mem.get_documents = AsyncMock(
+        return_value=[
+            {"content": {"filename": "16. Anexo III P 1 Zona A.xlsx"}, "metadata": {}},
+            {"content": {"filename": "CIF_EMPRESA.pdf"}, "metadata": {}},
+            {"content": {"filename": "Bases_Licitacion.pdf"}, "metadata": {}},
+        ]
+    )
+    ctx = MCPContextManager(mem)
+    agent = DataGapAgent(ctx)
+
+    company_data = {
+        "compliance_master_list": {
+            "administrativo": [
+                {"id": "REQ_MAIL3", "nombre": "Correo", "descripcion": "correo electrónico"}
+            ]
+        }
+    }
+    filtered_calls = []
+
+    def fake_query_texts(coll: str, query: str, n_results: int = 5):
+        if coll == "company_co_truth":
+            return {"documents": []}
+        return {"documents": [], "metadatas": []}
+
+    def fake_filtered(sid: str, query: str, source_filter: str, n_results: int = 20):
+        filtered_calls.append(source_filter)
+        if source_filter == "CIF_EMPRESA.pdf":
+            return {"documents": ["Correo de contacto: truth@empresa.com"]}
+        return {"documents": []}
+
+    with patch.object(agent.slot_inferer, "infer_all", AsyncMock(return_value=["email"])), \
+         patch.object(agent.vector_db, "query_texts", side_effect=fake_query_texts), \
+         patch.object(agent.vector_db, "query_texts_filtered", side_effect=fake_filtered), \
+         patch.object(agent.llm, "generate", AsyncMock(return_value=LLMResponse(success=True, response="truth@empresa.com"))):
+        result = await agent.process(_inp("sess-truth", "co_truth", company_data))
+
+    assert "email" in result.data["auto_filled"]
+    assert "CIF_EMPRESA.pdf" in filtered_calls
+    assert "16. Anexo III P 1 Zona A.xlsx" not in filtered_calls
 
 
 @pytest.mark.asyncio

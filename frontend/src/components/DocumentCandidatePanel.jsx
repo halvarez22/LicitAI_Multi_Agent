@@ -4,7 +4,6 @@ import {
     MessageSquare, ChevronRight, Search, FileCheck 
 } from 'lucide-react';
 import ForensicCard from './ForensicCard';
-import { countActionableDeliverables } from '../utils/auditSummary';
 
 /**
  * Panel de Documentos Detectados (Fast-Track)
@@ -14,31 +13,50 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
     const [filter, setFilter] = useState('');
     const [expandedKey, setExpandedKey] = useState(null);
 
-    // Extraer la lista si viene dentro del objeto de respuesta del servicio
-    const isConsolidated = rawCandidates && !Array.isArray(rawCandidates) && rawCandidates.sobre_1_tecnico;
-    const isFilteredList = rawCandidates?._meta?.filtered_actionable_only === true;
-    const actionableCount = countActionableDeliverables(rawCandidates);
-    const looksUnfilteredLegacy = isConsolidated && !isFilteredList && actionableCount > 80;
-    const candidatesArray = Array.isArray(rawCandidates) 
-        ? rawCandidates 
-        : (rawCandidates?.candidate_document_list || []);
+    // Solo credenciales empresariales en presentación física (lista plana).
+    const isCorporatePhysical = rawCandidates?._meta?.filtered_corporate_physical_only === true;
+    const looksLikeLegacyConsolidated =
+        !isCorporatePhysical
+        && rawCandidates
+        && !Array.isArray(rawCandidates)
+        && rawCandidates.sobre_1_tecnico;
+    const candidatesArray = looksLikeLegacyConsolidated
+        ? []
+        : Array.isArray(rawCandidates)
+            ? rawCandidates
+            : (rawCandidates?.candidate_document_list || []);
+    const actionableCount = candidatesArray.length;
 
-    if (!isConsolidated && (!candidatesArray || candidatesArray.length === 0)) {
+    if (!candidatesArray.length) {
         return (
             <div style={{ padding: '40px', textAlign: 'center', opacity: 0.5 }}>
                 <FileText size={48} style={{ marginBottom: '16px', margin: '0 auto' }} />
-                <p style={{ fontSize: '14px' }}>No se han detectado candidatos a documentos aún. Analiza las bases para poblar esta lista.</p>
+                <p style={{ fontSize: '14px' }}>
+                    {looksLikeLegacyConsolidated
+                        ? 'Vista antigua detectada (anexos del pliego). Recarga con Ctrl+F5 o abre de nuevo esta pestaña para cargar credenciales empresariales (IMSS, SAT, actas, etc.).'
+                        : 'No se detectaron credenciales empresariales para presentación física. Revisa que las bases estén indexadas o pulsa «Actualizar análisis».'}
+                </p>
             </div>
         );
     }
 
+    const slugKey = (s) =>
+        String(s || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '')
+            .slice(0, 64) || 'item';
+
     const renderDocumentCard = (doc, idx, categoryLabel) => {
         const isToGenerate = doc.tipo === 'generar' || doc.tipo_accion_final === 'generar';
         const isPhysical = doc.tipo === 'presentar_fisico' || doc.tipo_accion_final === 'presentar_fisico';
-        const cardKey = `candidate-${doc.id || doc.document_id || idx}`;
-        
-        // Match with new format OR old format
         const nombre = doc.nombre_canonico || doc.nombre;
+        const cardKey = `candidate-${slugKey(categoryLabel)}-${idx}-${slugKey(
+            doc.id || doc.document_id || nombre
+        )}`;
+        
         const evidencia = doc.snippet_representativo || doc.evidence_snippet;
         const conf = doc.confidence ?? 0.7;
         const numItems = doc.items_fusionados ?? 1;
@@ -168,17 +186,12 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
         <div className="document-candidate-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '15px' }}>
                 <div>
-                    <h4 style={{ fontSize: '16px', fontWeight: 800, color: '#f1f5f9', marginBottom: '4px' }}>Documentos de la Propuesta</h4>
+                    <h4 style={{ fontSize: '16px', fontWeight: 800, color: '#f1f5f9', marginBottom: '4px' }}>
+                        Documentos empresariales (presentación física)
+                    </h4>
                     <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        {isConsolidated
-                            ? `Entregables accionables por sobre (${actionableCount} ítems; sin causales ni procedimiento del pliego).`
-                            : 'Lista filtrada; pulsa «Actualizar análisis» para regenerar la vista por sobres.'}
+                        {`Credenciales del licitante para presentación física (${actionableCount} ítems): IMSS, SAT, actas, pólizas, certificaciones, etc. No incluye anexos del pliego a generar.`}
                     </p>
-                    {looksUnfilteredLegacy && (
-                        <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '6px' }}>
-                            Lista antigua sin filtrar detectada. Recarga la página (F5) o pulsa «Actualizar análisis» para ver solo entregables (~60 ítems).
-                        </p>
-                    )}
                 </div>
                 <div style={{ position: 'relative', flex: 1, maxWidth: '250px' }}>
                     <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
@@ -197,37 +210,8 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                {isConsolidated ? (
-                    <>
-                        {rawCandidates.sobre_1_tecnico?.length > 0 && (
-                            <div>
-                                <h5 style={{ fontSize: '12px', fontWeight: 800, color: '#4ade80', marginBottom: '10px', letterSpacing: '0.5px' }}>📂 SOBRE 1: PROPUESTA TÉCNICA</h5>
-                                {rawCandidates.sobre_1_tecnico.map((doc, idx) => renderDocumentCard(doc, idx, 'Propuesta Técnica'))}
-                            </div>
-                        )}
-                        {rawCandidates.sobre_2_economico?.length > 0 && (
-                            <div>
-                                <h5 style={{ fontSize: '12px', fontWeight: 800, color: '#38bdf8', marginBottom: '10px', letterSpacing: '0.5px' }}>💰 SOBRE 2: PROPUESTA ECONÓMICA</h5>
-                                {rawCandidates.sobre_2_economico.map((doc, idx) => renderDocumentCard(doc, idx, 'Propuesta Económica'))}
-                            </div>
-                        )}
-                        {rawCandidates.requisitos_legales?.length > 0 && (
-                            <div>
-                                <h5 style={{ fontSize: '12px', fontWeight: 800, color: '#f39c12', marginBottom: '10px', letterSpacing: '0.5px' }}>⚖️ REQUISITOS LEGALES</h5>
-                                {rawCandidates.requisitos_legales.map((doc, idx) => renderDocumentCard(doc, idx, 'Documentación Legal'))}
-                            </div>
-                        )}
-                        {rawCandidates.otros_requisitos_criticos?.length > 0 && (
-                            <div>
-                                <h5 style={{ fontSize: '12px', fontWeight: 800, color: '#e74c3c', marginBottom: '10px', letterSpacing: '0.5px' }}>⚠️ OTROS REQUISITOS CRÍTICOS</h5>
-                                {rawCandidates.otros_requisitos_criticos.map((doc, idx) => renderDocumentCard(doc, idx, 'Requisito General'))}
-                            </div>
-                        )}
-                    </>
-                ) : (
-                    <div>
-                        {candidatesArray.map((doc, idx) => renderDocumentCard(doc, idx, doc.categoria || 'Generales'))}
-                    </div>
+                {candidatesArray.map((doc, idx) =>
+                    renderDocumentCard(doc, idx, 'Expediente empresarial')
                 )}
             </div>
         </div>

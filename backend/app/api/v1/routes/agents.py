@@ -138,22 +138,15 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
 
             raw_text = ocr_ctx.get("extracted_text", "")
             pages = ocr_ctx.get("pages", [])
-            # Chunk size mayor para tabulares (Excel/CSV/DOCX) que para PDFs/texto
-            chunk_size = 4000 if ext in ("xlsx", "xls", "csv", "docx") else 800
-            for page in pages:
-                p_text = page.get("text", "")
-                if p_text:
-                    chunks = _chunk_text(p_text, chunk_size=chunk_size, overlap=200)
-                    metadatas = [
-                        {
-                            "source": filename,
-                            "session_id": request.session_id,
-                            "page": page.get("page"),
-                            "doc_id": d["id"],
-                        }
-                        for _ in chunks
-                    ]
-                    vector_client.add_texts(request.session_id, chunks, metadatas)
+            from app.services.document_vector_index import index_pages_atomic
+
+            index_pages_atomic(
+                request.session_id,
+                d["id"],
+                filename,
+                pages,
+                vector_client,
+            )
 
             content["status"] = "ANALYZED"
             content["extracted_text"] = raw_text
@@ -185,7 +178,8 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
         final_data = {
             "status": resultado_dict.get("status", "error"),
             "session_id": request.session_id,
-            "chatbot_message": resultado_dict.get("chatbot_message"),
+            "chatbot_message": resultado_dict.get("chatbot_message")
+            or resultado_dict.get("message"),
             "agent_decision": resultado_dict.get("orchestrator_decision"),
             "go_no_go_result": resultado_dict.get("go_no_go_result"),
             "data": resultado_dict.get("results"),
@@ -204,6 +198,17 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             try:
                 from app.utils.audit_processor import process_audit_results_backend
 
+                line_items_count: int | None = None
+                try:
+                    rows = await memory.get_line_items_for_session(request.session_id)
+                    line_items_count = len(rows or [])
+                except Exception as li_exc:
+                    logger.warning(
+                        "dictamen_line_items_count_skip session=%s err=%s",
+                        request.session_id,
+                        li_exc,
+                    )
+
                 session_for_ccc = await memory.get_session(request.session_id) or {}
                 ccc_raw = (
                     resultado_dict.get("document_candidates_consolidated")
@@ -221,6 +226,7 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
                         "document_candidates_consolidated": ccc_raw,
                     },
                     pipeline_telemetry=pipeline_telemetry,
+                    line_items_count=line_items_count,
                 )
 
                 if dictamen:

@@ -6,6 +6,7 @@ from app.agents.mcp_context import MCPContextManager
 from app.services.vector_service import VectorDbServiceClient
 from app.services.resilient_llm import ResilientLLMClient
 from app.services.slot_inference import SlotInferenceService, INFERRED_TO_PROFILE_MAP
+from app.services.session_template_catalog import classify_ingested_filename
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.core.logging_config import get_logger
 
@@ -326,6 +327,35 @@ class DataGapAgent(BaseAgent):
             digits = "".join(filter(str.isdigit, v))
             if len(digits) < 8: return False
 
+        if field == "representante_legal":
+            generic = {
+                "personal",
+                "licitante",
+                "proveedor",
+                "empresa",
+                "representante",
+                "apoderado",
+                "administrador",
+                "persona moral",
+                "persona fisica",
+                "persona física",
+            }
+            if v in generic:
+                return False
+            if any(
+                token in v
+                for token in (
+                    "representante legal",
+                    "apoderado legal",
+                    "administrador único",
+                    "administrador unico",
+                )
+            ):
+                return False
+            name_tokens = [tok for tok in re.split(r"\s+", v) if len(tok) >= 2]
+            if len(name_tokens) < 2:
+                return False
+
         return True
 
     @staticmethod
@@ -347,16 +377,113 @@ class DataGapAgent(BaseAgent):
         )
         return any(k in n for k in keywords)
 
-    def _list_session_expediente_sources(self, session_id: str) -> List[str]:
-        """Nombres de archivo indexados en la sesión, excluyendo PDFs que parecen bases."""
+    @staticmethod
+    def _source_looks_like_truth_source(name: str) -> bool:
+        """
+        Conserva documentos plausibles de verdad corporativa y excluye plantillas
+        de oferta / evidencias / ruido procedural que disparan búsquedas costosas.
+        """
+        if not name or DataGapAgent._filename_looks_like_bases(name):
+            return False
+        try:
+            doc_class, accion, _sobre = classify_ingested_filename(name)
+        except Exception:
+            doc_class, accion = "", ""
+        if doc_class in {"plantilla_oferta", "evidencia_visita"}:
+            return False
+        if accion == "informativo":
+            return False
+        low = (name or "").lower()
+        corporate_tokens = (
+            "cif",
+            "rfc",
+            "sat",
+            "constancia de situación fiscal",
+            "constancia de situacion fiscal",
+            "acta",
+            "poder",
+            "domicilio",
+            "identificacion",
+            "identificación",
+            "credencial",
+            "ine",
+            "representante",
+            "apoderado",
+            "personalidad",
+            "curriculum",
+            "currículum",
+            "empresa",
+            "constitutiva",
+        )
+        return any(token in low for token in corporate_tokens)
+
+    @staticmethod
+    def _truth_source_priority(name: str) -> int:
+        low = (name or "").lower()
+        score = 0
+        for token in (
+            "cif",
+            "sat",
+            "rfc",
+            "constancia",
+            "acta",
+            "poder",
+            "domicilio",
+            "representante",
+            "apoderado",
+            "identificacion",
+            "identificación",
+            "ine",
+            "credencial",
+            "empresa",
+            "curriculum",
+            "currículum",
+        ):
+            if token in low:
+                score += 2
+        if low.endswith(".pdf"):
+            score += 1
+        return score
+
+    async def _list_session_truth_sources(self, session_id: str) -> List[str]:
+        """Fuentes corporativas plausibles en sesión; evita plantillas de oferta."""
+        candidates: List[str] = []
+        try:
+            docs = await self.context_manager.memory.get_documents(session_id)
+        except Exception:
+            docs = []
+        for d in docs or []:
+            if not isinstance(d, dict):
+                continue
+            content = d.get("content") if isinstance(d.get("content"), dict) else {}
+            meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+            fname = str(content.get("filename") or meta.get("filename") or "").strip()
+            if not self._source_looks_like_truth_source(fname):
+                continue
+            candidates.append(fname)
+        if candidates:
+            uniq = sorted(
+                set(candidates),
+                key=lambda x: (-self._truth_source_priority(x), x.lower()),
+            )
+            print(f"[DataGap] 📎 Fuentes sesión (verdad corporativa): {uniq}")
+            return uniq[:12]
+        return self._list_session_expediente_sources_from_vectors(session_id)
+
+    def _list_session_expediente_sources_from_vectors(self, session_id: str) -> List[str]:
+        """Fallback legacy: usa vectores si no se pudieron leer documentos persistidos."""
         try:
             all_src = self.vector_db.get_sources(session_id)
         except Exception as e:
             print(f"[DataGap] ⚠️ get_sources sesión: {e}")
             return []
-        out = [s for s in all_src if s and not self._filename_looks_like_bases(s)]
+        out = [s for s in all_src if s and self._source_looks_like_truth_source(s)]
+        out = sorted(
+            set(out),
+            key=lambda x: (-self._truth_source_priority(x), x.lower()),
+        )[:12]
         if out:
-            print(f"[DataGap] 📎 Fuentes sesión (expediente, sin bases): {out}")
+            print(f"[DataGap] 📎 Fuentes sesión (vectores filtrados): {out}")
         return out
 
     async def _llm_extract_field_from_text(self, query: str, text_fragment: str, correlation_id: str = "") -> Optional[str]:
@@ -410,14 +537,42 @@ class DataGapAgent(BaseAgent):
                     if not docs:
                         continue
                     print(f"    [DataGap] 🔎 Empresa '{coll}' | query '{query}'...")
-                    got = await self._llm_extract_field_from_text(query, docs[0][:800], correlation_id)
-                    if got:
-                        return got
+                    for fragment in docs[:3]:
+                        got = await self._llm_extract_field_from_text(query, fragment[:800], correlation_id)
+                        if got:
+                            return got
                 except Exception:
                     continue
 
-        # --- 2) Fuentes de verdad en sesión (PDFs que no parecen convocatoria/bases) ---
-        for src in self._list_session_expediente_sources(session_id):
+        # --- 2) Fuentes de verdad en sesión (corporativas plausibles, no plantillas) ---
+        session_sources = await self._list_session_truth_sources(session_id)
+        source_set = set(session_sources)
+        for query in queries:
+            try:
+                global_results = self.vector_db.query_texts(session_id, query, n_results=12)
+                docs = list(global_results.get("documents", []) or [])
+                metas = list(global_results.get("metadatas", []) or [])
+                if docs:
+                    seen_sources = set()
+                    for idx, fragment in enumerate(docs[:12]):
+                        meta = metas[idx] if idx < len(metas) and isinstance(metas[idx], dict) else {}
+                        src = str(meta.get("source") or "").strip()
+                        if src and source_set and src not in source_set:
+                            continue
+                        if src and src in seen_sources:
+                            continue
+                        if src:
+                            seen_sources.add(src)
+                        chosen_src = src or "sesion_topk"
+                        print(f"    [DataGap] 🔎 Sesión top-k '{chosen_src}' | query '{query}'...")
+                        got = await self._llm_extract_field_from_text(query, fragment[:800], correlation_id)
+                        if got:
+                            return got
+            except Exception:
+                pass
+
+        # Fallback acotado: revisar solo unas cuantas fuentes mejor rankeadas.
+        for src in session_sources[:4]:
             for query in queries:
                 try:
                     results = self.vector_db.query_texts_filtered(

@@ -93,6 +93,7 @@ async def test_analista_inyecta_participacion_y_normaliza_requisitos_participaci
             EXPERIENCE_LAYER_ENABLED=False,
             CONFIDENCE_ENABLED=False,
             CONFIDENCE_SHADOW_MODE=False,
+            ENHANCED_EXTRACTION_ENABLED=False,
         ),
     ):
         inp = AgentInput(session_id="sess-part-sintetico", mode="analysis_only")

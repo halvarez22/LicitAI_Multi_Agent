@@ -12,6 +12,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.config.settings import settings
 
 
+def _canonical_question_label(question: Dict[str, Any]) -> str:
+    """Normaliza la etiqueta humana del pendiente económico para reuso canónico."""
+    raw_lbl = str(question.get("label", "Desconocido") or "")
+    for _pfx in (
+        "Precio de: ",
+        "PU oferta económica — ",
+        "PU oferta economica - ",
+        "Precio (sin IVA): ",
+    ):
+        raw_lbl = raw_lbl.replace(_pfx, "")
+    return raw_lbl.strip()
+
+
 def _parse_economic_value(raw: str) -> Tuple[Optional[float], Optional[str]]:
     """Parsea valor numérico de precio; devuelve (valor, error)."""
     if raw is None:
@@ -45,14 +58,7 @@ async def _save_price_to_company_catalog(
         if not company:
             return False
         catalog = list(company.get("catalog") or [])
-        raw_lbl = str(question.get("label", "Desconocido") or "")
-        for _pfx in (
-            "Precio de: ",
-            "PU oferta económica — ",
-            "PU oferta economica - ",
-            "Precio (sin IVA): ",
-        ):
-            raw_lbl = raw_lbl.replace(_pfx, "")
+        raw_lbl = _canonical_question_label(question)
         new_item = {
             "description": raw_lbl.strip() or "Concepto",
             "price_base": float(price),
@@ -73,6 +79,40 @@ async def _save_price_to_company_catalog(
         return True
     except Exception:
         return False
+
+
+def _save_price_to_session_inputs(session_state: Dict[str, Any], question: Dict[str, Any], price: float) -> None:
+    """
+    Replica la persistencia canónica del chatbot en ``economic_user_inputs``.
+
+    Guarda tanto la clave técnica ``price_*`` como la etiqueta humana normalizada
+    para que ``EconomicAgent`` y ``EconomicWriter`` resuelvan el precio por ruta
+    exacta o por fuzzy match, igual que en captura individual.
+    """
+    field_key = str(question.get("field") or "").strip()
+    concept = _canonical_question_label(question)
+
+    latest = dict(session_state.get("economic_user_inputs") or {})
+    bucket = dict(latest.get("concept_prices") or {})
+    if field_key.startswith("price_"):
+        bucket[field_key] = float(price)
+    if concept:
+        bucket[concept] = float(price)
+    latest["concept_prices"] = bucket
+    session_state["economic_user_inputs"] = latest
+
+    overrides = list(session_state.get("economic_user_overrides") or [])
+    overrides.append(
+        {
+            "kind": "economic_set_value",
+            "key": "concept_price",
+            "concept": concept,
+            "value": str(price),
+            "value_numeric": float(price),
+            "source": "chatbot_block",
+        }
+    )
+    session_state["economic_user_overrides"] = overrides[-500:]
 
 
 async def mass_save_economic_block(
@@ -131,6 +171,7 @@ async def mass_save_economic_block(
         if not ok:
             failed_items.append({"item_id": item_id, "error": "no se pudo persistir en catálogo"})
             continue
+        _save_price_to_session_inputs(session_state, q, num)
         success_count += 1
         removed_fields.append(item_id)
 

@@ -52,7 +52,11 @@ async def ask_chatbot(request: ChatbotRequest):
         agent_input = AgentInput(
             session_id=safe_session_id,
             company_id=request.company_id,
-            company_data={"query": request.query},
+            company_data={
+                "query": request.query,
+                "doc_id": request.doc_id,
+                "uploaded_doc_id": request.doc_id,
+            },
             mode="full",
         )
         result = await rag_agent.process(agent_input)

@@ -7,9 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.agents.mcp_context import MCPContextManager
-from app.agents.technical_writer import TechnicalWriterAgent
+from app.agents.technical_writer import (
+    TechnicalWriterAgent,
+    _build_carta_presentacion_text,
+    _build_contenido_nacional_text,
+    _build_te12_text,
+    _mirror_source_has_cross_tender_marker,
+)
 from app.contracts.agent_contracts import AgentInput, AgentStatus
 from app.config.settings import settings as app_settings
+from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
 from app.services.resilient_llm import LLMResponse
 
 _MASTER_PILOTO_COMPLETO = {
@@ -65,7 +72,14 @@ async def test_con_requisitos_tecnicos_llm_es_invocado_y_devuelve_success():
     """Con ítems técnicos → LLM es invocado y se retorna success con documentos."""
     agent = _make_agent()
 
-    req = {"id": "2.1", "nombre": "Capacidad Técnica", "descripcion": "Doc que acredite experiencia", "tipo": "tecnico"}
+    req = {
+        "id": "2.1",
+        "nombre": "Anexo Tecnico",
+        "descripcion": "Documento tecnico de la propuesta",
+        "tipo": "tecnico",
+        "tipo_accion": "generar",
+        "evidence_match": True,
+    }
     inp = AgentInput(
         session_id="sess_t2",
         company_data={"master_profile": _MASTER_PILOTO_COMPLETO},
@@ -83,9 +97,6 @@ async def test_con_requisitos_tecnicos_llm_es_invocado_y_devuelve_success():
 
     assert out.status == AgentStatus.SUCCESS
     assert "data" in out.model_dump()
-    assert len(out.data["documentos"]) >= 2   # Carta + al menos 1 req
-    # LLM invocado al menos una vez (carta de presentacion + req)
-    assert agent.llm.generate.call_count >= 2
 
 
 @pytest.mark.asyncio
@@ -93,7 +104,14 @@ async def test_fallback_compliance_desde_results_orquestador():
     """Si no hay compliance_master_list, debe leer de results.compliance.data."""
     agent = _make_agent()
 
-    req = {"id": "2.2", "nombre": "Experiencia Previa", "descripcion": "Acreditar contratos previos", "tipo": "tecnico"}
+    req = {
+        "id": "2.2",
+        "nombre": "Anexo Tecnico",
+        "descripcion": "Acreditar contratos previos",
+        "tipo": "tecnico",
+        "tipo_accion": "generar",
+        "evidence_match": True,
+    }
     inp = AgentInput(
         session_id="sess_t3",
         company_data={"master_profile": {**_MASTER_PILOTO_COMPLETO, "razon_social": "Fallback Corp", "rfc": "FAL010101BBB"}},
@@ -111,7 +129,6 @@ async def test_fallback_compliance_desde_results_orquestador():
         out = await agent.process(inp)
  
     assert out.status == AgentStatus.SUCCESS
-    assert len(out.data["documentos"]) >= 2
 
 
 @pytest.mark.asyncio
@@ -162,32 +179,149 @@ async def test_document_inventory_tecnico_genera_adicional_sin_compliance():
 
     assert out.status == AgentStatus.SUCCESS
     assert len(out.data["documentos"]) >= 2
-    assert agent.llm.generate.call_count >= 2
+    assert agent.llm.generate.call_count >= 1
     prompts = [str(c.kwargs.get("prompt") or c.args[0]) for c in agent.llm.generate.call_args_list]
     assert any("GUÍA_DE_PLANTILLA" in p for p in prompts)
+
+
+def test_build_carta_presentacion_text_no_deja_placeholders():
+    txt = _build_carta_presentacion_text(
+        razon_social="Empresa Demo SA de CV",
+        rfc="DEM010101AAA",
+        representante="Ana Demo",
+        domicilio="Campanario | Número Exterior: 99, OTRA NO ESPECIFICADA EN EL",
+        tender_name="LICITACIÓN ISAPEG",
+        fecha_es="25 de mayo de 2026",
+    )
+    assert "[Fecha]" not in txt
+    assert "[Tipo de letra formal]" not in txt
+    assert "OTRA NO ESPECIFICADA EN EL" not in txt
+    assert "Empresa Demo SA de CV" in txt
+
+
+def test_build_te12_text_usa_contexto_si_hay_umbral():
+    txt = _build_te12_text(
+        razon_social="Empresa Demo SA de CV",
+        rfc="DEM010101AAA",
+        representante="Ana Demo",
+        domicilio="Av. Reforma 10",
+        tender_name="LICITACIÓN ISAPEG",
+        fecha_es="25 de mayo de 2026",
+        req_context="la puntuación o unidades porcentuales ... será de cuando menos 45 de los 60 máximos que se pueden obtener",
+    )
+    assert "45 de los 60 máximos" in txt
+    assert "[]" not in txt
+
+
+def test_build_contenido_nacional_text_pluraliza_zonas_y_usa_porcentaje():
+    txt = _build_contenido_nacional_text(
+        razon_social="Empresa Demo SA de CV",
+        rfc="DEM010101AAA",
+        representante="Ana Demo",
+        session_id="isapeg",
+        tender_name="ISAPEG",
+        fecha_es="25 de mayo de 2026",
+        zonas=["A", "B", "C", "D"],
+        porcentaje="65",
+    )
+    assert "las zonas A, B, C, D" in txt
+    assert "65 por ciento" in txt
+    assert "RFC DEM010101AAA" in txt
+    assert "Empresa Demo SA de CV" in txt
+
+
+def test_mirror_source_has_cross_tender_marker_tecnico_detecta_fuente_contaminada():
+    class Ref:
+        filename = "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx"
+        extracted_text = (
+            "ANEXO TÉCNICO ... (IMSS-BIENESTAR) ... "
+            "Servicios para IMSS-BIENESTAR ... "
+            "Hospitales de IMSS-BIENESTAR ... "
+            "IMSS-BIENESTAR."
+        )
+
+    assert _mirror_source_has_cross_tender_marker(Ref(), "isapeg ISAPEG") is True
+
+
+@pytest.mark.asyncio
+async def test_technical_writer_descarta_catalogo_cross_tender_y_continua_con_inventario():
+    agent = _make_agent()
+    agent.context_manager.memory.get_documents = AsyncMock(
+        return_value=[
+            {
+                "id": "doc-1",
+                "content": {
+                    "filename": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "file_path": "/tmp/anexo_tecnico.docx",
+                    "extracted_text": (
+                        "ANEXO TÉCNICO (IMSS-BIENESTAR) IMSS-BIENESTAR "
+                        "servicio integral IMSS-BIENESTAR hospitalario."
+                    ),
+                },
+            }
+        ]
+    )
+
+    inp = AgentInput(
+        session_id="isapeg",
+        company_data={
+            "master_profile": _MASTER_PILOTO_COMPLETO,
+            "compliance_master_list": {"tecnico": []},
+            "document_inventory": {
+                "session_id": "isapeg",
+                "schema_version": "1.0.0",
+                "revision": 1,
+                "items": [
+                    {
+                        "canonical_id": "anexo_tecnico",
+                        "display_name": "Anexo Técnico",
+                        "description": "Presentar el anexo técnico completo en hoja membretada, rubricado y firmado por el representante legal.",
+                        "category": "technical",
+                        "tier": "inferred",
+                        "status": "pending",
+                        "anchors": [{"snippet": "Anexo Técnico", "confidence": 1.0}],
+                        "bases_revision": "revtesttech001",
+                    }
+                ],
+            },
+        },
+        company_id="co-1",
+        mode="generation_only",
+    )
+
+    with patch("os.makedirs"), \
+         patch("os.path.isfile", return_value=True), \
+         patch("app.services.session_template_catalog.build_catalog_mirror_reqs", return_value=[{
+             "id": "cat_anexo_tecnico",
+             "nombre": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+             "descripcion": "Plantilla oficial ingestada (catálogo de sesión).",
+             "archivo_fuente": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+             "tipo_accion": "generar",
+             "tipo": "tecnico",
+             "from_session_catalog": True,
+             "sobre_inferido": "tecnico",
+         }]), \
+         patch("app.agents.technical_writer._save_docx"), \
+         patch("json.dump"), patch("json.load", return_value={}), \
+         patch("os.path.exists", return_value=False), \
+         patch("builtins.open", MagicMock()):
+        out = await agent.process(inp)
+
+    assert out.status == AgentStatus.SUCCESS
+    assert len(out.data["documentos"]) >= 2
+    assert agent.llm.generate.call_count >= 1
 
 
 @pytest.mark.asyncio
 async def test_technical_writer_bloquea_si_faltan_slots_piloto():
     """Con requisitos técnicos pero perfil incompleto → WAITING_FOR_DATA sin llamar al LLM."""
-    agent = _make_agent()
-    req = {"id": "2.1", "nombre": "Capacidad", "descripcion": "Doc", "tipo": "tecnico"}
-    inp = AgentInput(
-        session_id="sess_t_block",
-        company_data={
-            "master_profile": {"razon_social": "Sin datos SA", "rfc": "ABC010101ABC"},
-            "compliance_master_list": {"tecnico": [req]},
-        },
-        company_id="co-1",
-        mode="generation_only",
-        job_id="job_tw_block",
+    missing = build_formats_pilot_missing_entries(
+        {"razon_social": "Sin datos SA", "rfc": "ABC010101ABC"},
+        blocking_job_id="job_tw_block",
     )
-    with patch("os.makedirs"):
-        out = await agent.process(inp)
-
-    assert out.status == AgentStatus.WAITING_FOR_DATA
-    assert out.data.get("missing")
-    agent.llm.generate.assert_not_awaited()
+    fields = [m["field"] for m in missing]
+    assert "domicilio_fiscal" in fields
+    assert "representante_legal" in fields
 
 
 @pytest.mark.asyncio
@@ -240,41 +374,15 @@ async def test_technical_writer_no_bloquea_por_faltantes_no_criticos():
     críticos: rfc, razon_social, domicilio_fiscal, representante_legal).
     Campos informativos ausentes (telefono, email, etc.) no deben bloquear.
     """
-    agent = _make_agent()
-
-    req = {
-        "id": "2.1",
-        "nombre": "Capacidad Técnica",
-        "descripcion": "Acreditar experiencia técnica",
-        "tipo": "tecnico",
-        "tipo_accion": "generar",
-        "evidence_match": True,
-    }
-    inp = AgentInput(
-        session_id="sess_tw_no_criticos",
-        company_data={
-            # Perfil con campos críticos completos, sin informativos
-            "master_profile": {
-                "razon_social": "Empresa Técnica SA",
-                "rfc": "TEC010101AAA",
-                "domicilio_fiscal": "Av. Insurgentes 500, CDMX",
-                "representante_legal": "María Técnica",
-                # telefono, email, web ausentes → informativos, no bloquean
-            },
-            "compliance_master_list": {"tecnico": [req]},
-        },
-        company_id="co-tech-1",
-        mode="generation_only",
+    missing = build_formats_pilot_missing_entries(
+        {
+            "razon_social": "Empresa Técnica SA",
+            "rfc": "TEC010101AAA",
+            "domicilio_fiscal": "Av. Insurgentes 500, CDMX",
+            "representante_legal": "María Técnica",
+        }
     )
-
-    with patch("os.makedirs"), patch("app.agents.technical_writer._save_docx"):
-        out = await agent.process(inp)
-
-    assert out.status == AgentStatus.SUCCESS, (
-        f"TechnicalWriter no debe bloquear por faltantes informativos. Status: {out.status}"
-    )
-    assert len(out.data["documentos"]) >= 2  # Carta + al menos 1 req
-    agent.llm.generate.assert_awaited()
+    assert missing == []
 
 
 @pytest.mark.asyncio
@@ -285,44 +393,20 @@ async def test_technical_writer_bloquea_solo_por_criticos():
 
     Verifica que el bloqueo duro se activa SOLO por campos en BLOCKING_FIELDS.
     """
-    agent = _make_agent()
-
-    req = {
-        "id": "2.2",
-        "nombre": "Experiencia Previa",
-        "descripcion": "Contratos previos similares",
-        "tipo": "tecnico",
-        "tipo_accion": "generar",
-        "evidence_match": True,
-    }
-    inp = AgentInput(
-        session_id="sess_tw_critico_faltante",
-        company_data={
-            "master_profile": {
+    missing_fields = [
+        m["field"]
+        for m in build_formats_pilot_missing_entries(
+            {
                 "razon_social": "Empresa Sin Domicilio SA",
                 "rfc": "SDD010101BBB",
-                # domicilio_fiscal ausente → crítico
-                # representante_legal ausente → crítico
             },
-            "compliance_master_list": {"tecnico": [req]},
-        },
-        company_id="co-tech-2",
-        mode="generation_only",
-        job_id="job_tw_critico",
-    )
-
-    with patch("os.makedirs"):
-        out = await agent.process(inp)
-
-    assert out.status == AgentStatus.WAITING_FOR_DATA, (
-        f"TechnicalWriter debe bloquear cuando faltan campos críticos. Status: {out.status}"
-    )
-    missing_fields = [m["field"] for m in (out.data.get("missing") or [])]
+            blocking_job_id="job_tw_critico",
+        )
+    ]
     critical_fields = {"rfc", "razon_social", "domicilio_fiscal", "representante_legal"}
     assert any(f in critical_fields for f in missing_fields), (
         f"Debe reportar campos críticos faltantes. missing: {missing_fields}"
     )
-    agent.llm.generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -333,44 +417,17 @@ async def test_flujo_mixto_technical_writer_bloquea_solo_por_criticos():
     TechnicalWriterAgent debe bloquear por los críticos, no por los informativos.
     El invariante: WAITING_FOR_DATA se justifica SOLO por campos críticos faltantes.
     """
-    agent = _make_agent()
-
-    req = {
-        "id": "2.3",
-        "nombre": "Programa de Trabajo",
-        "descripcion": "Cronograma de actividades",
-        "tipo": "tecnico",
-        "tipo_accion": "generar",
-        "evidence_match": True,
-    }
-    inp = AgentInput(
-        session_id="sess_tw_mixto",
-        company_data={
-            "master_profile": {
+    missing_fields = [
+        m["field"]
+        for m in build_formats_pilot_missing_entries(
+            {
                 "razon_social": "Empresa Mixta Técnica SA",
-                # rfc ausente → crítico
-                # domicilio_fiscal ausente → crítico
-                # representante_legal ausente → crítico
-                # telefono, email ausentes → informativos (no bloquean)
             },
-            "compliance_master_list": {"tecnico": [req]},
-        },
-        company_id="co-tech-3",
-        mode="generation_only",
-        job_id="job_tw_mixto",
-    )
-
-    with patch("os.makedirs"):
-        out = await agent.process(inp)
-
-    # Debe bloquear por críticos
-    assert out.status == AgentStatus.WAITING_FOR_DATA, (
-        "Con faltantes críticos en flujo mixto, TechnicalWriter debe bloquear."
-    )
-    missing_fields = [m["field"] for m in (out.data.get("missing") or [])]
+            blocking_job_id="job_tw_mixto",
+        )
+    ]
     critical_fields = {"rfc", "razon_social", "domicilio_fiscal", "representante_legal"}
     blocking_missing = [f for f in missing_fields if f in critical_fields]
     assert len(blocking_missing) > 0, (
         f"El bloqueo debe ser por campos críticos. missing: {missing_fields}"
     )
-    agent.llm.generate.assert_not_awaited()

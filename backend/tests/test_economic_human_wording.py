@@ -1,7 +1,12 @@
 """Redacción humana de preguntas económicas y captura precio + esquema de horas."""
 
 from app.agents.chatbot_rag import ChatbotRAGAgent
-from app.agents.economic import EconomicAgent, _is_guard_like_context
+from app.agents.economic import (
+    EconomicAgent,
+    _build_structured_price_intro,
+    _build_structured_price_question_for_user,
+    _is_guard_like_context,
+)
 
 
 def test_guard_like_detection():
@@ -33,10 +38,11 @@ def test_build_price_question_generic():
 
 
 def test_split_economic_price_reply():
-    a, b = ChatbotRAGAgent._split_economic_price_reply("5800; 24x24")
+    agent = ChatbotRAGAgent.__new__(ChatbotRAGAgent)
+    a, b = ChatbotRAGAgent._split_economic_price_reply(agent, "5800; 24x24")
     assert a == "5800"
     assert "24" in b
-    a2, b2 = ChatbotRAGAgent._split_economic_price_reply("6200 12x12")
+    a2, b2 = ChatbotRAGAgent._split_economic_price_reply(agent, "6200 12x12")
     assert a2 == "6200"
     assert "12" in b2
 
@@ -58,8 +64,41 @@ def test_build_economic_msg_intro_guard():
     intro = EconomicAgent._build_economic_msg_intro(
         agent, 3, gap, [{"id": "g1", "descripcion": "vigilancia"}]
     )
-    assert "vigilancia" in intro.lower()
-    assert "guardia" in intro.lower()
+    assert "precio unitario" in intro.lower()
+    assert "esquema de horas" in intro.lower()
+
+
+def test_build_structured_material_question_mentions_anexo_iii_h():
+    slot = {
+        "concept_label": "ALCOHOL EN GEL (LITRO)",
+        "source_name": "32. Anexo III P1-2 ZA_Propuesta economica.xlsx",
+        "sheet_name": "PARTIDA 2 ZONA A",
+        "row_index": 39,
+        "quantity_total": 129,
+        "rows_count": 1,
+        "slot_type": "monthly_material_requirement",
+        "unit": "LITRO",
+        "quantity_support_source_name": "matriz_cantidades_materiales.xlsx",
+        "quantity_support_sheet_name": "Hoja 1",
+        "quantity_support_row_index": 47,
+    }
+    q = _build_structured_price_question_for_user(slot)
+    assert "matriz_cantidades_materiales.xlsx" in q.lower()
+    assert "solo con el precio unitario" in q.lower()
+    assert "cantidad total a cotizar" in q.lower()
+
+
+def test_build_structured_price_intro_mentions_support_source_when_available():
+    intro = _build_structured_price_intro(
+        [
+            {
+                "concept_label": "ALCOHOL EN GEL (LITRO)",
+                "quantity_support_source_name": "matriz_cantidades_materiales.xlsx",
+            }
+        ]
+    )
+    assert "matriz_cantidades_materiales.xlsx" in intro.lower()
+    assert "precio" in intro.lower()
 
 
 def test_bootstrap_proposal_from_tabular_rows_when_proposal_empty():

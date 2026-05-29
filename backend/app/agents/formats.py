@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import docx
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -15,10 +16,18 @@ from app.contracts.document_inventory import (
     DocumentInventory,
     InventoryItemStatus,
 )
-from app.services.document_fill_quality_gate import validate_generated_documents_fill
+from app.services.document_fill_quality_gate import (
+    detect_cross_tender_marker,
+    validate_generated_documents_fill,
+)
 from app.services.validation_service import validation_mapping_service
 from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
 from app.core.observability import get_logger
+from app.services.document_traceability import (
+    attach_traceability,
+    build_materialization_metrics,
+    safe_file_sha256,
+)
 from app.utils.doc_formatting import (
     ANTI_PLACEHOLDER_PROMPT_RULE, 
     strip_markdown_for_docx,
@@ -26,7 +35,6 @@ from app.utils.doc_formatting import (
     parse_markdown_table
 )
 from app.core.template_engine import LegalTemplateEngine, TemplateIntegrityError
-from app.services.document_fill_quality_gate import validate_generated_documents_fill
 from app.services.resilient_llm import ResilientLLMClient
 from app.services.vector_service import VectorDbServiceClient
 from app.config.settings import settings as app_settings
@@ -167,6 +175,18 @@ def _sanitize_legal_content(
     text = re.sub(r"\bRFC:\s*N/A\b", f"RFC: {rfc or 'Dato pendiente de confirmar por el representante legal.'}", text, flags=re.I)
     text = re.sub(r"\bRepresentante\s+Legal:\s*N/A\b", f"Representante Legal: {representante}", text, flags=re.I)
     text = re.sub(r"\bLugar y fecha:\s*N/A\b", f"Lugar y fecha: {ciudad}, {fecha}", text, flags=re.I)
+    if domicilio:
+        text = text.replace(
+            "domicilio en Dato pendiente de confirmar por el representante legal.",
+            f"domicilio en {domicilio}.",
+        )
+    if representante:
+        text = re.sub(
+            r"(Firma del Representante Legal:?\s*)Dato pendiente de confirmar por el representante legal\.",
+            rf"\1{representante}",
+            text,
+            flags=re.I,
+        )
 
     # Última barrera: cualquier placeholder restante entre [] o {} se neutraliza.
     text = re.sub(
@@ -175,6 +195,120 @@ def _sanitize_legal_content(
         text,
     )
     return text
+
+
+def _normalize_formats_blob(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _infer_formats_contenido_nacional_pct(
+    vector_db: VectorDbServiceClient,
+    session_id: str,
+) -> str:
+    try:
+        res = vector_db.query_texts(session_id, "contenido nacional 65% anexo iii-k punto 46", n_results=4)
+        for doc in res.get("documents") or []:
+            text = str(doc or "")
+            if "contenido nacional" not in text.lower():
+                continue
+            match = re.search(r"(\d{1,3})\s*%", text)
+            if match:
+                return match.group(1)
+    except Exception as exc:
+        logger.warning("formats_contenido_nacional_pct_failed", session_id=session_id, error=str(exc))
+    return ""
+
+
+def _build_formats_contenido_nacional_text(
+    *,
+    razon_social: str,
+    rfc: str,
+    representante: str,
+    session_id: str,
+    tender_name: str,
+    fecha_es: str,
+    zonas: List[str],
+    porcentaje: str,
+) -> str:
+    zonas_txt = ", ".join(zonas) if zonas else "correspondientes a la propuesta presentada"
+    if len(zonas) == 1:
+        zona_clause = f"la zona {zonas_txt}"
+    elif len(zonas) > 1:
+        zona_clause = f"las zonas {zonas_txt}"
+    else:
+        zona_clause = "la zona en que participo"
+    porcentaje_txt = porcentaje or "65"
+    proc_ref = tender_name.strip() or session_id.replace("_", " ").upper()
+    return (
+        "MANIFESTACIÓN DE NACIONALIDAD MEXICANA, PRODUCCIÓN EN MÉXICO Y GRADO DE CONTENIDO NACIONAL\n\n"
+        f"{fecha_es}\n\n"
+        "Comité de Adquisiciones, Arrendamientos y Contratación\n"
+        "de Servicios de la Administración Pública Estatal\n"
+        "PRESENTE.-\n\n"
+        f"Me refiero al procedimiento de contratación identificado como {proc_ref}, "
+        f"en el que mi representada, la empresa {razon_social}, RFC {rfc}, participa a través de la propuesta contenida en el presente sobre.\n\n"
+        "Sobre el particular y en términos de lo previsto por el Acuerdo por el que se establecen las reglas para la determinación "
+        "del grado de contenido nacional, tratándose de procedimientos de contratación de carácter nacional, el suscrito manifiesta "
+        "bajo protesta de decir verdad que los bienes ofertados para la partida 2 correspondiente a "
+        f"{zona_clause}, serán producidos en México y contendrán un grado de contenido nacional de cuando menos el {porcentaje_txt} por ciento, "
+        "en el supuesto de que sea adjudicado el pedido respectivo. Asimismo, manifiesto bajo protesta de decir verdad ser de nacionalidad mexicana.\n\n"
+        "De igual forma, manifiesto tener conocimiento de lo previsto en el artículo 57 de la Ley de Adquisiciones, "
+        "Arrendamientos y Servicios del Sector Público y me comprometo, en caso de ser requerido, a aceptar una verificación "
+        "del cumplimiento de los requisitos sobre el contenido nacional de los bienes ofertados mediante la exhibición de la "
+        "información documental correspondiente y/o a través de una inspección física de la planta industrial en la que se producen.\n\n"
+        "ATENTAMENTE\n\n"
+        f"{razon_social}\n\n"
+        f"{representante}\n"
+        "Representante Legal"
+    )
+
+
+def _pick_reference_service_price(user_inputs: Dict[str, Any]) -> Optional[float]:
+    candidates: List[tuple[str, float]] = []
+
+    def _collect_from_mapping(mapping: Any) -> None:
+        if not isinstance(mapping, dict):
+            return
+        for key, value in mapping.items():
+            k = str(key or "")
+            if not k.startswith("price_struct_service_"):
+                continue
+            try:
+                candidates.append((k, float(value)))
+            except (TypeError, ValueError):
+                continue
+
+    _collect_from_mapping(user_inputs.get("concept_prices"))
+    _collect_from_mapping(user_inputs)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _zones_from_economic_user_inputs(user_inputs: Dict[str, Any]) -> List[str]:
+    """Extrae zonas A/B/C… desde claves ``price_struct_service_{zona}_``."""
+    zones: List[str] = []
+    sources: List[Any] = [user_inputs]
+    cp = user_inputs.get("concept_prices")
+    if isinstance(cp, dict):
+        sources.append(cp)
+    for mapping in sources:
+        if not isinstance(mapping, dict):
+            continue
+        for key in mapping:
+            m = re.search(r"price_struct_service_([a-z])_", str(key or "").lower())
+            if not m:
+                continue
+            z = m.group(1).upper()
+            if z not in zones:
+                zones.append(z)
+    return zones
+
+
+def _mirror_source_has_cross_tender_marker(ref: Any, session_hint: str) -> bool:
+    text = str(getattr(ref, "extracted_text", "") or "")
+    return bool(detect_cross_tender_marker([text], session_hint))
 
 
 def _should_block_by_quality_gate(
@@ -288,27 +422,45 @@ class FormatsAgent(BaseAgent):
         rid = str(req.get("id", "")).strip().lower()
         name = str(req.get("nombre", "")).strip().lower()
         desc = str(req.get("descripcion", "")).strip().lower()
-        text = f"{rid} {name} {desc}"
+        label_tax = str(req.get("label_taxonomica", "")).strip().lower()
+        text = f"{rid} {name} {desc} {label_tax}"
         if "anexo 7" in text or "personalidad" in text:
             return "anexo_7"
         if "anexo 11" in text or "conformidad" in text:
             return "anexo_11"
         if "anexo 15" in text or "50" in text or "60" in text:
             return "anexo_15"
+        if "decl_integridad" in text or "no colusion" in text or "colusión" in text:
+            return "decl_integridad_no_colusion"
+        if "decl_mipyme" in text or "mipyme" in text or "estratificacion" in text or "estratificación" in text:
+            return "decl_mipyme"
         return None
 
     def _template_data(self, session_id: str, master_profile: Dict[str, Any], metadata: Dict[str, Any], economic_overrides: Dict[str, Any] = None) -> Dict[str, Any]:
         """Construye datos dinámicos para render de templates legales."""
+        domicilio = master_profile.get("domicilio_fiscal") or master_profile.get("domicilio") or ""
+        lugar = (
+            master_profile.get("ciudad")
+            or (str(domicilio).split("|", 1)[0].strip() if domicilio else "")
+            or "México"
+        )
+        actividad_principal = (
+            master_profile.get("actividad_principal")
+            or master_profile.get("giro")
+            or "prestación de servicios"
+        )
         data = {
             "razon_social": master_profile.get("razon_social", "N/A"),
             "rfc": master_profile.get("rfc", "N/A"),
             "numero_licitacion": session_id,
             "servicio": master_profile.get("giro", "servicio licitado"),
             "nombre_representante": master_profile.get("representante_legal", "N/A"),
-            "lugar": master_profile.get("ciudad", "Mexico"),
+            "domicilio": domicilio,
+            "lugar": lugar,
             "fecha": metadata.get("fecha", ""),
             "tipo_licitacion": "Licitacion Publica",
             "autoridad_convocante": "Convocante",
+            "actividad_principal": actividad_principal,
         }
         # Hito 3.2: Inyectar overrides económicos en el diccionario de la plantilla
         if economic_overrides:
@@ -320,6 +472,7 @@ class FormatsAgent(BaseAgent):
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
         correlation_id = agent_input.correlation_id or "no-id"
+        started_at = time.perf_counter()
         llm = self.llm
         context = await self.context_manager.get_global_context(session_id)
 
@@ -331,6 +484,13 @@ class FormatsAgent(BaseAgent):
             state = await self.context_manager.memory.get_session(session_id)
             if state and "initial_data" in state:
                 master_profile = state["initial_data"].get("company_data", {}).get("master_profile", {})
+        if not master_profile and agent_input.company_id:
+            try:
+                company_db = await self.context_manager.memory.get_company(str(agent_input.company_id))
+                if isinstance(company_db, dict):
+                    master_profile = company_db.get("master_profile") or company_db.get("catalog") or {}
+            except Exception:
+                pass
 
         tipo_persona = master_profile.get("tipo", "moral").lower()
         razon_social = master_profile.get("razon_social", "EMPRESA SIN REGISTRO")
@@ -367,7 +527,7 @@ class FormatsAgent(BaseAgent):
 
         # Valores seguros después de validación
         rfc = rfc or "N/A"
-        representante = representante or razon_social if tipo_persona == "fisica" else "N/A"
+        representante = representante or (razon_social if tipo_persona == "fisica" else "N/A")
         
         # Lógica de Redacción Universal (Yo vs Nosotros)
         pronombres = "en primera persona ('Yo', 'mi empresa')" if tipo_persona == "fisica" else "en representación de la empresa ('Nosotros', 'la empresa')"
@@ -379,6 +539,9 @@ class FormatsAgent(BaseAgent):
             "SOLO debes rellenar los datos de la empresa, fechas y placeholders. "
             "ESTÁ PROHIBIDO omitir secciones, simplificar tablas o cambiar el formato original. "
             "Si el contexto muestra una tabla con columnas específicas, genera esa tabla EXACTAMENTE IGUAL. "
+            "Nunca escribas 'Dato pendiente de confirmar', nunca dejes blancos reales y nunca cites una institución "
+            "o convocante distinta a la del procedimiento actual. Si no tienes un dato variable, omite la cláusula "
+            "o devuelve solo el texto sustentado por contexto real. "
             f"{ANTI_PLACEHOLDER_PROMPT_RULE}"
         )
 
@@ -426,6 +589,40 @@ class FormatsAgent(BaseAgent):
         if econ_parts:
             economic_block = "\nDATOS ECONÓMICOS CONFIRMADOS (USAR ESTOS VALORES SI EL DOCUMENTO LO REQUIERE):\n" + "\n".join(econ_parts)
 
+        try:
+            from app.services.mini_dictamen_anexos_service import (
+                build_and_persist_mini_dictamen,
+                build_stage_blocking_questions,
+                get_blocking_annex_rows_for_stage,
+            )
+
+            await build_and_persist_mini_dictamen(self.context_manager.memory, session_id)
+            fresh_state = await self.context_manager.memory.get_session(session_id) or session_state
+            blocking_rows = get_blocking_annex_rows_for_stage(fresh_state, "formats")
+            if blocking_rows:
+                fresh_state["pending_questions"] = build_stage_blocking_questions(
+                    "formats", blocking_rows
+                ) + list(fresh_state.get("pending_questions") or [])
+                fresh_state["current_question_index"] = 0
+                await self.context_manager.memory.save_session(session_id, fresh_state)
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=(
+                        "La generación administrativa quedó bloqueada por anexos obligatorios "
+                        "con fuente inválida, referencial o pendiente de aclaración."
+                    ),
+                    data={"missing": blocking_rows},
+                    correlation_id=correlation_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "formats_mini_dictamen_guard_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+
         # 2. RECUPERAR LISTA MAESTRA (SINCRONIZACIÓN CORONACIÓN)
         # Orden de prioridad:
         # a) Inyección directa del orquestador via compliance_master_list
@@ -458,13 +655,25 @@ class FormatsAgent(BaseAgent):
         evidence_true = sum(1 for r in raw_list if bool(r.get("evidence_match")))
         evidence_ratio = (evidence_true / total_candidates) if total_candidates else 1.0
 
-        output_dir = os.path.join("/data", "outputs", session_id, "3.documentos administrativos")
-        os.makedirs(output_dir, exist_ok=True)
+        admin_output_dir = os.path.join(
+            "/data", "outputs", session_id, "3.documentos administrativos"
+        )
+        os.makedirs(admin_output_dir, exist_ok=True)
 
         # Contador de formas numeradas por prefijo para detectar alucinaciones secuenciales
         _numbered_form_counts: Dict[str, int] = {}
 
-        from app.services.document_deliverable_filter import should_show_deliverable_in_ui
+        from app.config.settings import settings
+        from app.services.document_deliverable_filter import (
+            has_admin_format_template_evidence,
+            is_company_credential_present_only,
+            is_economic_writer_domain,
+            is_generable_tipo_accion,
+            normalize_deliverable_key,
+            should_show_deliverable_in_ui,
+        )
+
+        seen_sigs: Set[str] = set()
 
         for req in raw_list:
             rid = str(req.get("id", "")).strip().replace(".", "_")
@@ -494,7 +703,21 @@ class FormatsAgent(BaseAgent):
             if tipo_accion not in action_counts:
                 tipo_accion = "unknown"
             action_counts[tipo_accion] = action_counts.get(tipo_accion, 0) + 1
-            if tipo_accion in ("informativo", "presentar_fisico", "requiere_datos_licitante"):
+            if not is_generable_tipo_accion(tipo_accion):
+                seen_ids.add(rid)
+                continue
+            if is_company_credential_present_only(
+                raw_name_u, desc_u, str(req.get("snippet") or "")
+            ):
+                seen_ids.add(rid)
+                logger.info(
+                    "formats_company_credential_skipped",
+                    session_id=session_id,
+                    rid=rid,
+                    nombre=raw_name_u[:80],
+                )
+                continue
+            if is_economic_writer_domain(raw_name_u, desc_u, str(req.get("snippet") or "")):
                 seen_ids.add(rid)
                 continue
 
@@ -531,25 +754,23 @@ class FormatsAgent(BaseAgent):
                         seen_ids.add(rid)  # Marcar como visto para no re-procesar
                         continue
 
-            # Reconocimiento ampliado: prefijo 1_x, Forma DD, palabras clave, tipo administrativo/formato,
-            # o fila inyectada desde ``document_inventory`` (sobre legal/administrativo).
-            is_admin = (
-                tipo_accion == "generar"
-                or (
-                    tipo_accion == "unknown"
-                    and (
-                        req.get("from_document_inventory") is True
-                        or req.get("inventory_synthetic") is True
-                        or rid.startswith("1_")
-                        or re.search(r"\bDD[-_]?\d", blob_ids)
-                        or any(x in rid.upper() for x in ["AT", "AE", "DECL", "ANEXO"])
-                        or req.get("tipo", "").lower() in ("administrativo", "formato", "formatos")
-                    )
-                )
-            )
-            if is_admin:
-                reqs_to_process.append(req)
+            if not has_admin_format_template_evidence(req):
                 seen_ids.add(rid)
+                logger.info(
+                    "formats_no_template_evidence_skipped",
+                    session_id=session_id,
+                    rid=rid,
+                    nombre=raw_name_u[:80],
+                )
+                continue
+
+            sig = normalize_deliverable_key(raw_name_u, "administrativo")
+            if sig in seen_sigs:
+                seen_ids.add(rid)
+                continue
+            seen_sigs.add(sig)
+            reqs_to_process.append(req)
+            seen_ids.add(rid)
 
         gate = _should_block_by_quality_gate(
             total_items=total_candidates,
@@ -605,13 +826,238 @@ class FormatsAgent(BaseAgent):
                     correlation_id=correlation_id,
                 )
 
-        _merge_document_inventory_legal(company_data, output_dir, reqs_to_process, seen_ids)
+        from app.services.ingested_file_resolver import (
+            build_ingested_file_index,
+            resolve_ingested_file,
+        )
+        from app.services.session_template_catalog import build_catalog_mirror_reqs
+        from app.services.template_mirror_service import mirror_template_to_output
 
-        logger.info("formats_generation_started", agent=self.agent_id, session_id=session_id, count=len(reqs_to_process))
+        session_documents: List[Dict[str, Any]] = []
+        try:
+            session_documents = await self.context_manager.memory.get_documents(session_id)
+        except Exception as doc_exc:
+            logger.warning("formats_get_documents_failed", session_id=session_id, error=str(doc_exc))
+
+        file_index = build_ingested_file_index(session_documents)
+        catalog_reqs = build_catalog_mirror_reqs(
+            session_state,
+            seen_ids,
+            exclude_sobre=("economico",),
+        )
+        reqs_to_process = catalog_reqs + reqs_to_process
+
+        mirror_enabled = bool(getattr(settings, "TEMPLATE_MIRROR_ENABLED", True))
+        mirror_max = int(getattr(settings, "TEMPLATE_MIRROR_MAX_ADMIN", 40) or 40)
+        mirror_queue: List[tuple] = []
+        llm_queue: List[Dict[str, Any]] = []
+        unresolved_catalog_mirrors: List[str] = []
+        session_hint = f"{session_id} {session_state.get('name', '')}"
+        for req in reqs_to_process:
+            q = str(req.get("archivo_fuente") or req.get("nombre") or "")
+            ref = resolve_ingested_file(
+                q,
+                file_index,
+                doc_id=req.get("source_doc_id"),
+                source_path=req.get("source_path"),
+            )
+            ext = (ref.file_path.rsplit(".", 1)[-1].lower() if ref and ref.file_path else "")
+            if bool(req.get("from_session_catalog")) and not ref:
+                unresolved_catalog_mirrors.append(str(req.get("nombre") or q or "sin_nombre"))
+                logger.warning(
+                    "formats_catalog_source_unresolved_skip_llm",
+                    session_id=session_id,
+                    requested=q,
+                    source_doc_id=str(req.get("source_doc_id") or ""),
+                    source_path=str(req.get("source_path") or ""),
+                )
+                continue
+            if mirror_enabled and ref and ext in ("doc", "docx", "xls", "xlsx"):
+                if _mirror_source_has_cross_tender_marker(ref, session_hint):
+                    if bool(req.get("from_session_catalog")):
+                        logger.warning(
+                            "formats_catalog_cross_tender_skip_llm",
+                            session_id=session_id,
+                            requested=q,
+                            source_filename=ref.filename,
+                        )
+                        continue
+                    fallback_req = dict(req)
+                    fallback_req["archivo_fuente"] = ""
+                    fallback_req["cross_tender_mirror_skipped"] = True
+                    fallback_req["mirror_conflict_source"] = ref.filename
+                    llm_queue.append(fallback_req)
+                    continue
+                mirror_queue.append((req, ref))
+            else:
+                llm_queue.append(req)
+
+        if unresolved_catalog_mirrors:
+            logger.warning(
+                "formats_catalog_mirror_sources_unresolved",
+                session_id=session_id,
+                count=len(unresolved_catalog_mirrors),
+                names=unresolved_catalog_mirrors[:10],
+            )
+
+        if mirror_max > 0 and len(mirror_queue) > mirror_max:
+            mirror_queue = mirror_queue[:mirror_max]
+
+        max_formats = int(getattr(settings, "FORMATS_MAX_GENERABLE_DOCS", 18) or 18)
+        if max_formats > 0 and len(llm_queue) > max_formats:
+            llm_queue = llm_queue[:max_formats]
+
+        _merge_document_inventory_legal(company_data, admin_output_dir, llm_queue, seen_ids)
+
+        logger.info(
+            "formats_generation_started",
+            agent=self.agent_id,
+            session_id=session_id,
+            mirror_count=len(mirror_queue),
+            llm_count=len(llm_queue),
+        )
 
         generated_files = []
+        zonas_detectadas: list[str] = []
+        zone_sources: List[str] = []
+        for req_item in list(mirror_queue) + [(item, None) for item in llm_queue]:
+            req_data = req_item[0] if isinstance(req_item, tuple) else req_item
+            zone_sources.append(
+                " ".join(str(req_data.get(k) or "") for k in ("nombre", "descripcion", "titulo", "label"))
+            )
+        for doc in session_documents:
+            if not isinstance(doc, dict):
+                continue
+            content = doc.get("content") if isinstance(doc.get("content"), dict) else {}
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            zone_sources.append(
+                " ".join(
+                    str(v or "")
+                    for v in (
+                        content.get("filename"),
+                        content.get("doc_type"),
+                        metadata.get("filename"),
+                        metadata.get("doc_type"),
+                        metadata.get("title"),
+                    )
+                )
+            )
+        for blob in zone_sources:
+            for zone in re.findall(r"\bzona\s+([A-Z])\b", blob, flags=re.IGNORECASE):
+                z = str(zone).upper()
+                if z not in zonas_detectadas:
+                    zonas_detectadas.append(z)
+        for z in _zones_from_economic_user_inputs(user_inputs):
+            if z not in zonas_detectadas:
+                zonas_detectadas.append(z)
+        zonas_ofertadas = ", ".join(zonas_detectadas[:-1]) + (" y " + zonas_detectadas[-1] if len(zonas_detectadas) > 1 else (zonas_detectadas[0] if zonas_detectadas else ""))
+        profile_fill = {
+            "rfc": rfc,
+            "razon_social": razon_social,
+            "representante_legal": representante,
+            "domicilio": master_profile.get("domicilio_fiscal") or master_profile.get("domicilio"),
+            "fecha": doc_metadata.get("fecha"),
+            "licitacion": doc_metadata.get("tender_name") or session_id,
+            "zonas_ofertadas": zonas_ofertadas,
+            "numero_referencia": doc_metadata.get("tender_name") or session_id,
+            "tarifa_mensual_referencia": _pick_reference_service_price(user_inputs),
+        }
+        contenido_nacional_pct = _infer_formats_contenido_nacional_pct(self.vector_db, session_id)
 
-        for req in reqs_to_process:
+        def _mirror_output_dir(req_item: Dict[str, Any]) -> str:
+            base = os.path.join("/data", "outputs", session_id)
+            sobre = str(req_item.get("sobre_inferido") or "")
+            tipo = str(req_item.get("tipo") or "").lower()
+            if sobre == "tecnico" or tipo == "tecnico":
+                sub = "1.propuesta tecnica"
+            elif sobre == "economico":
+                sub = "2.propuesta_economica"
+            else:
+                sub = "3.documentos administrativos"
+            path = os.path.join(base, sub)
+            os.makedirs(path, exist_ok=True)
+            return path
+
+        for req, ref in mirror_queue:
+            rid = str(req.get("id", "")).strip().replace(".", "_")
+            raw_name = req.get("nombre", "Documento")
+            safe_name = re.sub(r"[^\w\s-]", "", str(raw_name).replace(" ", "_"))[:60].strip("_")
+            filename = f"{rid}_{safe_name}" if rid else safe_name
+            filename = re.sub(r"_+", "_", filename).strip("_")
+            src_ext = ref.file_path.rsplit(".", 1)[-1].lower()
+            out_ext = ".docx" if src_ext == "doc" else f".{src_ext}"
+            if out_ext not in (".docx", ".xlsx", ".xls"):
+                out_ext = ".docx"
+            output_dir = _mirror_output_dir(req)
+            filepath = os.path.join(output_dir, f"{filename}{out_ext}")
+            if _formats_inventory_doc_exists(output_dir, rid):
+                continue
+            try:
+                normalized_name = _normalize_formats_blob(raw_name or ref.filename)
+                if "contenido nacional" in normalized_name:
+                    contenido_text = _build_formats_contenido_nacional_text(
+                        razon_social=razon_social,
+                        rfc=rfc,
+                        representante=representante,
+                        session_id=session_id,
+                        tender_name=doc_metadata.get("tender_name") or session_id,
+                        fecha_es=doc_metadata.get("fecha") or "",
+                        zonas=zonas_detectadas,
+                        porcentaje=contenido_nacional_pct,
+                    )
+                    _save_docx(raw_name, contenido_text, filepath, doc_metadata)
+                    meta = {
+                        "ruta": filepath,
+                        "mirror_mode": "deterministic_contenido_nacional",
+                        "materialization_route": "mirror",
+                        "source_filename": ref.filename,
+                        "source_path": ref.file_path,
+                        "source_hash": safe_file_sha256(ref.file_path),
+                        "output_hash": safe_file_sha256(filepath),
+                    }
+                else:
+                    meta = mirror_template_to_output(
+                        ref,
+                        filepath,
+                        profile_fill,
+                        fill_profile=True,
+                    )
+                generated_files.append(
+                    attach_traceability(
+                        {
+                        "nombre": raw_name,
+                        "ruta": meta["ruta"],
+                        "status": "FINAL",
+                        "tipo": str(req.get("tipo") or "administrativo"),
+                        "template_id": None,
+                        },
+                        source_doc_id=str(ref.doc_id or req.get("source_doc_id") or "") or None,
+                        source_filename=ref.filename,
+                        source_path=meta.get("source_path") or ref.file_path,
+                        source_hash=meta.get("source_hash"),
+                        template_id=None,
+                        mirror_mode=meta.get("mirror_mode"),
+                        materialization_route=meta.get("materialization_route") or "mirror",
+                        output_hash=meta.get("output_hash") or safe_file_sha256(meta.get("ruta")),
+                        provenance_ui=req.get("provenance_ui") if isinstance(req.get("provenance_ui"), dict) else None,
+                    )
+                )
+                logger.info(
+                    "formats_mirror_ok",
+                    session_id=session_id,
+                    source=ref.filename,
+                    mode=meta.get("mirror_mode"),
+                )
+            except Exception as mir_exc:
+                logger.warning(
+                    "formats_mirror_failed",
+                    session_id=session_id,
+                    source=ref.filename,
+                    error=str(mir_exc),
+                )
+                llm_queue.append(req)
+
+        for req in llm_queue:
             rid = str(req.get("id", "")).strip().replace(".", "_")
             raw_name = req.get('nombre', 'Documento')
             # Usar nombre completo (hasta 60 chars) para evitar colisiones de nombre de archivo
@@ -659,31 +1105,34 @@ class FormatsAgent(BaseAgent):
                 f"Genera el contenido legal oficial para el requisito {req.get('id')}: {req_nombre}\n"
                 f"Descripción: {req_desc}\nEmpresa: {razon_social}\n"
                 f"Representante: {representante}\nRFC: {rfc}\n"
+                f"Domicilio: {master_profile.get('domicilio_fiscal', '')}\n"
                 f"{bases_context_block}\n"
                 f"{economic_block}\n{hint_line}"
             )
 
             content = ""
+            materialization_route = "generate_controlled"
             if template_id:
                 tpl_data = self._template_data(session_id, master_profile, doc_metadata, user_inputs)
                 content = self.template_engine.render(template_id, tpl_data)
                 if not self.template_engine.verify_integrity(content, template_id):
                     raise TemplateIntegrityError(f"Integridad inválida para template {template_id}")
-
-            resp = await llm.generate(
-                prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id
-            )
-            if not resp.success:
-                logger.error(
-                    "llm_generation_failed",
-                    agent=self.agent_id,
-                    req_name=raw_name,
-                    error=resp.error,
+                materialization_route = "template_locked"
+            else:
+                resp = await llm.generate(
+                    prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id
                 )
-                continue
-            llm_content = (resp.response or "").strip()
-            if llm_content:
-                content = llm_content
+                if not resp.success:
+                    logger.error(
+                        "llm_generation_failed",
+                        agent=self.agent_id,
+                        req_name=raw_name,
+                        error=resp.error,
+                    )
+                    continue
+                llm_content = (resp.response or "").strip()
+                if llm_content:
+                    content = llm_content
             if not content.strip():
                 logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
                 continue
@@ -694,17 +1143,32 @@ class FormatsAgent(BaseAgent):
                 metadata=doc_metadata,
             )
             
-            filepath = os.path.join(output_dir, f"{filename}.docx")
+            filepath = os.path.join(_mirror_output_dir(req), f"{filename}.docx")
             try:
                 _save_docx(f"{rid} - {raw_name}", content, filepath, doc_metadata)
-                generated_files.append({
-                    "nombre": raw_name,
-                    "ruta": filepath,
-                    "status": "FINAL",
-                    "tipo": str(req.get("tipo") or "administrativo"),
-                    "template_id": template_id,
-                    "template_static_hash": self.template_engine.static_hash(template_id) if template_id else None,
-                })
+                _display = raw_name if str(raw_name).lower().endswith(".docx") else f"{raw_name}.docx"
+                generated_files.append(
+                    attach_traceability(
+                        {
+                            "nombre": raw_name,
+                            "source_filename": str(req.get("archivo_fuente") or _display).strip() or _display,
+                            "ruta": filepath,
+                            "status": "FINAL",
+                            "tipo": str(req.get("tipo") or "administrativo"),
+                            "template_id": template_id,
+                            "template_static_hash": self.template_engine.static_hash(template_id) if template_id else None,
+                        },
+                        source_doc_id=str(req.get("source_doc_id") or "") or None,
+                        source_filename=str(req.get("archivo_fuente") or _display).strip() or _display,
+                        source_path=str(req.get("source_path") or "") or None,
+                        source_hash=safe_file_sha256(str(req.get("source_path") or "")),
+                        template_id=template_id,
+                        mirror_mode=None,
+                        materialization_route=materialization_route,
+                        output_hash=safe_file_sha256(filepath),
+                        provenance_ui=req.get("provenance_ui") if isinstance(req.get("provenance_ui"), dict) else None,
+                    )
+                )
                 logger.info("docx_generated", agent=self.agent_id, filename=filename)
             except Exception as e:
                 logger.error("docx_save_failed", agent=self.agent_id, filename=filename, error=str(e))
@@ -712,14 +1176,23 @@ class FormatsAgent(BaseAgent):
         result_data = {
             "documentos": generated_files,
             "count": len(generated_files),
-            "folder": output_dir,
+            "folder": admin_output_dir,
             "action_type_stats": action_counts,
+            "materialization_metrics": build_materialization_metrics(
+                stage="formats",
+                documents=generated_files,
+                elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
         }
         fill_gate = validate_generated_documents_fill(
             stage="formats",
             generated_documents=generated_files,
             master_profile=master_profile,
-            provenance_context={"source": "formats_writer", "confidence": 0.9},
+            provenance_context={
+                "source": "formats_writer",
+                "confidence": 0.9,
+                "session_hint": session_hint,
+            },
         )
         result_data["document_fill_quality_gate"] = fill_gate
         result_data["validation_events"] = [

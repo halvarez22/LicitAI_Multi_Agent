@@ -5,7 +5,11 @@ y fallback a antiword como comando externo del sistema.
 
 from __future__ import annotations
 
+import glob
+import os
+import shutil
 import subprocess
+import tempfile
 from typing import Any, Dict
 
 from app.core.logging_config import get_logger
@@ -23,7 +27,8 @@ class DocIngestor:
 
     1. ``docx2txt`` — librería Python, sin dependencias de sistema.
     2. ``antiword`` — comando externo, fallback para archivos ``.doc`` puros.
-    3. Si ambos fallan → ``ocr_result`` con ``success=False``.
+    3. ``LibreOffice`` headless — convierte ``.doc`` → ``.docx`` y extrae texto.
+    4. Si todos fallan → ``ocr_result`` con ``success=False``.
 
     Si el texto extraído tiene menos de ``_MIN_CONTENT_CHARS`` caracteres
     (sin contar espacios), el resultado se considera vacío o ilegible y se
@@ -45,6 +50,11 @@ class DocIngestor:
             text = await loop.run_in_executor(None, self._try_antiword, file_path)
 
         if text is None:
+            text = await loop.run_in_executor(
+                None, self._try_libreoffice_docx_text, file_path
+            )
+
+        if text is None:
             logger.error(
                 "doc_ingest_all_methods_failed",
                 filename=filename,
@@ -57,7 +67,7 @@ class DocIngestor:
                 "success": False,
                 "error": (
                     "No se pudo procesar el archivo .doc: "
-                    "docx2txt y antiword fallaron o no están disponibles."
+                    "docx2txt, antiword y LibreOffice no pudieron extraer texto."
                 ),
             }
 
@@ -170,3 +180,78 @@ class DocIngestor:
                 error=str(exc),
             )
             return None
+
+    def _try_libreoffice_docx_text(self, file_path: str) -> str | None:
+        """
+        Convierte .doc a .docx con LibreOffice (soffice) y extrae texto con python-docx.
+        """
+        out_dir = tempfile.mkdtemp(prefix="licitai_doc_")
+        try:
+            for cmd in (
+                [
+                    "soffice",
+                    "--headless",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    "--convert-to",
+                    "docx",
+                    "--outdir",
+                    out_dir,
+                    file_path,
+                ],
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    "--convert-to",
+                    "docx",
+                    "--outdir",
+                    out_dir,
+                    file_path,
+                ],
+            ):
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except FileNotFoundError:
+                    continue
+                if proc.returncode != 0:
+                    logger.warning(
+                        "doc_libreoffice_convert_failed",
+                        file_path=file_path,
+                        cmd=cmd[0],
+                        stderr=(proc.stderr or "")[:300],
+                    )
+                    continue
+                docx_paths = glob.glob(os.path.join(out_dir, "*.docx"))
+                if not docx_paths:
+                    continue
+                from docx import Document
+
+                doc = Document(docx_paths[0])
+                parts = [p.text.strip() for p in doc.paragraphs if (p.text or "").strip()]
+                for table in doc.tables:
+                    for row in table.rows:
+                        cells = [str(c.text or "").strip() for c in row.cells]
+                        if any(cells):
+                            parts.append(" | ".join(cells))
+                text = "\n".join(parts).strip()
+                if len(text) >= _MIN_CONTENT_CHARS:
+                    logger.info(
+                        "doc_libreoffice_success",
+                        file_path=file_path,
+                        chars=len(text),
+                    )
+                    return text
+        except subprocess.TimeoutExpired as exc:
+            logger.warning("doc_libreoffice_timeout", file_path=file_path, error=str(exc))
+        except Exception as exc:
+            logger.warning("doc_libreoffice_error", file_path=file_path, error=str(exc))
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        return None

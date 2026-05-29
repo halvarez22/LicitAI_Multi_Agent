@@ -25,7 +25,10 @@ if _BACKEND_ROOT not in sys.path:
 def _mock_answer(question: dict) -> str:
     """Respuesta simulada del usuario según tipo de pregunta pendiente."""
     if question.get("type") == "economic_price":
-        return "18500.00"
+        field = str(question.get("field") or "")
+        if "location" in field:
+            return "1325"
+        return "35 mil 529"
     field = question.get("field") or ""
     if field == "rfc":
         return "mi rfc es E2E850101XYZ"

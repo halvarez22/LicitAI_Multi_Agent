@@ -2,6 +2,65 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 import json
 
+TABULAR_ALERT_ITEM_ID = "base-tabular-alert"
+TABULAR_ALERT_CATEGORY = "bases_datos_tabulares"
+
+
+def resolve_line_items_count(
+    line_items_count: Optional[int],
+    datos_tab: Optional[Dict[str, Any]],
+) -> int:
+    """Cuenta efectiva de partidas: parámetro vivo o snapshot del análisis."""
+    if line_items_count is not None:
+        try:
+            return max(0, int(line_items_count))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(datos_tab, dict):
+        try:
+            return max(0, int(datos_tab.get("line_items_count") or 0))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+def should_show_tabular_missing_alert(
+    datos_tab: Optional[Dict[str, Any]],
+    line_items_count: Optional[int] = None,
+) -> bool:
+    """
+    Muestra la alerta de partidas solo si sigue faltando ingesta (0 filas).
+    Con partidas en BD, se omite aunque el snapshot del análisis conserve alerta_faltante.
+    """
+    if not isinstance(datos_tab, dict) or not datos_tab.get("alerta_faltante"):
+        return False
+    return resolve_line_items_count(line_items_count, datos_tab) <= 0
+
+
+def strip_stale_tabular_alert_from_dictamen(
+    dictamen: Dict[str, Any],
+    line_items_count: int,
+) -> Dict[str, Any]:
+    """Quita del dictamen persistido la alerta obsoleta si ya hay session_line_items."""
+    if not isinstance(dictamen, dict) or line_items_count <= 0:
+        return dictamen
+    causales = dictamen.get("causales")
+    if not isinstance(causales, list):
+        return dictamen
+    filtered = [
+        h
+        for h in causales
+        if isinstance(h, dict)
+        and h.get("id") != TABULAR_ALERT_ITEM_ID
+        and h.get("category") != TABULAR_ALERT_CATEGORY
+    ]
+    if len(filtered) == len(causales):
+        return dictamen
+    out = {**dictamen, "causales": filtered}
+    out["totalRequisitos"] = len(filtered)
+    out["riesgos"] = sum(1 for h in filtered if h.get("isRisk"))
+    return out
+
 
 def _rag_in_text(s: Optional[str]) -> bool:
     t = (s or "").lower()
@@ -136,6 +195,7 @@ def build_compliance_por_zona(hallazgos: List[Dict[str, Any]]) -> Dict[str, List
 def process_audit_results_backend(
     results_data: Dict[str, Any],
     pipeline_telemetry: Optional[Dict[str, Any]] = None,
+    line_items_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Réplica en Python de processAuditResults de auditSummary.js.
@@ -144,6 +204,7 @@ def process_audit_results_backend(
     Args:
         results_data: Payload analysis/compliance/economic (mismo contrato que el frontend).
         pipeline_telemetry: Telemetría del orquestador (`build_pipeline_telemetry`); se guarda en el dictamen.
+        line_items_count: Filas actuales en session_line_items; si > 0, no se incluye alerta tabular obsoleta.
     """
     if not results_data:
         return None
@@ -244,12 +305,12 @@ def process_audit_results_backend(
             })
 
     datos_tab = analysis_data.get("datos_tabulares") or {}
-    if isinstance(datos_tab, dict) and datos_tab.get("alerta_faltante"):
+    if should_show_tabular_missing_alert(datos_tab, line_items_count):
         raw_list.append({
             "tipo": "⚠️ ALERTA PARTIDAS / ANEXOS",
             "texto": datos_tab["alerta_faltante"],
-            "category": "bases_datos_tabulares",
-            "id": "base-tabular-alert",
+            "category": TABULAR_ALERT_CATEGORY,
+            "id": TABULAR_ALERT_ITEM_ID,
             "agent_id": "analyst_001",
             "zona_origen": None,
             "categoria_llm": None,

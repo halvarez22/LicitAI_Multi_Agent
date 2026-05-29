@@ -6,6 +6,7 @@ Heurísticas por encabezados (concepto, precio, unidad) sin depender del layout 
 from __future__ import annotations
 
 import re
+import unicodedata
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,6 +49,12 @@ def _norm_concepto(s: str) -> str:
     return t[:2000] if len(t) > 2000 else t
 
 
+def _norm_match_text(value: Any) -> str:
+    """Normaliza texto para matching semántico de headers/celdas."""
+    t = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    return unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode("ascii")
+
+
 def _parse_price(val: Any) -> Optional[float]:
     """Convierte celdas mixtas (número, texto con $, MXN) a float."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -66,6 +73,487 @@ def _parse_price(val: Any) -> Optional[float]:
         return x if x > 0 else None
     except ValueError:
         return None
+
+
+def _extract_zone_hint(sheet_name: str) -> Optional[str]:
+    match = re.search(r"\bzona\s+([a-z])\b", _norm_match_text(sheet_name), re.I)
+    return match.group(1).upper() if match else None
+
+
+def _find_first_col(headers: List[str], needles: Tuple[str, ...]) -> Optional[int]:
+    for idx, header in enumerate(headers):
+        if any(needle in header for needle in needles):
+            return idx
+    return None
+
+
+def _classify_support_matrix_role(
+    df: pd.DataFrame,
+    *,
+    concept_col: Optional[str],
+    price_col: Optional[str],
+    unit_col: Optional[str],
+) -> Optional[str]:
+    """
+    Clasifica matrices/listas tabulares de soporte por forma estructural.
+
+    Busca documentos que no son grids de captura de precio, pero sí una relación amplia
+    de materiales con múltiples columnas numéricas auxiliares. Se usa para persistir
+    un rol canónico consumible después por el flujo económico.
+    """
+    if df.empty or not concept_col or not price_col:
+        return None
+
+    try:
+        cols = list(df.columns)
+    except Exception:
+        return None
+
+    concept_idx = None
+    price_idx = None
+    unit_idx = None
+    try:
+        concept_idx = int(df.columns.get_loc(concept_col))
+        price_idx = int(df.columns.get_loc(price_col))
+        if unit_col:
+            unit_idx = int(df.columns.get_loc(unit_col))
+    except Exception:
+        return None
+
+    text_rows = 0
+    positive_price_rows = 0
+    numeric_aux_cols = 0
+    meaningful_aux_headers = 0
+    for c in cols:
+        if c in (concept_col, price_col, unit_col):
+            continue
+        header = _norm_header(c)
+        if any(token in header for token in ("cantidad", "total", "mensual", "entrega", "unidad", "zona", "mes", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre")):
+            meaningful_aux_headers += 1
+        parsed = df[c].apply(_parse_price)
+        if int(parsed.notna().sum()) >= 3:
+            numeric_aux_cols += 1
+
+    for _, row in df.iterrows():
+        raw_concept = row.get(concept_col)
+        if raw_concept is None or (isinstance(raw_concept, float) and pd.isna(raw_concept)):
+            continue
+        concept_str = str(raw_concept).strip()
+        if len(concept_str) < 2:
+            continue
+        text_rows += 1
+        if _parse_price(row.get(price_col)) is not None:
+            positive_price_rows += 1
+
+    if text_rows < 8:
+        return None
+    if positive_price_rows < 8:
+        return None
+    if numeric_aux_cols < 4:
+        return None
+    if meaningful_aux_headers < 2:
+        return None
+    if price_idx <= concept_idx:
+        return None
+    if unit_idx is not None:
+        return None
+    return "material_support_matrix"
+
+
+def _find_structured_template_header(df: pd.DataFrame) -> Tuple[Optional[int], Optional[str]]:
+    """Localiza headers de formatos económicos con cantidades pero costos vacíos."""
+    if df.empty:
+        return None, None
+    max_scan = min(len(df.index), 25)
+    for row_idx in range(max_scan):
+        row_vals = [_norm_match_text(v) for v in df.iloc[row_idx].tolist()]
+        joined = " | ".join(v for v in row_vals if v)
+        if not joined:
+            continue
+        if (
+            "elementos" in joined
+            and "horario" in joined
+            and "unidad" in joined
+        ):
+            return row_idx, "service_zone_elements"
+        if (
+            "cantidad mensual" in joined
+            and ("descripcion del material" in joined or "descripcion" in joined)
+        ):
+            return row_idx, "monthly_material_requirement"
+        if (
+            ("localidad" in joined or "ubicacion" in joined or "municipio" in joined)
+            and (
+                "costo" in joined
+                or "elemento" in joined
+                or "iva" in joined
+                or "precio" in joined
+            )
+        ):
+            return row_idx, "location_price_grid"
+    return None, None
+
+
+def _looks_like_structured_template_df(df: pd.DataFrame) -> bool:
+    row_idx, kind = _find_structured_template_header(df)
+    return row_idx is not None and bool(kind)
+
+
+_STRUCTURED_SKIP_ROW = re.compile(
+    r"(?i)^\s*(totales?|nombre y firma|representante|apoderado legal|servicio de limpieza|anexo iii)\b"
+)
+
+
+def _find_material_support_list_header(df: pd.DataFrame) -> tuple[Optional[int], Dict[str, int]]:
+    """Detecta listas de soporte de materiales con columnas tipo descripción/presentación/cantidad."""
+    max_scan = min(len(df.index), 25)
+    for row_idx in range(max_scan):
+        headers = [_norm_match_text(v) for v in df.iloc[row_idx].tolist()]
+        concept_col = _find_first_col(headers, ("descripcion del material", "descripcion"))
+        if concept_col is None:
+            continue
+        unit_col = _find_first_col(headers, ("presentacion", "unidad"))
+        qty_col = _find_first_col(headers, ("cantidad mensual", "cantidad"))
+        obs_col = _find_first_col(headers, ("observaciones",))
+        if unit_col is not None and (qty_col is not None or obs_col is not None):
+            return row_idx, {
+                "concept_col": concept_col,
+                "unit_col": unit_col,
+                "qty_col": qty_col if qty_col is not None else -1,
+            }
+    return None, {}
+
+
+def _extract_from_material_support_list(
+    df: pd.DataFrame, sheet_name: str, filename: str
+) -> List[Dict[str, Any]]:
+    """Extrae listas soporte de materiales sin costos ofertados."""
+    out: List[Dict[str, Any]] = []
+    header_row_idx, cols = _find_material_support_list_header(df)
+    if header_row_idx is None or not cols:
+        return out
+
+    concept_col = cols["concept_col"]
+    unit_col = cols["unit_col"]
+    qty_col = cols.get("qty_col", -1)
+    for row_pos in range(header_row_idx + 1, len(df.index)):
+        row = df.iloc[row_pos]
+        raw_concept = row.iloc[concept_col] if concept_col is not None else None
+        if raw_concept is None or (isinstance(raw_concept, float) and pd.isna(raw_concept)):
+            continue
+        concept_str = str(raw_concept).strip()
+        if len(concept_str) < 2 or _STRUCTURED_SKIP_ROW.match(_norm_match_text(concept_str)):
+            continue
+
+        unit_val = None
+        if unit_col is not None:
+            raw_unit = row.iloc[unit_col]
+            if raw_unit is not None and not (isinstance(raw_unit, float) and pd.isna(raw_unit)):
+                unit_val = str(raw_unit).strip()[:64] or None
+
+        qty = None
+        if qty_col is not None and qty_col >= 0:
+            qty = _parse_price(row.iloc[qty_col])
+
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "concepto_raw": concept_str[:4000],
+                "concepto_norm": _norm_concepto(concept_str),
+                "precio_unitario": 0.0,
+                "unidad": unit_val,
+                "cantidad": qty,
+                "sheet_name": str(sheet_name)[:255],
+                "row_index": float(row_pos + 1),
+                "source_type": "document_tabular",
+                "moneda": "MXN",
+                "extra": {
+                    "source_filename": filename[:500],
+                    "layout": "material_support_list",
+                    "document_role": "material_support_list",
+                    "header_row_index": int(header_row_idx + 1),
+                    "quantity_column_index": qty_col if qty_col >= 0 else None,
+                    "price_values_suppressed": True,
+                },
+            }
+        )
+    return out
+
+
+def _extract_from_transposed_material_support_matrix(
+    df: pd.DataFrame, sheet_name: str, filename: str
+) -> List[Dict[str, Any]]:
+    """Extrae matrices transpuestas donde cada columna representa un material."""
+    out: List[Dict[str, Any]] = []
+    max_scan = min(len(df.index), 12)
+    concept_row_idx = unit_row_idx = qty_row_idx = None
+    for row_idx in range(max_scan):
+        vals = [_norm_match_text(v) for v in df.iloc[row_idx].tolist()]
+        joined = " | ".join(v for v in vals if v)
+        if "descripcion del material" in joined:
+            concept_row_idx = row_idx
+        elif "presentacion" in joined or "presentación" in joined:
+            unit_row_idx = row_idx
+        elif "unidad medica" in joined or "unidad médica" in joined:
+            qty_row_idx = row_idx
+    if concept_row_idx is None or unit_row_idx is None or qty_row_idx is None:
+        return out
+    if not (concept_row_idx < unit_row_idx < qty_row_idx):
+        return out
+
+    concept_row = df.iloc[concept_row_idx]
+    unit_row = df.iloc[unit_row_idx]
+    qty_header_row = df.iloc[qty_row_idx]
+    data_start = qty_row_idx + 1
+    for col_idx in range(len(df.columns)):
+        concept_str = str(concept_row.iloc[col_idx] or "").strip()
+        unit_str = str(unit_row.iloc[col_idx] or "").strip()
+        qty_header = _norm_match_text(qty_header_row.iloc[col_idx])
+        if len(concept_str) < 2:
+            continue
+        if _STRUCTURED_SKIP_ROW.match(_norm_match_text(concept_str)):
+            continue
+        if not unit_str:
+            continue
+        if "cantidad" not in qty_header:
+            continue
+
+        qty_total = 0.0
+        qty_found = False
+        for row_pos in range(data_start, len(df.index)):
+            val = df.iloc[row_pos, col_idx]
+            parsed = _parse_price(val)
+            if parsed is None:
+                continue
+            qty_total += float(parsed)
+            qty_found = True
+
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "concepto_raw": concept_str[:4000],
+                "concepto_norm": _norm_concepto(concept_str),
+                "precio_unitario": 0.0,
+                "unidad": unit_str[:64],
+                "cantidad": round(qty_total, 4) if qty_found else None,
+                "sheet_name": str(sheet_name)[:255],
+                "row_index": float(concept_row_idx + 1),
+                "source_type": "document_tabular",
+                "moneda": "MXN",
+                "extra": {
+                    "source_filename": filename[:500],
+                    "layout": "transposed_material_support_matrix",
+                    "document_role": "material_support_matrix",
+                    "concept_row_index": int(concept_row_idx + 1),
+                    "unit_row_index": int(unit_row_idx + 1),
+                    "quantity_header_row_index": int(qty_row_idx + 1),
+                    "matrix_column_index": col_idx,
+                    "price_values_suppressed": True,
+                },
+            }
+        )
+    return out
+
+
+def _extract_from_structured_template(
+    df: pd.DataFrame, sheet_name: str, filename: str
+) -> List[Dict[str, Any]]:
+    """
+    Extrae formatos donde la convocante fija cantidades/elementos y deja vacías
+    las columnas de costos para que el licitante las complete.
+    """
+    out: List[Dict[str, Any]] = []
+    header_row_idx, template_kind = _find_structured_template_header(df)
+    if header_row_idx is None or template_kind is None:
+        return out
+
+    headers = [_norm_match_text(v) for v in df.iloc[header_row_idx].tolist()]
+    zone_hint = _extract_zone_hint(sheet_name)
+
+    if template_kind == "location_price_grid":
+        location_col = _find_first_col(
+            headers, ("localidad", "ubicacion", "municipio", "ciudad")
+        )
+        price_col = _find_first_col(
+            headers,
+            (
+                "costo por elemento",
+                "costo unitario",
+                "precio unitario",
+                "iva incl",
+                "i.v.a",
+            ),
+        )
+        amount_col = _find_first_col(headers, ("importe", "monto", "subtotal"))
+        total_col = _find_first_col(headers, ("total", "costo total"))
+        if location_col is None or price_col is None:
+            return out
+        for row_pos in range(header_row_idx + 1, len(df.index)):
+            row = df.iloc[row_pos]
+            raw_loc = row.iloc[location_col] if location_col is not None else None
+            if raw_loc is None or (isinstance(raw_loc, float) and pd.isna(raw_loc)):
+                continue
+            loc_str = str(raw_loc).strip()
+            if len(loc_str) < 2 or _STRUCTURED_SKIP_ROW.match(_norm_match_text(loc_str)):
+                continue
+            price = _parse_price(row.iloc[price_col]) if price_col is not None else None
+            extra = {
+                "source_filename": filename[:500],
+                "layout": "structured_template",
+                "template_kind": template_kind,
+                "header_row_index": int(header_row_idx + 1),
+                "price_column_index": price_col,
+                "subtotal_column_index": amount_col,
+                "total_column_index": total_col,
+                "location_label": loc_str[:128],
+                "price_input_pending": price is None,
+                "template_source": "convocante_blank_price_grid",
+            }
+            out.append(
+                {
+                    "concepto_raw": loc_str,
+                    "concepto_norm": _norm_concepto(loc_str),
+                    "cantidad": 1.0,
+                    "precio_unitario": price,
+                    "unidad": "SERVICIO",
+                    "sheet_name": sheet_name,
+                    "row_index": float(row_pos),
+                    "source_type": "document_tabular",
+                    "moneda": "MXN",
+                    "extra": extra,
+                }
+            )
+        return out
+
+    if template_kind == "service_zone_elements":
+        zone_col = _find_first_col(headers, ("zona",))
+        code_col = _find_first_col(headers, ("num.", "num ", "num", "numero"))
+        concept_col = _find_first_col(headers, ("unidad",))
+        city_col = _find_first_col(headers, ("ciudad",))
+        qty_col = _find_first_col(headers, ("elementos",))
+        schedule_col = _find_first_col(headers, ("horario",))
+        price_col = _find_first_col(headers, ("costo por elemento", "costo unitario"))
+        subtotal_col = _find_first_col(headers, ("tarifa mensual", "costo mensual"))
+        total_col = _find_first_col(headers, ("costo total",))
+        if concept_col is None or qty_col is None:
+            return out
+    else:
+        item_no_col = _find_first_col(headers, ("no.", "no ", "numero"))
+        concept_col = _find_first_col(headers, ("descripcion del material", "descripcion"))
+        unit_col = _find_first_col(headers, ("presentacion", "unidad"))
+        qty_col = _find_first_col(headers, ("cantidad mensual", "cantidad"))
+        price_col = _find_first_col(headers, ("costo unitario", "precio unitario"))
+        subtotal_col = _find_first_col(headers, ("costo mensual",))
+        total_col = _find_first_col(headers, ("costo total",))
+        if concept_col is None or qty_col is None:
+            return out
+
+    for row_pos in range(header_row_idx + 1, len(df.index)):
+        row = df.iloc[row_pos]
+        raw_concept = row.iloc[concept_col] if concept_col is not None else None
+        if raw_concept is None or (isinstance(raw_concept, float) and pd.isna(raw_concept)):
+            continue
+        concept_str = str(raw_concept).strip()
+        if len(concept_str) < 2 or _STRUCTURED_SKIP_ROW.match(_norm_match_text(concept_str)):
+            continue
+
+        qty_val = row.iloc[qty_col] if qty_col is not None else None
+        qty = _parse_price(qty_val)
+        if qty is None or qty <= 0:
+            continue
+
+        price = _parse_price(row.iloc[price_col]) if price_col is not None else None
+        subtotal = _parse_price(row.iloc[subtotal_col]) if subtotal_col is not None else None
+        total = _parse_price(row.iloc[total_col]) if total_col is not None else None
+
+        extra: Dict[str, Any] = {
+            "source_filename": filename[:500],
+            "layout": "structured_template",
+            "template_kind": template_kind,
+            "header_row_index": int(header_row_idx + 1),
+            "quantity_column_index": qty_col,
+            "price_column_index": price_col,
+            "subtotal_column_index": subtotal_col,
+            "total_column_index": total_col,
+            "price_input_pending": price is None,
+        }
+
+        if template_kind == "service_zone_elements":
+            zone = (
+                str(row.iloc[zone_col]).strip()
+                if zone_col is not None and row.iloc[zone_col] is not None
+                else (zone_hint or "")
+            )
+            site_code = (
+                str(row.iloc[code_col]).strip()
+                if code_col is not None and row.iloc[code_col] is not None
+                else ""
+            )
+            city = (
+                str(row.iloc[city_col]).strip()
+                if city_col is not None and row.iloc[city_col] is not None
+                else ""
+            )
+            schedule = (
+                str(row.iloc[schedule_col]).strip()
+                if schedule_col is not None and row.iloc[schedule_col] is not None
+                else ""
+            )
+            extra.update(
+                {
+                    "zone": zone[:32] or zone_hint,
+                    "site_code": site_code[:128] or None,
+                    "city": city[:128] or None,
+                    "schedule": schedule[:255] or None,
+                    "quantity_kind": "num_elementos",
+                    "price_input_kind": "cost_per_element",
+                    "template_source": "convocante_blank_price_grid",
+                }
+            )
+            unidad_val = "ELEMENTO"
+        else:
+            item_no = (
+                str(row.iloc[item_no_col]).strip()
+                if item_no_col is not None and row.iloc[item_no_col] is not None
+                else ""
+            )
+            unit_text = (
+                str(row.iloc[unit_col]).strip()
+                if unit_col is not None and row.iloc[unit_col] is not None
+                else None
+            )
+            extra.update(
+                {
+                    "item_no": item_no[:64] or None,
+                    "zone": zone_hint,
+                    "quantity_kind": "cantidad_mensual",
+                    "price_input_kind": "unit_cost",
+                    "template_source": "convocante_blank_price_grid",
+                }
+            )
+            unidad_val = unit_text[:64] if unit_text else None
+
+        if subtotal is not None:
+            extra["subtotal_detected"] = subtotal
+        if total is not None:
+            extra["total_detected"] = total
+
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "concepto_raw": concept_str[:4000],
+                "concepto_norm": _norm_concepto(concept_str),
+                "precio_unitario": float(price or 0.0),
+                "unidad": unidad_val,
+                "cantidad": qty,
+                "sheet_name": str(sheet_name)[:255],
+                "row_index": float(row_pos + 1),
+                "source_type": "document_tabular",
+                "moneda": "MXN",
+                "extra": extra,
+            }
+        )
+    return out
 
 
 def _pick_price_column(df: pd.DataFrame) -> Optional[str]:
@@ -158,11 +646,21 @@ def extract_line_items_from_excel_path(file_path: str, filename: str) -> List[Di
         df_auto = df_auto.dropna(how="all", axis=0).dropna(how="all", axis=1)
 
         rows_found = _extract_from_df(df_auto, sheet_name, filename)
+        df_raw = xl.parse(sheet_name, header=None)
+        df_raw = df_raw.dropna(how="all", axis=0).dropna(how="all", axis=1)
+
+        support_rows = _extract_from_structured_template(df_raw, sheet_name, filename)
+        if not support_rows:
+            support_rows = _extract_from_transposed_material_support_matrix(
+                df_raw, sheet_name, filename
+            )
+        if not support_rows:
+            support_rows = _extract_from_material_support_list(df_raw, sheet_name, filename)
+        if support_rows:
+            rows_found = support_rows
 
         # Si no encontró nada, intentar sin header (layouts de cálculo tipo desglose de costos)
         if not rows_found:
-            df_raw = xl.parse(sheet_name, header=None)
-            df_raw = df_raw.dropna(how="all", axis=0).dropna(how="all", axis=1)
             rows_found = _extract_from_raw_layout(df_raw, sheet_name, filename)
 
         out.extend(rows_found)
@@ -258,6 +756,10 @@ def _extract_from_df(df: pd.DataFrame, sheet_name: str, filename: str) -> List[D
     out: List[Dict[str, Any]] = []
     if df.empty or len(df.columns) < 1:
         return out
+    # Si el "header" automático dejó los verdaderos encabezados como filas de datos,
+    # devolvemos vacío para que la ruta raw capture cantidades/zonas sin degradarlas a precio.
+    if _looks_like_structured_template_df(df):
+        return out
     price_col = _pick_price_column(df)
     if not price_col:
         return out
@@ -267,12 +769,18 @@ def _extract_from_df(df: pd.DataFrame, sheet_name: str, filename: str) -> List[D
     
     price_col_idx = -1
     try:
-        price_col_idx = list(df.columns).get_loc(price_col)
+        price_col_idx = int(df.columns.get_loc(price_col))
     except Exception:
         pass
 
     skip = {price_col, concept_col}
     unit_col = _pick_unit_column(df, skip)
+    document_role = _classify_support_matrix_role(
+        df,
+        concept_col=concept_col,
+        price_col=price_col,
+        unit_col=unit_col,
+    )
 
     for i, row in df.iterrows():
         price = _parse_price(row.get(price_col))
@@ -307,11 +815,12 @@ def _extract_from_df(df: pd.DataFrame, sheet_name: str, filename: str) -> List[D
                 break
 
         cn = _norm_concepto(concept_str)
+        effective_price = 0.0 if document_role == "material_support_matrix" else price
         out.append({
             "id": str(uuid.uuid4()),
             "concepto_raw": concept_str[:4000],
             "concepto_norm": cn,
-            "precio_unitario": price,
+            "precio_unitario": effective_price,
             "unidad": unit_val,
             "cantidad": qty,
             "sheet_name": str(sheet_name)[:255],
@@ -321,7 +830,9 @@ def _extract_from_df(df: pd.DataFrame, sheet_name: str, filename: str) -> List[D
             "extra": {
                 "source_filename": filename[:500],
                 "price_column_index": price_col_idx,
-                "price_column_name": str(price_col)
+                "price_column_name": str(price_col),
+                "document_role": document_role,
+                "price_values_suppressed": document_role == "material_support_matrix",
             },
         })
     return out

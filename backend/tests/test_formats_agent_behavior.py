@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.agents.formats import FormatsAgent, _sanitize_legal_content
+from app.agents.formats import (
+    FormatsAgent,
+    _mirror_source_has_cross_tender_marker,
+    _sanitize_legal_content,
+)
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentStatus
 from app.config.settings import settings as app_settings
@@ -62,6 +66,69 @@ def test_sanitize_legal_content_reemplaza_placeholders():
     assert "DEM010101ABC" in out
 
 
+def test_mirror_source_has_cross_tender_marker_detecta_fuente_contaminada():
+    class Ref:
+        filename = "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx"
+        extracted_text = (
+            "ANEXO TÉCNICO ... (IMSS-BIENESTAR) ... "
+            "Servicios para IMSS-BIENESTAR ... "
+            "Hospitales de IMSS-BIENESTAR ... "
+            "IMSS-BIENESTAR."
+        )
+
+    assert _mirror_source_has_cross_tender_marker(Ref(), "isapeg ISAPEG") is True
+
+
+@pytest.mark.asyncio
+async def test_formats_degrada_plantilla_cross_tender_a_generacion_controlada():
+    agent = _make_agent()
+    agent.context_manager.memory.get_documents = AsyncMock(
+        return_value=[
+            {
+                "id": "doc-1",
+                "content": {
+                    "filename": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+                    "file_path": "/tmp/anexo_tecnico.docx",
+                    "extracted_text": (
+                        "ANEXO TÉCNICO (IMSS-BIENESTAR) IMSS-BIENESTAR "
+                        "servicio integral IMSS-BIENESTAR hospitalario."
+                    ),
+                }
+            }
+        ]
+    )
+
+    req = {
+        "id": "1.1",
+        "nombre": "ANEXO TÉCNICO 2026 ABRIL A DICIEMBRE.docx",
+        "tipo": "administrativo",
+        "tipo_accion": "generar",
+    }
+    inp = AgentInput(
+        session_id="isapeg",
+        mode="generation_only",
+        company_data={
+            "mode": "generation_only",
+            "master_profile": {
+                "razon_social": "Test SA",
+                "rfc": "TST010101AAA",
+                **_SLOTS_PILOTO,
+            },
+                "compliance_master_list": {"administrativo": [], "formatos": []},
+        },
+    )
+
+    with patch("os.makedirs"), \
+         patch("os.path.isfile", return_value=True), \
+         patch("app.services.session_template_catalog.build_catalog_mirror_reqs", return_value=[req]), \
+         patch("app.agents.formats._save_docx"):
+        out = await agent.process(inp)
+
+    assert out.status == AgentStatus.SUCCESS
+    assert out.data["count"] == 1
+    agent.llm.generate.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_sin_formatos_devuelve_success_vacio():
     agent = _make_agent()
@@ -94,9 +161,10 @@ async def test_con_formatos_llm_invocado_y_success():
 
     req = {
         "id": "1.1",
-        "nombre": "Acta Constitutiva",
-        "descripcion": "Copia del acta",
+        "nombre": "Anexo M Declaracion de Integridad",
+        "descripcion": "Manifestacion de integridad para la propuesta",
         "tipo": "administrativo",
+        "tipo_accion": "generar",
     }
     inp = AgentInput(
         session_id="sess_f2",
@@ -113,13 +181,117 @@ async def test_con_formatos_llm_invocado_y_success():
         },
     )
 
-    with patch("os.makedirs"), patch("app.agents.formats._save_docx"):
+    with patch("os.makedirs"), \
+         patch("app.services.document_deliverable_filter.should_show_deliverable_in_ui", return_value=True), \
+         patch("app.services.document_deliverable_filter.has_admin_format_template_evidence", return_value=True), \
+         patch("app.agents.formats._save_docx"):
         out = await agent.process(inp)
 
+    payload = out.model_dump().get("data") or {}
     assert out.status == AgentStatus.SUCCESS
-    assert out.data["count"] == 1
-    assert len(out.data["documentos"]) == 1
+    assert payload["count"] == 1
+    assert len(payload["documentos"]) == 1
     agent.llm.generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_template_lock_no_invoca_llm_si_hay_template_bloqueado():
+    agent = _make_agent()
+    req = {
+        "id": "ANEXO 7",
+        "nombre": "Anexo 7 Manifestación",
+        "descripcion": "Formato legal del anexo 7",
+        "tipo": "administrativo",
+        "tipo_accion": "generar",
+    }
+    inp = AgentInput(
+        session_id="sess_template_lock",
+        mode="generation_only",
+        company_data={
+            "mode": "generation_only",
+            "master_profile": {
+                "razon_social": "Test SA",
+                "rfc": "TST010101EEE",
+                "representante_legal": "Ana Test",
+                "domicilio_fiscal": _SLOTS_PILOTO["domicilio_fiscal"],
+            },
+            "compliance_master_list": {"administrativo": [req], "formatos": []},
+        },
+    )
+
+    with patch("os.makedirs"), \
+         patch("app.services.document_deliverable_filter.should_show_deliverable_in_ui", return_value=True), \
+         patch("app.services.document_deliverable_filter.has_admin_format_template_evidence", return_value=True), \
+         patch("app.agents.formats._save_docx"):
+        out = await agent.process(inp)
+
+    payload = out.model_dump().get("data") or {}
+    assert out.status == AgentStatus.SUCCESS
+    assert payload["count"] == 1
+    agent.llm.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("req", "expected_name"),
+    [
+        (
+            {
+                "id": "AD-186",
+                "nombre": "Escrito de Integración y No Colusión",
+                "descripcion": "Escrito de Integración y No Colusión",
+                "label_taxonomica": "DECL_INTEGRIDAD",
+                "tipo": "administrativo",
+                "tipo_accion": "generar",
+            },
+            "Escrito de Integración y No Colusión",
+        ),
+        (
+            {
+                "id": "AD-187",
+                "nombre": "Estratificación de las Micro, Pequeñas y Medianas Empresas",
+                "descripcion": "Estratificación de las Micro, Pequeñas y Medianas Empresas",
+                "label_taxonomica": "DECL_MIPYME",
+                "tipo": "administrativo",
+                "tipo_accion": "generar",
+            },
+            "Estratificación de las Micro, Pequeñas y Medianas Empresas",
+        ),
+    ],
+)
+async def test_templates_taxonomicos_no_invocan_llm(req, expected_name):
+    agent = _make_agent()
+    inp = AgentInput(
+        session_id="sess_tax_lock",
+        mode="generation_only",
+        company_data={
+            "mode": "generation_only",
+            "master_profile": {
+                "razon_social": "Test SA",
+                "rfc": "TST010101EEE",
+                "representante_legal": "Ana Test",
+                "domicilio_fiscal": _SLOTS_PILOTO["domicilio_fiscal"],
+            },
+            "compliance_master_list": {"administrativo": [req], "formatos": []},
+        },
+    )
+
+    with patch("os.makedirs"), \
+         patch("app.services.document_deliverable_filter.should_show_deliverable_in_ui", return_value=True), \
+         patch("app.services.document_deliverable_filter.has_admin_format_template_evidence", return_value=True), \
+         patch("app.agents.formats._save_docx"):
+        out = await agent.process(inp)
+
+    payload = out.model_dump().get("data") or {}
+    assert out.status == AgentStatus.SUCCESS
+    assert payload["count"] == 1
+    assert payload["documentos"][0]["nombre"] == expected_name
+    agent.llm.generate.assert_not_awaited()
+    assert payload["documentos"][0]["template_id"] in {
+        "decl_integridad_no_colusion",
+        "decl_mipyme",
+    }
+    assert payload["materialization_metrics"]["routes"]["template_locked"] == 1
 
 
 @pytest.mark.asyncio
@@ -129,9 +301,10 @@ async def test_fallback_compliance_desde_tasks_cuando_no_hay_inyeccion():
         "administrativo": [
             {
                 "id": "1.2",
-                "nombre": "Declaración Fiscal",
-                "descripcion": "Últimas 3 declaraciones",
+                    "nombre": "Declaración de Integridad",
+                    "descripcion": "Manifestación bajo protesta",
                 "tipo": "administrativo",
+                    "tipo_accion": "generar",
             }
         ],
         "formatos": [],
@@ -172,7 +345,7 @@ async def test_llm_error_no_genera_archivo_y_sigue():
         return_value=LLMResponse(success=False, error="LLM timeout", response="")
     )
 
-    req = {"id": "1.3", "nombre": "Carta Bajo Protesta", "tipo": "administrativo"}
+    req = {"id": "1.3", "nombre": "Anexo M Declaracion de Integridad", "tipo": "administrativo", "tipo_accion": "generar"}
     inp = AgentInput(
         session_id="sess_f4",
         mode="generation_only",
@@ -199,7 +372,7 @@ async def test_llm_error_no_genera_archivo_y_sigue():
 async def test_item_sin_prefijo_pero_tipo_administrativo_se_incluye():
     agent = _make_agent()
 
-    req = {"id": "admin_003", "nombre": "Declaración de Integridad", "tipo": "administrativo"}
+    req = {"id": "admin_003", "nombre": "Declaración de Integridad", "tipo": "administrativo", "tipo_accion": "generar"}
     inp = AgentInput(
         session_id="sess_f5",
         mode="generation_only",
@@ -298,8 +471,8 @@ async def test_formats_quality_gate_bloquea_sin_generar(monkeypatch):
     )
     with patch("os.makedirs"):
         out = await agent.process(inp)
-    # Con presentar_fisico items, el gate NO bloquea — continúa con lo que tiene
-    assert out.status != AgentStatus.WAITING_FOR_DATA or out.data.get("document_quality_gate", {}).get("reason") != "no_actionable_generate_items"
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    assert out.data.get("document_quality_gate", {}).get("reason") == "no_actionable_generate_items"
 
     # Caso extremo: sin nada que hacer (0 items) → sí bloquea
     reqs_vacio = []

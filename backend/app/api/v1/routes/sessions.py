@@ -24,6 +24,18 @@ from app.economic_validation.service import (
 )
 from app.services.validation_service import validation_mapping_service
 from app.services.validation_policy_service import resolve_validation_policy
+from app.services.mini_dictamen_anexos_service import (
+    build_and_persist_mini_dictamen,
+    resolve_clarification_ticket,
+)
+from app.services.junta_aclaraciones_questions_service import (
+    build_and_persist_junta_aclaraciones_questions,
+    bundle_needs_regeneration,
+    _enrich_session_for_junta,
+    format_junta_questions_plain_text,
+    update_junta_question_status,
+)
+from app.contracts.junta_aclaraciones_questions import JuntaAclaracionesQuestionsBundle
 import logging
 from app.core.logging_config import get_logger
 from app.services.vector_service import VectorDbServiceClient
@@ -76,6 +88,28 @@ class ClearGeneratedOutputsRequest(BaseModel):
     confirm: bool = Field(
         ...,
         description="Debe ser true para ejecutar el borrado (evita clicks accidentales).",
+    )
+
+
+class JuntaQuestionStatusRequest(BaseModel):
+    status: str = Field(
+        ...,
+        description="borrador | aprobada | enviada | excluida",
+    )
+
+
+class ClarificationTicketResolveRequest(BaseModel):
+    status: str = Field(
+        default="resolved",
+        description="Nuevo estado del ticket: open, ready_for_junta, answered, waived, resolved.",
+    )
+    resolution_note: str = Field(
+        default="",
+        description="Nota auditable de resolución o criterio aplicado.",
+    )
+    resolution_source: Optional[str] = Field(
+        default=None,
+        description="Origen de la resolución (manual, acta, junta, sistema).",
     )
 
 
@@ -164,21 +198,94 @@ async def get_dictamen(session_id: str):
     try:
         session_data = await repo.get_session(session_id)
         if session_data and "dictamen" in session_data:
+            dictamen_out = session_data["dictamen"]
+            if isinstance(dictamen_out, dict):
+                try:
+                    from app.utils.audit_processor import strip_stale_tabular_alert_from_dictamen
+
+                    rows = await repo.get_line_items_for_session(session_id)
+                    n_li = len(rows or [])
+                    if n_li > 0:
+                        dictamen_out = strip_stale_tabular_alert_from_dictamen(
+                            dictamen_out, n_li
+                        )
+                except Exception as tab_exc:
+                    logger.warning(
+                        "dictamen_tabular_sanitize_skip session=%s err=%s",
+                        session_id,
+                        tab_exc,
+                    )
             decision = session_data.get("last_orchestrator_decision") or {}
             last_quality_hints = session_data.get("last_document_quality_waiting_hints")
             last_fill_hints = session_data.get("last_document_fill_quality_waiting_hints")
             doc_candidates = session_data.get("document_candidates_consolidated") or session_data.get("document_candidates_final") or session_data.get("document_candidates_v1")
+            needs_rebuild = (
+                not doc_candidates
+                or (
+                    isinstance(doc_candidates, dict)
+                    and doc_candidates.get("sobre_1_tecnico") is None
+                    and not doc_candidates.get("candidate_document_list")
+                )
+            )
+            if needs_rebuild and session_data.get("compliance_master_list"):
+                try:
+                    from app.services.document_candidate_list_service import (
+                        ensure_session_document_candidates,
+                    )
+
+                    rebuilt = await ensure_session_document_candidates(
+                        repo, session_id, session_data
+                    )
+                    if rebuilt:
+                        doc_candidates = rebuilt
+                        session_data = await repo.get_session(session_id) or session_data
+                except Exception as rebuild_exc:
+                    logger.warning(
+                        "dictamen_rebuild_document_candidates_failed session=%s err=%s",
+                        session_id,
+                        rebuild_exc,
+                    )
             if isinstance(doc_candidates, dict) and doc_candidates.get("sobre_1_tecnico") is not None:
                 from app.services.document_deliverable_filter import (
                     filter_consolidated_document_candidates,
                 )
 
                 doc_candidates = filter_consolidated_document_candidates(doc_candidates)
+            submission_checklist_payload = None
+            corporate_physical_payload = None
+            try:
+                from app.checklist.submission_checklist_service import (
+                    ensure_session_cronograma_and_checklist,
+                )
+
+                cl = await ensure_session_cronograma_and_checklist(repo, session_id)
+                if cl:
+                    submission_checklist_payload = cl.model_dump(mode="json")
+            except Exception as cl_exc:
+                logger.warning(
+                    "dictamen_submission_checklist_failed session=%s err=%s",
+                    session_id,
+                    cl_exc,
+                )
+            try:
+                from app.services.document_candidate_list_service import (
+                    build_corporate_physical_panel_list,
+                )
+
+                corporate_physical_payload = await build_corporate_physical_panel_list(
+                    repo, session_id, session_data
+                )
+            except Exception as corp_exc:
+                logger.warning(
+                    "dictamen_corporate_physical_failed session=%s err=%s",
+                    session_id,
+                    corp_exc,
+                )
             return GenericResponse(
                 success=True,
                 message="Dictamen recuperado",
                 data={
-                    "dictamen": session_data["dictamen"],
+                    "dictamen": dictamen_out,
                     "go_no_go_result": session_data.get("go_no_go_result"),
                     "go_no_go_override": session_data.get("go_no_go_override"),
                     "stop_reason": decision.get("stop_reason"),
@@ -189,6 +296,8 @@ async def get_dictamen(session_id: str):
                     if isinstance(last_fill_hints, dict)
                     else None,
                     "fast_track_document_candidates": doc_candidates if isinstance(doc_candidates, dict) else None,
+                    "submission_checklist": submission_checklist_payload,
+                    "corporate_physical_document_candidates": corporate_physical_payload,
                 }
             )
         return GenericResponse(success=False, message="No hay dictamen guardado")
@@ -227,7 +336,11 @@ async def get_submission_checklist_route(session_id: str):
     """Checklist de hitos del procedimiento (cronograma del Analista + marcas del usuario)."""
     repo = await get_repository()
     try:
-        cl = await get_submission_checklist(repo, session_id, auto_sync=True)
+        from app.checklist.submission_checklist_service import (
+            ensure_session_cronograma_and_checklist,
+        )
+
+        cl = await ensure_session_cronograma_and_checklist(repo, session_id)
         if not cl:
             return GenericResponse(
                 success=False,
@@ -689,6 +802,293 @@ async def clear_generated_outputs_route(
     except Exception as e:
         logger.error(f"Error limpiando expediente generado: {e}")
         raise HTTPException(status_code=500, detail="Error al limpiar expediente generado")
+
+
+@router.get("/{session_id}/coverage-report", response_model=GenericResponse)
+async def get_coverage_report(session_id: str, refresh: bool = False):
+    """
+    Reporte universal de cobertura: plantillas ingestadas vs entregables generados.
+
+    ``refresh=true`` recalcula catálogo y matriz desde documentos y manifiesto actuales.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+
+        if refresh:
+            from app.services.delivery_coverage_report import build_and_persist_coverage
+
+            report = await build_and_persist_coverage(repo, session_id)
+            catalog = (await repo.get_session(session_id) or {}).get(
+                "session_template_catalog"
+            )
+        else:
+            report = session.get("delivery_coverage_report")
+            catalog = session.get("session_template_catalog")
+            if not report:
+                from app.services.delivery_coverage_report import build_and_persist_coverage
+
+                report = await build_and_persist_coverage(repo, session_id)
+                catalog = (await repo.get_session(session_id) or {}).get(
+                    "session_template_catalog"
+                )
+
+        return GenericResponse(
+            success=True,
+            message="Reporte de cobertura de entrega",
+            data={
+                "delivery_coverage_report": report,
+                "session_template_catalog": catalog,
+            },
+        )
+    except Exception as e:
+        logger.error("coverage_report_failed", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=500, detail="Error al generar reporte de cobertura"
+        )
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/capture-matrix-blocks", response_model=GenericResponse)
+async def get_capture_matrix_blocks(session_id: str):
+    """Bloques de matriz orientadora para captura económica (Ítem D)."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        from app.services.economic_capture_matrix_service import (
+            build_capture_matrix_blocks_from_pending,
+            economic_capture_status,
+            hydrate_matrix_blocks_with_inputs,
+        )
+
+        blocks = hydrate_matrix_blocks_with_inputs(
+            session.get("capture_matrix_blocks") or [],
+            session.get("economic_user_inputs"),
+        )
+        if not blocks:
+            rebuilt = build_capture_matrix_blocks_from_pending(
+                list(session.get("pending_questions") or []),
+                session.get("economic_user_inputs"),
+            )
+            if rebuilt:
+                blocks = hydrate_matrix_blocks_with_inputs(
+                    rebuilt, session.get("economic_user_inputs")
+                )
+        cap = economic_capture_status({**session, "capture_matrix_blocks": blocks})
+        excel_tsv = ""
+        if blocks:
+            from app.services.chat_economic_matrix import format_matrix_blocks_excel_tsv
+
+            excel_tsv = format_matrix_blocks_excel_tsv(blocks)
+        return GenericResponse(
+            success=True,
+            message="Matriz de captura económica",
+            data={
+                "blocks": blocks,
+                "count": len(blocks),
+                "excel_clipboard_tsv": excel_tsv,
+                "capture_status": cap,
+            },
+        )
+    except Exception as e:
+        logger.error("capture_matrix_blocks_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al leer matriz de captura")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/mini-dictamen-anexos", response_model=GenericResponse)
+async def get_mini_dictamen_anexos(session_id: str, refresh: bool = False):
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        if refresh or not isinstance(session.get("mini_dictamen_anexos"), dict):
+            mini = await build_and_persist_mini_dictamen(repo, session_id)
+            session = await repo.get_session(session_id) or session
+            payload = mini.model_dump(mode="json")
+        else:
+            payload = session.get("mini_dictamen_anexos")
+        return GenericResponse(
+            success=True,
+            message="Mini dictamen de anexos recuperado",
+            data={
+                "mini_dictamen_anexos": payload,
+                "clarification_tickets": session.get("clarification_tickets") or payload.get("clarification_tickets") or [],
+            },
+        )
+    except Exception as e:
+        logger.error("mini_dictamen_anexos_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al recuperar mini dictamen de anexos")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/clarification-tickets", response_model=GenericResponse)
+async def get_clarification_tickets(session_id: str, refresh: bool = False):
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        if refresh or not isinstance(session.get("clarification_tickets"), list):
+            mini = await build_and_persist_mini_dictamen(repo, session_id)
+            tickets = [t.model_dump(mode="json") for t in mini.clarification_tickets]
+        else:
+            tickets = list(session.get("clarification_tickets") or [])
+        return GenericResponse(
+            success=True,
+            message="Tickets de aclaración recuperados",
+            data={"clarification_tickets": tickets},
+        )
+    except Exception as e:
+        logger.error("clarification_tickets_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al recuperar clarification tickets")
+    finally:
+        await repo.disconnect()
+
+
+@router.post(
+    "/{session_id}/clarification-tickets/{ticket_id}/resolve",
+    response_model=GenericResponse,
+)
+async def resolve_clarification_ticket_route(
+    session_id: str,
+    ticket_id: str,
+    payload: ClarificationTicketResolveRequest,
+):
+    allowed = {"open", "ready_for_junta", "answered", "waived", "resolved"}
+    status = str(payload.status or "").strip().lower()
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail="Estado de clarification ticket inválido")
+    repo = await get_repository()
+    try:
+        ticket = await resolve_clarification_ticket(
+            repo,
+            session_id,
+            ticket_id,
+            status=status,
+            resolution_note=payload.resolution_note,
+            resolution_source=payload.resolution_source or "manual",
+        )
+        session = await repo.get_session(session_id) or {}
+        return GenericResponse(
+            success=True,
+            message="Clarification ticket actualizado",
+            data={
+                "clarification_ticket": ticket.model_dump(mode="json"),
+                "mini_dictamen_anexos": session.get("mini_dictamen_anexos"),
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("clarification_ticket_resolve_failed", session_id=session_id, ticket_id=ticket_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al resolver clarification ticket")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/junta-aclaraciones-questions", response_model=GenericResponse)
+async def get_junta_aclaraciones_questions(
+    session_id: str,
+    refresh: bool = False,
+    format: str = "json",
+    company_id: Optional[str] = None,
+):
+    """
+    Listado unificado de preguntas para la convocante (junta de aclaraciones).
+  Use ``refresh=true`` para recalcular desde analista, evidencia y mini dictamen.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        enriched = await _enrich_session_for_junta(
+            repo, session_id, session, company_id=company_id
+        )
+        stored = session.get("junta_aclaraciones_questions")
+        if refresh or bundle_needs_regeneration(
+            stored if isinstance(stored, dict) else None,
+            session_state=enriched,
+        ):
+            bundle = await build_and_persist_junta_aclaraciones_questions(
+                repo,
+                session_id,
+                session_state=enriched,
+                company_id=company_id,
+            )
+            payload = bundle.model_dump(mode="json")
+        else:
+            payload = stored
+        if str(format or "").lower() in ("text", "plain", "txt"):
+            bundle = JuntaAclaracionesQuestionsBundle.model_validate(payload)
+            return GenericResponse(
+                success=True,
+                message="Listado para junta (texto)",
+                data={
+                    "junta_aclaraciones_questions": payload,
+                    "plain_text": format_junta_questions_plain_text(bundle),
+                },
+            )
+        return GenericResponse(
+            success=True,
+            message="Listado para junta de aclaraciones",
+            data={"junta_aclaraciones_questions": payload},
+        )
+    except Exception as e:
+        logger.error("junta_aclaraciones_questions_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al obtener preguntas para la junta")
+    finally:
+        await repo.disconnect()
+
+
+@router.post(
+    "/{session_id}/junta-aclaraciones-questions/{question_id}/status",
+    response_model=GenericResponse,
+)
+async def set_junta_question_status_route(
+    session_id: str,
+    question_id: str,
+    payload: JuntaQuestionStatusRequest,
+):
+    """HITL: aprueba, excluye o marca enviada una pregunta del listado para la convocante."""
+    repo = await get_repository()
+    try:
+        item = await update_junta_question_status(
+            repo,
+            session_id,
+            question_id,
+            status=payload.status,
+        )
+        session = await repo.get_session(session_id) or {}
+        return GenericResponse(
+            success=True,
+            message="Estado de pregunta actualizado",
+            data={
+                "question": item.model_dump(mode="json"),
+                "junta_aclaraciones_questions": session.get("junta_aclaraciones_questions"),
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(
+            "junta_question_status_failed",
+            session_id=session_id,
+            question_id=question_id,
+            error=str(e),
+        )
+        raise HTTPException(status_code=500, detail="Error al actualizar pregunta de junta")
+    finally:
+        await repo.disconnect()
 
 
 @router.get("/{session_id}/delivery-checklist", response_model=GenericResponse)

@@ -307,12 +307,20 @@ def _build_deliverable(
             pass
     pages = sorted(set(pages))
 
-    # Tipo de entregable (inferido del primer ítem que lo tenga)
-    tipo = next(
-        (str(x.get("tipo_item") or x.get("tipo") or "") for x in items
-         if x.get("tipo_item") or x.get("tipo")),
-        "generar"
-    )
+    # Tipo de entregable: compliance usa tipo_accion; presentar_fisico prevalece si algún ítem lo trae
+    actions: List[str] = []
+    for x in items:
+        for key in ("tipo_accion", "tipo_item", "tipo"):
+            val = str(x.get(key) or "").strip().lower()
+            if val:
+                actions.append(val)
+                break
+    if any(a == "presentar_fisico" for a in actions):
+        tipo = "presentar_fisico"
+    elif any(a == "generar" for a in actions):
+        tipo = "generar"
+    else:
+        tipo = actions[0] if actions else "generar"
 
     # Confianza promedio
     confidences = [
@@ -341,6 +349,7 @@ def _build_deliverable(
         "numero_anexo":         annex_key.replace("_", " ").title() if annex_key else None,
         "origen":               "auto_descubrimiento" if annex_key else "agrupacion_semantica",
         "tipo":                 tipo or "generar",
+        "tipo_accion_final":    tipo or "generar",
         "sobre_clasificado":    sobre_key,
         "snippet_representativo": snippet_rep[:300],
         "paginas_referencia":   pages,

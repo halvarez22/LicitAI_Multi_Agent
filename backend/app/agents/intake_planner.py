@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.core.logging_config import get_logger
+from app.services.hitl_queue_service import intake_question_copy, is_fiscal_or_physical_intake
+
+
+logger = get_logger(__name__)
 
 
 def _norm(text: str) -> str:
@@ -319,8 +324,15 @@ class IntakePlannerAgent(BaseAgent):
                 # REGLA C: Solo permitimos GAPs de datos reales (requiere_datos_licitante)
                 if tipo != "requiere_datos_licitante":
                     continue
-                
+
                 nombre = str(it.get("nombre") or "").strip()
+
+                if is_fiscal_or_physical_intake(
+                    nombre,
+                    str(it.get("descripcion") or it.get("snippet") or ""),
+                    str(it.get("field_target") or ""),
+                ):
+                    continue
                 if not nombre or nombre.isdigit():
                     nombre = f"{cat.capitalize()} {idx}"
                 pg = it.get("page") or ""
@@ -333,7 +345,7 @@ class IntakePlannerAgent(BaseAgent):
                     "priority": "CRITICO" if cat != "formatos" else "IMPORTANTE",
                     "blocking": cat == "administrativo",
                     "label": nombre,
-                    "question": f"Respecto a la **{nombre}**, ¿ya cuentas con ella o prefieres que te ayude a proyectar el documento para la propuesta?",
+                    "question": intake_question_copy(nombre),
                     "field_target": str(it.get("field_target") or f"compliance.{cat}.{idx}"),
                     "pagina": str(pg),
                     "archivo_fuente": str(src),
@@ -349,6 +361,8 @@ class IntakePlannerAgent(BaseAgent):
     def _questions_from_pending(self, pending: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for idx, p in enumerate(pending or [], start=1):
+            if str(p.get("type") or "") in {"clarification_ticket", "mini_dictamen_blocking"}:
+                continue
             q = str(p.get("question") or p.get("label") or "").strip()
             if not q:
                 continue
@@ -362,6 +376,38 @@ class IntakePlannerAgent(BaseAgent):
                     "field_target": str(p.get("field") or f"profile_field_{idx}"),
                     "required_evidence": str(p.get("document_hint") or "dato_perfil"),
                     "provenance_ui": {"source": "pending_questions", "confidence": 0.7, "reason": "perfil_incompleto"},
+                }
+            )
+        return out
+
+    def _questions_from_mini_dictamen(self, session_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for idx, ticket in enumerate(session_state.get("clarification_tickets") or [], start=1):
+            if not isinstance(ticket, dict):
+                continue
+            status = str(ticket.get("status") or "")
+            if status not in {"open", "ready_for_junta"}:
+                continue
+            display_name = str(ticket.get("display_name") or f"Anexo {idx}").strip()
+            question = str(ticket.get("question") or "").strip()
+            if not question:
+                continue
+            priority = "BLOQUEANTE" if str(ticket.get("priority") or "") == "blocking" else "CRITICO"
+            out.append(
+                {
+                    "question_id": f"INTAKE-MD-{idx:03d}",
+                    "question_type": "Q",
+                    "priority": priority,
+                    "blocking": priority == "BLOQUEANTE",
+                    "label": f"Junta de aclaraciones: {display_name}",
+                    "question": question,
+                    "field_target": f"clarification_tickets.{ticket.get('ticket_id') or idx}",
+                    "required_evidence": str(ticket.get("reason") or "aclaracion_convocante"),
+                    "provenance_ui": {
+                        "source": "mini_dictamen_anexos",
+                        "confidence": 0.95,
+                        "reason": str(ticket.get("reason") or "clarification_required"),
+                    },
                 }
             )
         return out
@@ -561,6 +607,7 @@ class IntakePlannerAgent(BaseAgent):
         questions.extend(self._questions_from_compliance(master_compliance, company_profile=master_profile))
 
         questions.extend(self._questions_from_analysis(analysis, master_profile=master_profile))
+        questions.extend(self._questions_from_mini_dictamen(session_state))
         questions.extend(self._questions_from_pending(pending))
 
         # --- FILTRADO POR CAMPOS YA LLENOS EN EL MASTER_PROFILE ---

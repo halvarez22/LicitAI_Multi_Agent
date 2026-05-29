@@ -282,6 +282,56 @@ async def test_ensure_economic_snapshot_ready_with_valid_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_ensure_economic_snapshot_ready_complete_without_items_not_ready():
+    """
+    Snapshot con total_base pero sin líneas no debe considerarse listo para writers.
+    """
+    from app.agents.orchestrator import _ensure_economic_snapshot_ready
+    from app.contracts.agent_contracts import AgentInput
+
+    session_state = {
+        "tasks_completed": [
+            {
+                "task": "economic_proposal",
+                "result": {
+                    "status": "complete",
+                    "total_base": 50000.0,
+                    "grand_total": 58000.0,
+                    "items": [],
+                    "validation_result": {"blocking_issues": []},
+                },
+            }
+        ],
+        "economic_user_inputs": {},
+    }
+    agent_input = AgentInput(
+        session_id="test-no-items",
+        company_id="company-1",
+        company_data={},
+    )
+    mock_context = MagicMock()
+    mock_context.memory.get_session = AsyncMock(return_value=session_state)
+
+    from app.contracts.agent_contracts import AgentStatus
+
+    mock_econ_result = MagicMock()
+    mock_econ_result.status = AgentStatus.SUCCESS
+
+    with patch(
+        "app.economic_validation.service.refresh_economic_validations_for_session",
+        new_callable=AsyncMock,
+    ):
+        with patch("app.agents.economic.EconomicAgent") as MockEcon:
+            MockEcon.return_value.process = AsyncMock(return_value=mock_econ_result)
+            ready, error = await _ensure_economic_snapshot_ready(
+                mock_context, "test-no-items", agent_input, session_state
+            )
+
+    assert ready is True
+    assert error is None
+
+
+@pytest.mark.asyncio
 async def test_ensure_economic_snapshot_ready_stale_snapshot_refreshes():
     """
     Req 4.2: Si el snapshot tiene total_base=0, debe intentar el refresh

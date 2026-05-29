@@ -9,8 +9,14 @@ import os
 import shutil
 from typing import Any, Dict, List, Tuple
 
-# Tareas de pipeline que se invalidan al borrar Word/ZIP en /data/outputs
+# Tareas de pipeline que se invalidan al borrar Word/ZIP en /data/outputs.
+# NO incluir ``economic_proposal``: es la cotización calculada (chat/economic agent), no un archivo en disco.
+_GENERATION_TASK_EXACT = (
+    "technical_writing_COMPLETED",
+    "formats_generation_COMPLETED",
+)
 _GENERATION_TASK_PREFIXES = (
+    "stage_completed:economic",
     "stage_completed:compranet_pack",
 )
 
@@ -64,6 +70,8 @@ def reset_session_after_output_wipe(session_data: Dict[str, Any]) -> Dict[str, A
             if not isinstance(t, dict):
                 continue
             task_name = str(t.get("task") or "")
+            if task_name in _GENERATION_TASK_EXACT:
+                continue
             if any(task_name.startswith(p) for p in _GENERATION_TASK_PREFIXES):
                 continue
             filtered.append(t)
@@ -81,6 +89,27 @@ def reset_session_after_output_wipe(session_data: Dict[str, Any]) -> Dict[str, A
     return out
 
 
+async def wipe_session_output_disk_only(session_id: str) -> Dict[str, Any]:
+    """
+    Vacía archivos bajo ``/data/outputs/{sesión}`` sin tocar ``tasks_completed`` ni ``economic_proposal``.
+
+    Usar al inicio de una corrida de generación para no mezclar Word/ZIP de intentos fallidos.
+    """
+    from app.api.v1.routes.downloads import resolve_outputs_root
+
+    output_path = await resolve_outputs_root(session_id)
+    removed_count = 0
+    removed_names: List[str] = []
+    if output_path:
+        removed_count, removed_names = wipe_output_directory(output_path)
+    return {
+        "session_id": session_id,
+        "output_dir": output_path,
+        "removed_count": removed_count,
+        "removed_names": removed_names,
+    }
+
+
 async def clear_generated_outputs_for_session(
     session_id: str,
     *,
@@ -92,7 +121,7 @@ async def clear_generated_outputs_for_session(
     Raises:
         FileNotFoundError: si la sesión no existe en persistencia.
     """
-    from app.api.v1.routes.downloads import _session_exists
+    from app.api.v1.routes.downloads import _session_exists, resolve_outputs_root
 
     if not await _session_exists(session_id):
         raise FileNotFoundError(f"Sesión no encontrada: {session_id}")

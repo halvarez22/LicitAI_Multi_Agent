@@ -1,4 +1,6 @@
 import os
+import re
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from docx import Document
@@ -7,9 +9,30 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
-from app.services.document_fill_quality_gate import validate_generated_documents_fill
+from app.services.document_fill_quality_gate import (
+    detect_cross_tender_marker,
+    validate_generated_documents_fill,
+)
 from app.services.validation_service import validation_mapping_service
 from app.services.excel_filling_service import ExcelFillingService
+from app.services.structured_economic_price_mapper import apply_structured_price_inputs
+from app.services.document_traceability import (
+    attach_traceability,
+    build_materialization_metrics,
+    safe_file_sha256,
+)
+from app.config.settings import settings
+
+
+def _has_valid_excel_locator(item: Dict[str, Any]) -> bool:
+    extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+    row_idx = item.get("row_index")
+    col_idx = extra.get("price_column_index")
+    try:
+        return int(float(row_idx)) >= 0 and int(float(col_idx)) >= 0
+    except (TypeError, ValueError):
+        return False
+
 
 class EconomicWriterAgent(BaseAgent):
     """
@@ -37,6 +60,7 @@ class EconomicWriterAgent(BaseAgent):
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
         correlation_id = agent_input.correlation_id or "no-id"
+        started_at = time.perf_counter()
         print(f"[{self.name}] 💰 Iniciando generación de Propuesta Económica para {session_id}...", flush=True)
 
         context = await self.context_manager.get_global_context(session_id)
@@ -57,8 +81,38 @@ class EconomicWriterAgent(BaseAgent):
                 economic_data = econ.get("data", econ) if isinstance(econ, dict) else None
 
         # c) Buscar en el estado de la sesión si venimos en modo generation_only
+        session_state = context.get("session_state") or {}
+        try:
+            from app.services.mini_dictamen_anexos_service import (
+                build_and_persist_mini_dictamen,
+                build_stage_blocking_questions,
+                get_blocking_annex_rows_for_stage,
+            )
+
+            await build_and_persist_mini_dictamen(self.context_manager.memory, session_id)
+            fresh_state = await self.context_manager.memory.get_session(session_id) or session_state
+            blocking_rows = get_blocking_annex_rows_for_stage(fresh_state, "economic_writer")
+            if blocking_rows:
+                fresh_state["pending_questions"] = build_stage_blocking_questions(
+                    "economic_writer", blocking_rows
+                ) + list(fresh_state.get("pending_questions") or [])
+                fresh_state["current_question_index"] = 0
+                await self.context_manager.memory.save_session(session_id, fresh_state)
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=(
+                        "La generación económica quedó bloqueada por anexos obligatorios "
+                        "pendientes de aclaración o sin fuente oficial válida."
+                    ),
+                    data={"missing": blocking_rows},
+                    correlation_id=correlation_id,
+                )
+        except Exception:
+            pass
         if not economic_data:
-            tasks = context.get("session_state", {}).get("tasks_completed", [])
+            tasks = session_state.get("tasks_completed", [])
             for task in reversed(tasks):
                 if task.get("task") == "economic_proposal":
                     result_data = task.get("result", {})
@@ -66,16 +120,62 @@ class EconomicWriterAgent(BaseAgent):
                     economic_data = result_data.get("data", result_data)
                     break
 
+        # d) MPS (master_proposal_state) — fuente tras refresh_economic_validations
+        if not economic_data:
+            mps = session_state.get("master_proposal_state")
+            if isinstance(mps, dict) and mps:
+                economic_data = mps
+
         if not economic_data:
             return AgentOutput(
                 status=AgentStatus.ERROR,
                 agent_id=self.agent_id,
                 session_id=session_id,
+                message="No se encontró una propuesta económica calculada en Fase 1.",
                 error="No se encontró una propuesta económica calculada en Fase 1.",
                 correlation_id=correlation_id,
             )
 
         items = economic_data.get("items") if isinstance(economic_data.get("items"), list) else []
+        if not items:
+            user_inputs = session_state.get("economic_user_inputs") or {}
+            if bool(user_inputs.get("allow_zero_total_base_ack")):
+                economic_data = {**economic_data, "allow_zero_total_base_ack": True}
+            else:
+                try:
+                    line_items = await self.context_manager.memory.get_line_items_for_session(
+                        session_id
+                    )
+                except Exception:
+                    line_items = []
+                concept_prices = {}
+                if isinstance(user_inputs, dict):
+                    cp = user_inputs.get("concept_prices")
+                    if isinstance(cp, dict):
+                        concept_prices = cp
+                if line_items and concept_prices:
+                    line_items = apply_structured_price_inputs(line_items, concept_prices)
+                if line_items:
+                    boot: List[Dict[str, Any]] = []
+                    for idx, li in enumerate(line_items[:300]):
+                        if not isinstance(li, dict):
+                            continue
+                        boot.append(
+                            {
+                                "partida": idx + 1,
+                                "concepto": li.get("description")
+                                or li.get("concepto")
+                                or li.get("descripcion")
+                                or "Partida",
+                                "cantidad": float(li.get("quantity") or li.get("cantidad") or 1),
+                                "precio_unitario": float(
+                                    li.get("unit_price") or li.get("precio_unitario") or 0
+                                ),
+                            }
+                        )
+                    if boot:
+                        economic_data = {**economic_data, "items": boot}
+                        items = boot
         if not items:
             st_payload = str(economic_data.get("status") or "").strip().lower()
             vres = economic_data.get("validation_result")
@@ -99,6 +199,10 @@ class EconomicWriterAgent(BaseAgent):
                 status=AgentStatus.ERROR,
                 agent_id=self.agent_id,
                 session_id=session_id,
+                message=(
+                    "La propuesta económica no tiene partidas cotizables para materializar archivos. "
+                    "Escribe `generar propuesta económica` en el chat para recalcular la cotización."
+                ),
                 error="No se encontró una propuesta económica calculada en Fase 1.",
                 correlation_id=correlation_id,
             )
@@ -164,82 +268,152 @@ class EconomicWriterAgent(BaseAgent):
         output_base_dir = os.path.join("/data", "outputs", session_id, "2.propuesta_economica")
         os.makedirs(output_base_dir, exist_ok=True)
         billing_spec = self._resolve_proportional_billing_spec(economic_data, mapeo_items)
-        
-        # 4.1 Generar Excel de Precios (Modo Espejo vs Genérico)
+        excel_lineage: Dict[str, Any] = {}
+
+        mirrored_documents: List[Dict[str, Any]] = []
+        if bool(getattr(settings, "TEMPLATE_MIRROR_ENABLED", True)):
+            mirrored_documents = await self._mirror_economic_templates(
+                session_id=session_id,
+                session_state=session_state,
+                output_base_dir=output_base_dir,
+                master_profile=master_profile,
+                economic_items=items,
+                mapeo_items=mapeo_items,
+            )
+
+        # 4.1 Generar Excel de Precios (Modo Espejo vs Genérico) — resumen si no hubo plantillas
         excel_path = os.path.join(output_base_dir, "TABLA_PRECIOS_UNITARIOS.xlsx")
         
         # Verificar si podemos usar el protocolo de llenado sobre el original
         # Tomamos el primer item que tenga coordenadas de Excel
-        first_excel_item = next((i for i in items if i.get("extra") and i["extra"].get("price_column_index") is not None), None)
+        first_excel_item = next((i for i in items if _has_valid_excel_locator(i)), None)
         
-        if first_excel_item:
-            source_file = first_excel_item["extra"].get("source_filename")
-            items_to_fill = []
-            for it in items:
-                ext = it.get("extra") or {}
-                if ext.get("price_column_index") is not None:
-                    items_to_fill.append({
-                        "sheet_name": it.get("sheet_name"),
-                        "row_index": it.get("row_index"),
-                        "price_column_index": ext.get("price_column_index"),
-                        "final_price": it.get("precio_unitario")
-                    })
-            
-            try:
-                print(f"[{self.name}] 🧪 Activando Protocolo de Llenado Espejo para Excel: {source_file}")
-                excel_path = self.excel_filler.fill_proposal_excel(
-                    session_id=session_id,
-                    source_filename=source_file,
-                    items_to_fill=items_to_fill,
-                    output_filename="CATALOGO_LLENADO_OFICIAL.xlsx"
-                )
-            except Exception as e:
-                print(f"[{self.name}] ⚠️ Falló el llenado espejo, usando generador genérico: {e}")
+        if not mirrored_documents:
+            if first_excel_item:
+                source_file = first_excel_item["extra"].get("source_filename")
+                excel_lineage = {
+                    "source_filename": source_file,
+                    "source_doc_id": first_excel_item.get("document_id"),
+                    "source_path": first_excel_item["extra"].get("source_path"),
+                    "materialization_route": "fill_excel",
+                }
+                items_to_fill = []
+                for it in items:
+                    ext = it.get("extra") or {}
+                    if _has_valid_excel_locator(it):
+                        items_to_fill.append({
+                            "sheet_name": it.get("sheet_name"),
+                            "row_index": it.get("row_index"),
+                            "price_column_index": ext.get("price_column_index"),
+                            "final_price": it.get("precio_unitario"),
+                        })
+
+                try:
+                    print(
+                        f"[{self.name}] Activando llenado espejo Excel: {source_file}",
+                        flush=True,
+                    )
+                    ref_path = first_excel_item["extra"].get("source_path")
+                    excel_path = self.excel_filler.fill_proposal_excel(
+                        session_id=session_id,
+                        source_filename=source_file,
+                        items_to_fill=items_to_fill,
+                        output_filename="CATALOGO_LLENADO_OFICIAL.xlsx",
+                        source_path=ref_path,
+                        output_dir=output_base_dir,
+                    )
+                    excel_lineage["source_path"] = ref_path or excel_lineage.get("source_path")
+                except Exception as e:
+                    print(
+                        f"[{self.name}] Falló llenado espejo, usando genérico: {e}",
+                        flush=True,
+                    )
+                    self._generate_price_excel(
+                        excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+                    )
+                    excel_lineage = {"materialization_route": "deterministic"}
+            else:
                 self._generate_price_excel(
                     excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
                 )
-        else:
-            self._generate_price_excel(
-                excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+                excel_lineage = {"materialization_route": "deterministic"}
+
+            word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
+            self._generate_anexo_ae(
+                word_path, mapeo_items, resumen, master_profile, billing_spec=billing_spec
             )
-        
-        # 4.2 Generar Anexo AE (Word)
-        word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
-        self._generate_anexo_ae(
-            word_path, mapeo_items, resumen, master_profile, billing_spec=billing_spec
-        )
-        
-        # 4.3 Generar Carta Compromiso (Word)
-        carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
-        self._generate_carta_compromiso(carta_path, resumen, master_profile)
+
+            carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
+            self._generate_carta_compromiso(carta_path, resumen, master_profile)
+
+            generated_documents = [
+                attach_traceability(
+                    {
+                        "nombre": "Tabla de Precios Unitarios",
+                        "ruta": excel_path,
+                        "tipo": "tabla_precios",
+                        "template_id": "tabla_precios",
+                    },
+                    source_doc_id=str(excel_lineage.get("source_doc_id") or "") or None,
+                    source_filename=str(excel_lineage.get("source_filename") or "") or None,
+                    source_path=str(excel_lineage.get("source_path") or "") or None,
+                    source_hash=safe_file_sha256(str(excel_lineage.get("source_path") or "")),
+                    template_id="tabla_precios",
+                    materialization_route=str(excel_lineage.get("materialization_route") or "deterministic"),
+                    output_hash=safe_file_sha256(excel_path),
+                ),
+                attach_traceability(
+                    {
+                        "nombre": "Anexo AE - Propuesta Económica",
+                        "ruta": word_path,
+                        "tipo": "anexo_economico",
+                        "template_id": "anexo_economico",
+                    },
+                    template_id="anexo_economico",
+                    materialization_route="deterministic",
+                    output_hash=safe_file_sha256(word_path),
+                ),
+                attach_traceability(
+                    {
+                        "nombre": "Carta Compromiso de Precios",
+                        "ruta": carta_path,
+                        "tipo": "carta_compromiso",
+                        "template_id": "carta_compromiso",
+                    },
+                    template_id="carta_compromiso",
+                    materialization_route="deterministic",
+                    output_hash=safe_file_sha256(carta_path),
+                ),
+            ]
+        else:
+            generated_documents = list(mirrored_documents)
+            if not any("carta" in str(d.get("nombre", "")).lower() for d in generated_documents):
+                carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
+                self._generate_carta_compromiso(carta_path, resumen, master_profile)
+                generated_documents.append(
+                    attach_traceability(
+                        {
+                            "nombre": "Carta Compromiso de Precios",
+                            "ruta": carta_path,
+                            "tipo": "carta_compromiso",
+                            "template_id": "carta_compromiso",
+                        },
+                        template_id="carta_compromiso",
+                        materialization_route="deterministic",
+                        output_hash=safe_file_sha256(carta_path),
+                    )
+                )
 
         print(f"[{self.name}] ✅ Propuesta económica generada con éxito.", flush=True)
-
-        generated_documents = [
-            {
-                "nombre": "Tabla de Precios Unitarios",
-                "ruta": excel_path,
-                "tipo": "tabla_precios",
-                "template_id": "tabla_precios",
-            },
-            {
-                "nombre": "Anexo AE - Propuesta Económica",
-                "ruta": word_path,
-                "tipo": "anexo_economico",
-                "template_id": "anexo_economico",
-            },
-            {
-                "nombre": "Carta Compromiso de Precios",
-                "ruta": carta_path,
-                "tipo": "carta_compromiso",
-                "template_id": "carta_compromiso",
-            },
-        ]
         fill_gate = validate_generated_documents_fill(
             stage="economic",
             generated_documents=generated_documents,
             master_profile=master_profile,
-            provenance_context={"source": "economic_writer", "confidence": 0.95},
+            provenance_context={
+                "source": "economic_writer",
+                "confidence": 0.95,
+                "session_hint": f"{session_id} {session_state.get('name', '')}",
+            },
         )
         validation_events = [
             validation_mapping_service.build_event(
@@ -268,6 +442,11 @@ class EconomicWriterAgent(BaseAgent):
                     "resumen_economico": resumen,
                     "document_fill_quality_gate": fill_gate,
                     "validation_events": validation_events,
+                    "materialization_metrics": build_materialization_metrics(
+                        stage="economic",
+                        documents=generated_documents,
+                        elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                    ),
                     "missing": [
                         {
                             "field": "document_fill_quality_gate",
@@ -290,11 +469,222 @@ class EconomicWriterAgent(BaseAgent):
                 "resumen_economico": resumen,
                 "document_fill_quality_gate": fill_gate,
                 "validation_events": validation_events,
+                "materialization_metrics": build_materialization_metrics(
+                    stage="economic",
+                    documents=generated_documents,
+                    elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+                ),
             },
             correlation_id=correlation_id
         )
 
 
+
+    async def _mirror_economic_templates(
+        self,
+        *,
+        session_id: str,
+        session_state: Dict[str, Any],
+        output_base_dir: str,
+        master_profile: Dict[str, Any],
+        economic_items: List[Dict[str, Any]],
+        mapeo_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Espeja plantillas económicas ingestadas (.xlsx/.xls/.docx) al sobre económico.
+
+        Prioriza catálogo de sesión; rellena Excel si hay coordenadas en partidas.
+        """
+        from app.services.ingested_file_resolver import (
+            build_ingested_file_index,
+            resolve_ingested_file,
+        )
+        from app.services.session_template_catalog import (
+            build_session_template_catalog,
+            normalize_filename_key,
+        )
+        from app.services.template_mirror_service import mirror_template_to_output
+
+        catalog = session_state.get("session_template_catalog")
+        documents = await self.context_manager.memory.get_documents(session_id)
+        if not catalog:
+            catalog = build_session_template_catalog(session_id, documents)
+        index = build_ingested_file_index(documents)
+
+        templates = [
+            it
+            for it in (catalog.get("items") or [])
+            if isinstance(it, dict)
+            and it.get("sobre_inferido") == "economico"
+            and it.get("accion_recomendada") == "generar"
+            and it.get("document_class") == "plantilla_oferta"
+        ]
+        max_n = int(getattr(settings, "TEMPLATE_MIRROR_MAX_ECONOMIC", 20) or 20)
+        if max_n > 0:
+            templates = templates[:max_n]
+
+        line_items: List[Dict[str, Any]] = []
+        try:
+            line_items = await self.context_manager.memory.get_line_items_for_session(
+                session_id
+            )
+        except Exception:
+            line_items = []
+        concept_prices = {}
+        user_inputs = session_state.get("economic_user_inputs") or {}
+        if isinstance(user_inputs, dict):
+            cp = user_inputs.get("concept_prices")
+            if isinstance(cp, dict):
+                concept_prices = cp
+        if line_items and concept_prices:
+            line_items = apply_structured_price_inputs(line_items, concept_prices)
+
+        profile_fill = {
+            "rfc": master_profile.get("rfc"),
+            "razon_social": master_profile.get("razon_social"),
+            "representante_legal": master_profile.get("representante_legal"),
+            "domicilio": master_profile.get("domicilio_fiscal") or master_profile.get("domicilio"),
+            "licitacion": session_id,
+        }
+
+        out_docs: List[Dict[str, Any]] = []
+        session_hint = f"{session_id} {session_state.get('name', '')}"
+        for idx, tpl in enumerate(templates, start=1):
+            fn = str(tpl.get("source_filename") or "")
+            ref = resolve_ingested_file(
+                fn,
+                index,
+                doc_id=tpl.get("doc_id"),
+                source_path=tpl.get("source_path"),
+            )
+            if not ref:
+                continue
+            cross_tender_marker = detect_cross_tender_marker(
+                [str(getattr(ref, "extracted_text", "") or "")],
+                session_hint,
+            )
+            if cross_tender_marker:
+                print(
+                    f"[{self.name}] Plantilla económica omitida por contaminación cross-tender: "
+                    f"{fn} ({cross_tender_marker})",
+                    flush=True,
+                )
+                continue
+            ext = ref.file_path.rsplit(".", 1)[-1].lower()
+            safe = re.sub(r"[^\w\s-]", "", normalize_filename_key(fn).replace(" ", "_"))[:48]
+            out_name = f"ECON_{idx:02d}_{safe}.{ext if ext != 'doc' else 'docx'}"
+            out_path = os.path.join(output_base_dir, out_name)
+            try:
+                if ext in ("xlsx", "xls") and line_items:
+                    doc_line_items = []
+                    if str(ref.doc_id or ""):
+                        doc_line_items = [
+                            li
+                            for li in line_items
+                            if str(li.get("document_id") or "") == str(ref.doc_id or "")
+                        ]
+                    items_to_fill = []
+                    for li in doc_line_items:
+                        extra = li.get("extra") if isinstance(li.get("extra"), dict) else {}
+                        if not _has_valid_excel_locator(li):
+                            continue
+                        qty = li.get("cantidad")
+                        try:
+                            qty_f = float(qty) if qty is not None else None
+                        except (TypeError, ValueError):
+                            qty_f = None
+                        items_to_fill.append(
+                            {
+                                "sheet_name": li.get("sheet_name"),
+                                "row_index": li.get("row_index"),
+                                "price_column_index": extra.get("price_column_index"),
+                                "final_price": float(li.get("precio_unitario") or 0),
+                                "quantity": qty_f,
+                                "amount_column_index": extra.get("subtotal_column_index"),
+                                "total_column_index": extra.get("total_column_index"),
+                                "quantity_column_index": extra.get("quantity_column_index"),
+                            }
+                        )
+                    if items_to_fill:
+                        out_path = self.excel_filler.fill_proposal_excel(
+                            session_id=session_id,
+                            source_filename=ref.filename,
+                            items_to_fill=items_to_fill,
+                            output_filename=out_name,
+                            source_path=ref.file_path,
+                            output_dir=output_base_dir,
+                        )
+                        out_docs.append(
+                            attach_traceability(
+                                {
+                                    "nombre": fn,
+                                    "ruta": out_path,
+                                    "tipo": "plantilla_economica_espejo",
+                                },
+                                source_doc_id=str(ref.doc_id or tpl.get("doc_id") or "") or None,
+                                source_filename=ref.filename,
+                                source_path=ref.file_path,
+                                source_hash=safe_file_sha256(ref.file_path),
+                                mirror_mode="excel_fill_line_items",
+                                materialization_route="fill_excel",
+                                output_hash=safe_file_sha256(out_path),
+                                provenance_ui=tpl.get("provenance_ui") if isinstance(tpl.get("provenance_ui"), dict) else None,
+                            )
+                        )
+                        continue
+
+                    if doc_line_items:
+                        meta = mirror_template_to_output(ref, out_path, profile_fill, fill_profile=False)
+                        out_docs.append(
+                            attach_traceability(
+                                {
+                                    "nombre": fn,
+                                    "ruta": meta["ruta"],
+                                    "tipo": "plantilla_economica_espejo",
+                                    "document_class": tpl.get("document_class"),
+                                    "expected_fill_mode": "line_items",
+                                    "fill_status": "skipped_missing_locator",
+                                    "line_items_detected": len(doc_line_items),
+                                    "valid_locator_count": 0,
+                                },
+                                source_doc_id=str(ref.doc_id or tpl.get("doc_id") or "") or None,
+                                source_filename=ref.filename,
+                                source_path=meta.get("source_path") or ref.file_path,
+                                source_hash=meta.get("source_hash"),
+                                mirror_mode="copy_excel_missing_locator",
+                                materialization_route=meta.get("materialization_route") or "mirror",
+                                output_hash=meta.get("output_hash") or safe_file_sha256(meta.get("ruta")),
+                                provenance_ui=tpl.get("provenance_ui") if isinstance(tpl.get("provenance_ui"), dict) else None,
+                            )
+                        )
+                        continue
+
+                meta = mirror_template_to_output(
+                    ref, out_path, profile_fill, fill_profile=(ext == "docx")
+                )
+                out_docs.append(
+                    attach_traceability(
+                        {
+                            "nombre": fn,
+                            "ruta": meta["ruta"],
+                            "tipo": "plantilla_economica_espejo",
+                        },
+                        source_doc_id=str(ref.doc_id or tpl.get("doc_id") or "") or None,
+                        source_filename=ref.filename,
+                        source_path=meta.get("source_path") or ref.file_path,
+                        source_hash=meta.get("source_hash"),
+                        mirror_mode=meta.get("mirror_mode"),
+                        materialization_route=meta.get("materialization_route") or "mirror",
+                        output_hash=meta.get("output_hash") or safe_file_sha256(meta.get("ruta")),
+                        provenance_ui=tpl.get("provenance_ui") if isinstance(tpl.get("provenance_ui"), dict) else None,
+                    )
+                )
+            except Exception as exc:
+                print(
+                    f"[{self.name}] Espejo económico omitido {fn}: {exc}",
+                    flush=True,
+                )
+        return out_docs
 
     @staticmethod
     def _resolve_proportional_billing_spec(

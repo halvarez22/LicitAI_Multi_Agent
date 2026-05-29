@@ -447,35 +447,16 @@ async def process_document(
 
     pages = ocr_result.get("pages", [])
 
-    # --- RE-ARQUITECTURA HITO: PAGE-BASED CHUNKING (No más mutilación de tablas) ---
+    from app.services.document_vector_index import index_pages_atomic
+
     vector_client = VectorDbServiceClient()
-    for page in pages:
-        p_num = page.get("page", 0)
-        p_raw_text = (page.get("text") or "").strip()
-        if not p_raw_text:
-            continue
-
-        # 1. Inyectar metadatos estructurales directamente en el texto (Data Lineage)
-        # Esto asegura que el LLM siempre sepa la fuente y página sin importar el contexto del RAG.
-        header = f"[FUENTE: {filename} | PÁGINA: {p_num}]\n"
-        full_page_chunk = header + p_raw_text
-
-        # 2. Indexación Atómica: Una página = Un vector
-        # Aunque el modelo all-MiniLM-L6-v2 tiene límite de 256 tokens, Gemini 1.5 Pro
-        # manejará el contexto completo. La página completa garantiza que tablas de 
-        # cronograma y elementos no se partan.
-        metadatas = [{
-            "source": filename, 
-            "session_id": session_id, 
-            "page": p_num, 
-            "doc_id": doc_id,
-            "chunk_type": "page_atomic"
-        }]
-        
-        # Agregamos la página completa como un solo chunk
-        vector_client.add_texts(session_id, [full_page_chunk], metadatas)
-        
-        logger.info(f"[Ingestion] Indexada Página {p_num} de {filename} como bloque atómico.")
+    indexed = index_pages_atomic(session_id, doc_id, filename, pages, vector_client)
+    logger.info(
+        "ingestion_pages_indexed",
+        session_id=session_id,
+        filename=filename[:80],
+        chunks=indexed,
+    )
 
     # Actualizar Estado en DB
     updated_content = doc_data["content"]

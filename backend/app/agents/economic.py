@@ -23,12 +23,17 @@ from app.economic_validation.engine import validate_economic_proposal
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 from app.services.economic_cotization_filters import (
     build_upstream_doc_ids,
+    is_required_price_source_artifact,
     is_contaminated_economic_pending_question,
     should_exclude_technical_for_cotization,
 )
 from app.services.validation_service import validation_mapping_service
 from app.services.validation_policy_service import resolve_validation_policy
 from app.services.economic_calculator_engine import EconomicCalculatorEngine
+from app.services.structured_economic_price_mapper import (
+    apply_structured_price_inputs,
+    build_structured_price_slots,
+)
 from app.config.settings import settings as app_settings
 
 logger = get_logger(__name__)
@@ -148,8 +153,286 @@ def _strict_anchor_from_requirement(req: Optional[Dict[str, Any]], fallback_snip
     return out
 
 
+def _build_price_source_blocking_items(requirements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convierte anexos económicos documentales en evidencia accionable para HITL."""
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for req in requirements or []:
+        if not isinstance(req, dict) or not is_required_price_source_artifact(req):
+            continue
+        label = str(
+            req.get("nombre")
+            or req.get("label")
+            or req.get("titulo")
+            or req.get("descripcion")
+            or "Fuente económica requerida"
+        ).strip()
+        key = re.sub(r"\s+", " ", label.lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        snippet = _economic_gap_reference_snippet(req, label) or label
+        anchor = _strict_anchor_from_requirement(req, snippet)
+        out.append(
+            {
+                "concepto_label": label,
+                "page_number": anchor.get("page"),
+                "context_snippet": anchor.get("snippet") or snippet,
+                "source_name": anchor.get("source") or "Bases de la licitación",
+                "requested_input": "price_source",
+            }
+        )
+    return out
+
+
+def _summarize_structured_template_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resume anexos tabulares de la convocante que ya fijan cantidades/elementos."""
+    zones: Dict[str, Dict[str, Any]] = {}
+    service_rows = 0
+    material_rows = 0
+    seen_service: set[tuple[str, str, str, str]] = set()
+    seen_material: set[tuple[str, str, str]] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        if str(extra.get("layout") or "").strip().lower() != "structured_template":
+            continue
+        template_kind = str(extra.get("template_kind") or "").strip().lower()
+        try:
+            qty = float(row.get("cantidad") or 0.0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if template_kind == "service_zone_elements":
+            zone = str(extra.get("zone") or "").strip().upper() or "?"
+            service_key = (
+                zone,
+                str(extra.get("site_code") or "").strip().upper(),
+                str(row.get("concepto_norm") or row.get("concepto_raw") or "").strip().lower(),
+                str(extra.get("schedule") or "").strip().lower(),
+            )
+            if service_key in seen_service:
+                continue
+            seen_service.add(service_key)
+            bucket = zones.setdefault(zone, {"sites": 0, "elements": 0.0})
+            bucket["sites"] += 1
+            bucket["elements"] += max(0.0, qty)
+            service_rows += 1
+        elif template_kind == "monthly_material_requirement":
+            material_key = (
+                str(extra.get("zone") or "").strip().upper(),
+                str(extra.get("item_no") or "").strip(),
+                str(row.get("concepto_norm") or row.get("concepto_raw") or "").strip().lower(),
+            )
+            if material_key in seen_material:
+                continue
+            seen_material.add(material_key)
+            material_rows += 1
+    if not zones and material_rows <= 0:
+        return {}
+    return {
+        "zones": {
+            z: {
+                "sites": int(v.get("sites") or 0),
+                "elements": int(round(float(v.get("elements") or 0.0))),
+            }
+            for z, v in zones.items()
+        },
+        "service_rows": service_rows,
+        "material_rows": material_rows,
+    }
+
+
+def _format_structured_template_summary(summary: Dict[str, Any]) -> str:
+    """Texto humano a partir de la estructura económica ya detectada en anexos."""
+    if not isinstance(summary, dict) or not summary:
+        return ""
+    parts: List[str] = []
+    zones = summary.get("zones") if isinstance(summary.get("zones"), dict) else {}
+    if zones:
+        zone_bits = []
+        for zone in sorted(zones.keys()):
+            info = zones.get(zone) or {}
+            zone_bits.append(
+                f"Zona {zone}: {int(info.get('elements') or 0)} elementos en {int(info.get('sites') or 0)} unidades"
+            )
+        preview = "; ".join(zone_bits[:4])
+        if len(zone_bits) > 4:
+            preview += "; ..."
+        parts.append(f"Ya identifiqué en tus anexos la estructura operativa ({preview}).")
+    material_rows = int(summary.get("material_rows") or 0)
+    if material_rows > 0:
+        parts.append(f"También detecté {material_rows} renglones de materiales/consumos por cotizar.")
+    return " ".join(parts).strip()
+
+
+def _build_structured_price_question_for_user(slot: Dict[str, Any]) -> str:
+    """Pregunta humana para capturar precios faltantes desde anexos estructurados."""
+    concept_label = str(slot.get("concept_label") or "este concepto").strip()
+    source_name = str(slot.get("source_name") or "anexo económico").strip()
+    sheet_name = str(slot.get("sheet_name") or "").strip()
+    row_index = slot.get("row_index")
+    quantity_total = int(round(float(slot.get("quantity_total") or 0.0)))
+    rows_count = int(slot.get("rows_count") or 0)
+    slot_type = str(slot.get("slot_type") or "").strip()
+
+    where = source_name
+    if sheet_name:
+        where += f", hoja {sheet_name}"
+    if row_index:
+        where += f", fila {row_index}"
+
+    if slot_type == "service_zone_elements":
+        zone = str(slot.get("zone") or "").strip().upper() or "N/D"
+        schedule = str(slot.get("schedule") or "").strip() or "horario indicado"
+        return (
+            f"Necesito el **costo por elemento sin IVA** para **Zona {zone} | {schedule}**.\n\n"
+            f"Ya detecté **{quantity_total} elementos** distribuidos en **{rows_count} unidades** dentro de {where}.\n\n"
+            "Responde solo con el importe unitario por elemento. Si deseas continuar después, escribe `siguiente`."
+        )
+
+    unit = str(slot.get("unit") or "").strip()
+    unit_txt = f" por {unit}" if unit else ""
+    qty_support_name = str(slot.get("quantity_support_source_name") or "").strip()
+    qty_support_sheet = str(slot.get("quantity_support_sheet_name") or "").strip()
+    qty_support_row = slot.get("quantity_support_row_index")
+    qty_support_where = qty_support_name
+    if qty_support_sheet:
+        qty_support_where += f", hoja {qty_support_sheet}"
+    if qty_support_row:
+        qty_support_where += f", fila {qty_support_row}"
+    support_msg = ""
+    if qty_support_where:
+        support_msg = (
+            f"Ya ubiqué este material en **{qty_support_where}** y también en el formato económico "
+            "donde capturaremos el precio."
+        )
+    return (
+        f"Necesito el **costo unitario sin IVA**{unit_txt} para **{concept_label}**.\n\n"
+        f"{support_msg or 'Ya identifiqué este material en los anexos económicos de la convocante.'}\n\n"
+        f"La cantidad total a cotizar para esta propuesta es **{quantity_total}**, consolidada en {where}.\n\n"
+        "Responde solo con el precio unitario. Si deseas continuar después, escribe `siguiente`."
+    )
+
+
+def _build_structured_price_intro(missing_slots: List[Dict[str, Any]]) -> str:
+    """Mensaje resumido cuando ya existe estructura económica pero faltan precios concretos."""
+    if not missing_slots:
+        return (
+            "Ya identifiqué la estructura económica de la convocante, pero todavía faltan precios "
+            "unitarios para continuar."
+        )
+    first = missing_slots[0]
+    concept = str(first.get("concept_label") or "el primer concepto pendiente").strip()
+    total = len(missing_slots)
+    support_name = next(
+        (
+            str(slot.get("quantity_support_source_name") or "").strip()
+            for slot in (missing_slots or [])
+            if str(slot.get("quantity_support_source_name") or "").strip()
+        ),
+        "",
+    )
+    if support_name:
+        return (
+            f"Ya leí los anexos económicos y también un anexo soporte de materiales **{support_name}**. "
+            f"Ahora solo necesito capturar **{total} precio(s) unitarios** para continuar.\n\n"
+            f"Empezamos con: **{concept}**."
+        )
+    return (
+        "Ya leí los anexos económicos y detecté la estructura de cantidades/elementos. "
+        f"Ahora necesito capturar **{total} precio(s)** para continuar.\n\n"
+        f"Empezamos con: **{concept}**."
+    )
+
+
+def _build_structured_price_pending_questions(
+    missing_slots: List[Dict[str, Any]],
+    *,
+    block_group_key: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Convierte slots estructurados en preguntas `economic_price` consumibles por el chat."""
+    pending: List[Dict[str, Any]] = []
+    for seq, slot in enumerate(missing_slots):
+        source_name = str(slot.get("source_name") or "anexo_economico.xlsx").strip()
+        row_index = slot.get("row_index")
+        original_item = {
+            "source": source_name,
+            "row_index": row_index,
+            "sheet_name": slot.get("sheet_name"),
+            "snippet": str(slot.get("context_snippet") or slot.get("concept_label") or "")[:420],
+            "concepto": str(slot.get("concept_label") or ""),
+            "structured_price_slot": True,
+            "structured_price_field": str(slot.get("field") or ""),
+            "structured_slot_type": str(slot.get("slot_type") or ""),
+            "quantity_support_source_name": str(slot.get("quantity_support_source_name") or ""),
+        }
+        row = {
+            "field": str(slot.get("field") or ""),
+            "label": str(slot.get("label") or ""),
+            "question": _build_structured_price_question_for_user(slot),
+            "document_hint": source_name,
+            "type": "economic_price",
+            "original_item": original_item,
+            "capture_guard_schedule": False,
+        }
+        if block_group_key:
+            row["block_group_key"] = block_group_key
+            row["block_item_seq"] = seq
+        pending.append(row)
+    return pending
+
+
+def _build_economic_price_source_question(
+    blocking_items: List[Dict[str, Any]],
+    structured_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Pregunta humana para pedir la fuente económica real cuando aún no hay precios auditables."""
+    first = str((blocking_items or [{}])[0].get("concepto_label") or "la fuente económica real").strip()
+    structured_text = _format_structured_template_summary(structured_summary)
+    question = (
+        "Para cerrar la propuesta económica necesito la fuente real de precios o costos "
+        f"que usarás en esta licitación. En las bases aparece, por ejemplo, **{first}**."
+    )
+    if structured_text:
+        question = f"{question} {structured_text} Lo que sigue faltando son los costos o precios."
+    return {
+        "field": "economic_price_source",
+        "label": "Fuente económica real",
+        "question": question,
+        "type": "economic_validation_blocking",
+        "input_mode": "price_source",
+        "blocking_items": blocking_items,
+        "detected_structure_summary": structured_summary if structured_summary else None,
+    }
+
+
+def _build_economic_price_source_intro(
+    blocking_items: List[Dict[str, Any]],
+    structured_summary: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Mensaje de pausa humana cuando faltan anexos/catálogos económicos base."""
+    if not blocking_items:
+        return (
+            "Para continuar necesito una fuente económica real (catálogo, análisis o cotización) "
+            "que me permita capturar precios válidos."
+        )
+    first = blocking_items[0]
+    label = str(first.get("concepto_label") or "la fuente económica real").strip()
+    page = first.get("page_number")
+    source = str(first.get("source_name") or "bases").strip()
+    page_txt = f", página {page}" if page else ""
+    base = (
+        "Antes de generar la propuesta económica necesito la fuente real de precios o costos. "
+        f"Ya detecté esta referencia en **{source}**{page_txt}: **{label}**. "
+        "Compárteme ese catálogo/análisis o los importes reales que deban capturarse."
+    )
+    structured_text = _format_structured_template_summary(structured_summary)
+    return f"{base} {structured_text}".strip() if structured_text else base
+
+
 def _has_strict_anchor_for_user(item: Dict[str, Any]) -> bool:
-    """Fail-closed: exige documento + página + fragmento para preguntar precio al usuario."""
+    """Fail-closed: exige documento + fragmento + página o fila verificable."""
     if not isinstance(item, dict):
         return False
     oi = item.get("original_item")
@@ -158,12 +441,37 @@ def _has_strict_anchor_for_user(item: Dict[str, Any]) -> bool:
     src = str(oi.get("source") or "").strip()
     sn = str(oi.get("snippet") or "").strip()
     pg = oi.get("page")
+    row = oi.get("row_index")
     if not src or len(sn) < 12:
         return False
     try:
-        return int(pg) >= 1
+        if int(pg) >= 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(float(row)) >= 1
     except (TypeError, ValueError):
         return False
+
+
+def _ensure_chat_anchor(original_item: Dict[str, Any], concepto: str) -> Dict[str, Any]:
+    """
+    Ancla mínima para captura de precios en chat cuando el pliego no trae snippet/página.
+    """
+    oi = dict(original_item or {})
+    if not str(oi.get("source") or "").strip():
+        oi["source"] = "bases_licitacion"
+    try:
+        if int(oi.get("page") or 0) < 1:
+            oi["page"] = 1
+    except (TypeError, ValueError):
+        oi["page"] = 1
+    sn = str(oi.get("snippet") or "").strip()
+    if len(sn) < 12:
+        label = str(concepto or "Partida").strip() or "Partida"
+        oi["snippet"] = f"Cotización en chat — {label}"[:220]
+    return oi
 
 
 def _slug_block_item_id(error_type: str, label: str) -> str:
@@ -193,6 +501,14 @@ def _looks_documental_non_cotizable(label: str) -> bool:
         "declaración",
         "manifestacion",
         "manifiesto",
+        "curp",
+        "identificacion oficial",
+        "identificación oficial",
+        "propuesta tecnica",
+        "propuesta técnica",
+        "propuesta economica",
+        "propuesta económica",
+        "programa calendarizado",
     )
     if any(t in s for t in documental_terms):
         return True
@@ -320,6 +636,10 @@ class EconomicAgent(BaseAgent):
         
         print(f"💰 [Económico] Iniciando Análisis Financiero para: {session_id} - correlation_id: {correlation_id}")
 
+        company_data = agent_input.company_data if isinstance(agent_input.company_data, dict) else {}
+        skip_economic_silence = bool(company_data.get("skip_economic_silence"))
+        relax_price_anchors = bool(company_data.get("relax_price_anchors"))
+
         # 1. Recuperar Hallazgos de Compliance (La Lista Maestra)
         context = await self.context_manager.get_global_context(session_id)
         session_state = context.get("session_state", {})
@@ -351,7 +671,20 @@ class EconomicAgent(BaseAgent):
             )
         except Exception as e:
             logger.warning("[EconomicAgent] No se pudieron leer session_line_items: %s", e)
-        tabular_catalog = self._tabular_rows_to_catalog_entries(session_line_items)
+        concept_prices = {}
+        econ_inputs = session_state.get("economic_user_inputs")
+        if isinstance(econ_inputs, dict):
+            cp = econ_inputs.get("concept_prices")
+            if isinstance(cp, dict):
+                concept_prices = cp
+        structured_price_slots = build_structured_price_slots(session_line_items, concept_prices)
+        missing_structured_price_slots = [
+            slot for slot in structured_price_slots if slot.get("captured_price") is None
+        ]
+        session_line_items_effective = apply_structured_price_inputs(session_line_items, concept_prices)
+        structured_template_summary = _summarize_structured_template_rows(session_line_items)
+        pricing_line_items = self._filter_reliable_pricing_rows(session_line_items_effective)
+        tabular_catalog = self._tabular_rows_to_catalog_entries(pricing_line_items)
 
         analisis_bases = self._extract_analisis_bases_from_session(session_state)
         reglas_bases = normalize_reglas_economicas_dict(
@@ -396,6 +729,11 @@ class EconomicAgent(BaseAgent):
             reglas_bases, alcance_bases, datos_tab
         )
         alertas_contexto_bases = self._build_bases_economic_alertas(reglas_bases, datos_tab)
+        contexto_bases_analista = {
+            "reglas_economicas": reglas_bases,
+            "alcance_operativo_filas": len(alcance_bases or []),
+            "datos_tabulares": datos_tab,
+        }
         # Contexto canónico (Sprint 1/2): ayuda a explicar bloqueos por plantillas o agregados.
         econ_norm_root = session_state.get("economic_normalized_data")
         if isinstance(econ_norm_root, dict):
@@ -445,6 +783,57 @@ class EconomicAgent(BaseAgent):
         print(f"    [DEBUG] Técnico items count: {len(tech_requirements)} (de {len(tech_requirements_raw)} totales)", flush=True)
         
         if not tech_requirements:
+            price_source_blocking = _build_price_source_blocking_items(excluded_as_docs)
+            if price_source_blocking:
+                print("    [-] No hay ítems cotizables, pero sí referencias a fuente económica real.", flush=True)
+                if missing_structured_price_slots:
+                    from app.services.structured_price_capture import (
+                        prepare_structured_price_capture,
+                    )
+
+                    fresh_s = await self.context_manager.memory.get_session(session_id) or {}
+                    missing_fields, intro_msg, cap_updates = prepare_structured_price_capture(
+                        fresh_s,
+                        missing_structured_price_slots,
+                        session_id=session_id,
+                    )
+                    await self._save_pending_questions(session_id, missing_fields)
+                    if cap_updates:
+                        fresh_s.update(cap_updates)
+                        await self.context_manager.memory.save_session(
+                            session_id, cap_updates
+                        )
+                    return AgentOutput(
+                        status=AgentStatus.WAITING_FOR_DATA,
+                        agent_id=self.agent_id,
+                        session_id=session_id,
+                        message=intro_msg,
+                        data={
+                            "missing": missing_fields,
+                            "missing_price_count": len(missing_fields),
+                            "validation_result": {
+                                "blocking_issues": [
+                                    "structured_price_capture_pending"
+                                ]
+                            },
+                        },
+                        correlation_id=correlation_id,
+                    )
+                missing_fields = [_build_economic_price_source_question(price_source_blocking, structured_template_summary)]
+                await self._save_pending_questions(session_id, missing_fields)
+                return AgentOutput(
+                    status=AgentStatus.WAITING_FOR_DATA,
+                    agent_id=self.agent_id,
+                    session_id=session_id,
+                    message=_build_economic_price_source_intro(price_source_blocking, structured_template_summary),
+                    data={
+                        "missing": missing_fields,
+                        "missing_price_count": len(price_source_blocking),
+                        "alertas_contexto_bases": alertas_contexto_bases,
+                        "contexto_bases_analista": contexto_bases_analista,
+                    },
+                    correlation_id=correlation_id,
+                )
             print("    [-] No se detectaron ítems cotizables en la auditoría previa.", flush=True)
             return AgentOutput(
                 status=AgentStatus.SUCCESS,
@@ -488,14 +877,20 @@ class EconomicAgent(BaseAgent):
                     "is_rag_reference": True
                 })
 
-        # --- SILENCIO ECONÓMICO (Hito A1): Prioridad al Inventario Forense ---
-        if await self._check_economic_silence(session_id, correlation_id):
+        # --- SILENCIO ECONÓMICO (solo si no es disparo explícito desde chat) ---
+        if not skip_economic_silence and await self._check_economic_silence(
+            session_id, correlation_id
+        ):
             return AgentOutput(
-                status=AgentStatus.SUCCESS,
+                status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message="Validación económica en pausa hasta completar inventario legal.",
-                correlation_id=correlation_id
+                message=(
+                    "La cotización económica está en pausa mientras el inventario legal "
+                    "documental siga pendiente en el panel. Puedes completarlo allí o, si ya "
+                    "tienes los precios, escríbelos aquí (ej. precio unitario por concepto)."
+                ),
+                correlation_id=correlation_id,
             )
 
         # 4. Cálculo de Propuesta (mapeo semántico con marco de bases del Analista)
@@ -523,10 +918,10 @@ class EconomicAgent(BaseAgent):
              alertas = calculation_result.get("alertas") or []
 
         proposal_draft = self._apply_tabular_prices_to_proposal(
-            proposal_draft, tech_requirements, session_line_items
+            proposal_draft, tech_requirements, pricing_line_items
         )
         proposal_draft = self._bootstrap_proposal_from_tabular_rows(
-            proposal_draft, session_line_items
+            proposal_draft, pricing_line_items
         )
         from app.services.economic_refresher import EconomicRefresherService
         refresher = EconomicRefresherService()
@@ -611,26 +1006,29 @@ class EconomicAgent(BaseAgent):
                     )
                     continue
                 if not _has_strict_anchor_for_user(row):
-                    unverified_suggestions.append(
-                        {
-                            "field": str(row.get("field") or ""),
-                            "label": str(row.get("label") or "")[:280],
-                            "reason": "missing_strict_anchor",
-                            "source": "economic_fail_closed",
-                            "concepto": str(concepto)[:220],
-                            "anchor_preview": {
-                                "source": row["original_item"].get("source"),
-                                "page": row["original_item"].get("page"),
-                                "snippet": str(row["original_item"].get("snippet") or "")[:180],
-                            },
-                        }
-                    )
-                    logger.warning(
-                        "economic_gap_skipped_unanchored",
-                        session_id=session_id,
-                        field=str(row.get("field") or ""),
-                    )
-                    continue
+                    if relax_price_anchors:
+                        row["original_item"] = _ensure_chat_anchor(oi_enriched, str(concepto))
+                    else:
+                        unverified_suggestions.append(
+                            {
+                                "field": str(row.get("field") or ""),
+                                "label": str(row.get("label") or "")[:280],
+                                "reason": "missing_strict_anchor",
+                                "source": "economic_fail_closed",
+                                "concepto": str(concepto)[:220],
+                                "anchor_preview": {
+                                    "source": row["original_item"].get("source"),
+                                    "page": row["original_item"].get("page"),
+                                    "snippet": str(row["original_item"].get("snippet") or "")[:180],
+                                },
+                            }
+                        )
+                        logger.warning(
+                            "economic_gap_skipped_unanchored",
+                            session_id=session_id,
+                            field=str(row.get("field") or ""),
+                        )
+                        continue
                 if block_group_key:
                     row["block_group_key"] = block_group_key
                     row["block_item_seq"] = seq_real
@@ -644,6 +1042,81 @@ class EconomicAgent(BaseAgent):
                 s2["economic_unverified_suggestions"] = bucket[-400:]
                 await self.context_manager.memory.save_session(session_id, s2)
 
+            if not missing_fields and economic_gaps and relax_price_anchors:
+                for gap in economic_gaps:
+                    concepto = gap.get("concepto", "Concepto técnico")
+                    if str(f"price_{gap.get('concepto_id', concepto)}") in non_cotizable_fields:
+                        continue
+                    row_fb: Dict[str, Any] = {
+                        "field": f"price_{gap.get('concepto_id', concepto)}",
+                        "label": f"Precio (sin IVA): {concepto}",
+                        "question": self._build_economic_price_question_for_user(
+                            str(concepto), tech_requirements, gap
+                        ),
+                        "document_hint": "bases_licitacion",
+                        "type": "economic_price",
+                        "original_item": _ensure_chat_anchor(dict(gap or {}), str(concepto)),
+                    }
+                    if is_contaminated_economic_pending_question(row_fb):
+                        continue
+                    missing_fields.append(row_fb)
+                if missing_fields:
+                    logger.info(
+                        "economic_gaps_relaxed_anchor_fallback",
+                        session_id=session_id,
+                        count=len(missing_fields),
+                    )
+
+            if not missing_fields and economic_gaps:
+                if missing_structured_price_slots:
+                    from app.services.structured_price_capture import (
+                        prepare_structured_price_capture,
+                    )
+
+                    fresh_s = await self.context_manager.memory.get_session(session_id) or {}
+                    missing_fields, intro_msg, cap_updates = prepare_structured_price_capture(
+                        fresh_s,
+                        missing_structured_price_slots,
+                        session_id=session_id,
+                    )
+                    await self._save_pending_questions(session_id, missing_fields)
+                    if cap_updates:
+                        await self.context_manager.memory.save_session(
+                            session_id, cap_updates
+                        )
+                    return AgentOutput(
+                        status=AgentStatus.WAITING_FOR_DATA,
+                        agent_id=self.agent_id,
+                        session_id=session_id,
+                        message=intro_msg,
+                        data={
+                            "missing": missing_fields,
+                            "missing_price_count": len(missing_fields),
+                            "validation_result": {
+                                "blocking_issues": [
+                                    "structured_price_capture_pending"
+                                ]
+                            },
+                        },
+                        correlation_id=correlation_id,
+                    )
+                price_source_blocking = _build_price_source_blocking_items(excluded_as_docs)
+                if price_source_blocking:
+                    missing_fields = [_build_economic_price_source_question(price_source_blocking, structured_template_summary)]
+                    await self._save_pending_questions(session_id, missing_fields)
+                    return AgentOutput(
+                        status=AgentStatus.WAITING_FOR_DATA,
+                        agent_id=self.agent_id,
+                        session_id=session_id,
+                        message=_build_economic_price_source_intro(price_source_blocking, structured_template_summary),
+                        data={
+                            "missing": missing_fields,
+                            "missing_price_count": len(price_source_blocking),
+                            "alertas_contexto_bases": list(alertas_contexto_bases) + list(chat_override_alerts),
+                            "contexto_bases_analista": contexto_bases_analista,
+                        },
+                        correlation_id=correlation_id,
+                    )
             if not missing_fields:
                 logger.warning(
                     "economic_gaps_all_filtered_documental",
@@ -651,25 +1124,29 @@ class EconomicAgent(BaseAgent):
                     raw_gaps=len(economic_gaps),
                 )
             else:
-                # --- SILENCIO ECONÓMICO (Hito A1): Prioridad al Inventario Forense ---
-                inv = session_state.get("document_inventory", {})
-                inv_items = inv.get("items", [])
-                has_pending_legal = any(
-                    (str(it.get("category") or "").strip().lower() == "legal_administrative" or 
-                     str(it.get("requirement_type") or "").strip().lower() == "legal_administrative")
-                    and str(it.get("status") or "").strip().lower() == "pending"
-                    for it in inv_items
-                )
-                
-                if has_pending_legal:
-                    logger.info("economic_silence_active", session_id=session_id, reason="pending_legal_docs")
-                    return AgentOutput(
-                        status=AgentStatus.WAITING_FOR_DATA,
-                        agent_id=self.agent_id,
-                        session_id=session_id,
-                        message="Validación económica en pausa hasta completar inventario legal.",
-                        correlation_id=correlation_id
+                if not skip_economic_silence:
+                    inv = session_state.get("document_inventory", {})
+                    inv_items = inv.get("items", [])
+                    has_pending_legal = any(
+                        self._inventory_item_blocks_economic_progress(it)
+                        for it in inv_items
                     )
+                    if has_pending_legal:
+                        logger.info(
+                            "economic_silence_active",
+                            session_id=session_id,
+                            reason="pending_legal_docs",
+                        )
+                        return AgentOutput(
+                            status=AgentStatus.WAITING_FOR_DATA,
+                            agent_id=self.agent_id,
+                            session_id=session_id,
+                            message=(
+                                "Hay documentos legales pendientes en el inventario. "
+                                "Puedes resolverlos en el panel o capturar precios aquí en el chat."
+                            ),
+                            correlation_id=correlation_id,
+                        )
 
                 await self._save_pending_questions(session_id, missing_fields)
                 n = len(missing_fields)
@@ -717,25 +1194,48 @@ class EconomicAgent(BaseAgent):
             if k != "concept_prices" and v is not None:
                 reglas_bases[f"chat_override_{k}"] = f"{k}: {v}"
 
-        totals = self.calculator.compute_totals(
-            proposal_draft, reglas_bases, session_name_for_profile
+        def _recompute_from_current_draft(
+            items: List[Dict[str, Any]],
+        ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], float, float, Dict[str, Any]]:
+            norm_items = self.calculator.normalize_items(items)
+            calc_totals = self.calculator.compute_totals(
+                norm_items, reglas_bases, session_name_for_profile
+            )
+            calc_total_base = float(calc_totals.get("total_base") or 0.0)
+            calc_grand_total = float(calc_totals.get("grand_total") or 0.0)
+            quad = self.calculator.build_quadrature_report(norm_items, pricing_line_items)
+            return norm_items, calc_totals, calc_total_base, calc_grand_total, quad
+
+        proposal_draft, totals, total_base, grand_total, quadrature_report = (
+            _recompute_from_current_draft(proposal_draft)
         )
-        total_base = float(totals.get("total_base") or 0.0)
-        grand_total = float(totals.get("grand_total") or 0.0)
-        if total_base <= 0 and session_line_items:
+        if total_base <= 0 and pricing_line_items:
             # Fallback duro P0: si el LLM no produjo renglones cotizables, usar directamente
             # session_line_items para evitar engine_total=0 con Excel sí presente.
-            proposal_draft = self._proposal_from_session_line_items(session_line_items)
-            proposal_draft = self.calculator.normalize_items(proposal_draft)
-            totals = self.calculator.compute_totals(
-                proposal_draft, reglas_bases, session_name_for_profile
+            proposal_draft, totals, total_base, grand_total, quadrature_report = (
+                _recompute_from_current_draft(
+                    self._proposal_from_session_line_items(pricing_line_items)
+                )
             )
-            total_base = float(totals.get("total_base") or 0.0)
-            grand_total = float(totals.get("grand_total") or 0.0)
-        calc_blocking_issues = list(totals.get("blocking_issues") or [])
-        quadrature_report = self.calculator.build_quadrature_report(
-            proposal_draft, session_line_items
+
+        excel_total_q = float(quadrature_report.get("excel_total") or 0.0)
+        engine_total_q = float(quadrature_report.get("engine_total") or 0.0)
+        severe_quadrature_gap = (
+            bool(quadrature_report.get("blocking"))
+            and excel_total_q > 0
+            and abs(engine_total_q - excel_total_q) / max(excel_total_q, 1.0) > 0.95
+            and len(pricing_line_items) > len(proposal_draft or [])
         )
+        if severe_quadrature_gap:
+            # Verdad canónica: si la sesión ya trae renglones tabulares abundantes y el
+            # resumen del LLM queda desfasado por >95 %, confiamos en la base normalizada.
+            proposal_draft, totals, total_base, grand_total, quadrature_report = (
+                _recompute_from_current_draft(
+                    self._proposal_from_session_line_items(pricing_line_items)
+                )
+            )
+
+        calc_blocking_issues = list(totals.get("blocking_issues") or [])
         alertas_merged = (
             list(alertas if isinstance(alertas, list) else [])
             + alertas_contexto_bases
@@ -1429,6 +1929,37 @@ class EconomicAgent(BaseAgent):
             )
         return out
 
+    @staticmethod
+    def _is_reliable_pricing_row(row: Dict[str, Any]) -> bool:
+        """Filtra filas tabulares que sí pueden usarse como evidencia económica."""
+        if not isinstance(row, dict):
+            return False
+        try:
+            price = float(row.get("precio_unitario") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if price <= 0:
+            return False
+
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        if str(extra.get("layout") or "").strip().lower() == "raw_calculation":
+            return False
+
+        col_idx = extra.get("price_column_index")
+        if col_idx is None:
+            source_filename = str(extra.get("source_filename") or "").strip().lower()
+            if source_filename.endswith((".xlsx", ".xls")):
+                return False
+            return True
+        try:
+            return int(float(col_idx)) >= 0
+        except (TypeError, ValueError):
+            return False
+
+    def _filter_reliable_pricing_rows(self, rows: List[Dict]) -> List[Dict]:
+        """Conserva solo evidencia tabular que trae ancla de precio utilizable."""
+        return [row for row in (rows or []) if self._is_reliable_pricing_row(row)]
+
     def _tabular_rows_to_catalog_entries(self, rows: List[Dict]) -> List[Dict]:
         """Convierte filas de session_line_items en ítems de catálogo consumibles por el LLM."""
         out: List[Dict] = []
@@ -2072,10 +2603,13 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             existing = fresh.get("pending_questions", []) or []
             incoming_types = {str(q.get("type") or "") for q in missing_fields}
             
-            # Limpiar solo las previas del mismo tipo para evitar duplicados de lógica económica
-            if "economic_validation_blocking" in incoming_types:
+            # Limpiar la cola económica previa del mismo tipo para evitar preguntas stale
+            # y permitir que mejoras de wording/procedencia reemplacen versiones antiguas.
+            replaceable_types = {"economic_validation_blocking", "economic_price"}
+            types_to_replace = incoming_types & replaceable_types
+            if types_to_replace:
                 existing = [
-                    q for q in existing if str(q.get("type") or "") != "economic_validation_blocking"
+                    q for q in existing if str(q.get("type") or "") not in types_to_replace
                 ]
             
             def _get_q_key(q):
@@ -2084,18 +2618,33 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             existing_keys = {_get_q_key(q) for q in existing if _get_q_key(q)}
             new_questions = [q for q in missing_fields if _get_q_key(q) not in existing_keys]
 
-            final_list = existing + new_questions
-            
+            from app.services.hitl_queue_service import normalize_pending_queue
+
+            final_list = normalize_pending_queue(existing + new_questions)
+
             # Log de seguridad (para trazabilidad con Orchestrator)
             logger.info("economic_save_pending_questions", 
                         session_id=session_id, 
                         count=len(final_list),
                         added=len(new_questions))
 
-            updates = {
+            updates: Dict[str, Any] = {
                 "pending_questions": final_list
             }
-            
+            try:
+                from app.services.economic_capture_matrix_service import (
+                    build_capture_matrix_blocks,
+                )
+
+                line_items = fresh.get("session_line_items") or []
+                matrices = build_capture_matrix_blocks(
+                    line_items, fresh.get("economic_user_inputs")
+                )
+                if matrices:
+                    updates["capture_matrix_blocks"] = matrices
+            except Exception:
+                pass
+
             # Forzar foco si hay nuevas económicas
             if new_questions and any(str(q.get("type")) == "economic_price" for q in new_questions):
                 updates["current_question_index"] = 0
@@ -2121,12 +2670,10 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             inv_items = inv.get("items", [])
             logger.info("silence_check_inventory", session_id=session_id, items_count=len(inv_items))
             
-            # Prioridad: Si hay algo legal_administrative pendiente, silenciar económico.
+            # Solo silenciamos si el pendiente legal es realmente bloqueante para la oferta.
             has_pending_legal = False
             for it in inv_items:
-                cat = str(it.get("category") or it.get("requirement_type") or "").strip().lower()
-                status = str(it.get("status") or "").strip().lower()
-                if cat == "legal_administrative" and status == "pending":
+                if self._inventory_item_blocks_economic_progress(it):
                     has_pending_legal = True
                     logger.info("silence_check_hit", session_id=session_id, item=it.get("name"))
                     break
@@ -2136,4 +2683,20 @@ Genera un JSON ESTRICTO con la siguiente estructura:
                 return True
         except Exception as e:
             logger.warning("economic_silence_check_failed", session_id=session_id, error=str(e))
+        return False
+
+    @staticmethod
+    def _inventory_item_blocks_economic_progress(item: Dict[str, Any]) -> bool:
+        """Solo ciertos pendientes legales deben silenciar el frente económico."""
+        if not isinstance(item, dict):
+            return False
+        category = str(item.get("category") or item.get("requirement_type") or "").strip().lower()
+        status = str(item.get("status") or "").strip().lower()
+        if category != "legal_administrative" or status != "pending":
+            return False
+        if bool(item.get("is_blocking")):
+            return True
+        tier = str(item.get("tier") or "").strip().lower()
+        if tier in {"inferred", "post_award", "postaward"}:
+            return False
         return False

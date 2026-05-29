@@ -16,3 +16,5 @@ class ChatbotRequest(BaseModel):
     # Vacío: modo proactivo (pending_questions) o mensaje guía sin invocar RAG.
     query: str = Field(default="", max_length=12000)
     company_id: Optional[str] = None
+    # Archivo ya subido vía POST /upload (cotización Excel/CSV en chat).
+    doc_id: Optional[str] = None

@@ -107,7 +107,8 @@ async def test_full_orchestrator_blocked_and_resume_flow():
 
         res1 = await orch.process("sess_flow", {
             "company_id": "co_test",
-            "company_data": {"mode": "generation_only"}
+            "company_data": {"mode": "generation_only"},
+            "resume_generation": True,
         })
 
         # Verificaciones del bloqueo
@@ -164,7 +165,14 @@ async def test_full_orchestrator_blocked_and_resume_flow():
              patch("app.agents.document_packager.DocumentPackagerAgent") as MPkg, \
              patch("app.agents.delivery.DeliveryAgent") as MDel:
             
-            MEcon.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+            MEcon.return_value.process = AsyncMock(
+                return_value=AgentOutput(
+                    status=AgentStatus.SUCCESS,
+                    agent_id="economic_test",
+                    session_id="sess_flow",
+                    data={"items": [{"concepto": "Servicio", "cantidad": 1, "precio_unitario": 10, "subtotal": 10}], "total_base": 10, "grand_total": 11.6},
+                )
+            )
             MEconW.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
             MPkg.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
             MDel.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
@@ -187,6 +195,99 @@ async def test_full_orchestrator_blocked_and_resume_flow():
             
             # El estado final debe ser completed
             assert res2["generation_state"]["status"] == "completed"
+            final_session = await mem.get_session("sess_flow")
+            assert final_session.get("pending_questions") == []
+            assert final_session.get("current_question_index") == 0
+
+
+@pytest.mark.asyncio
+async def test_generation_final_ok_clears_pending_and_unblocks_economic_writer_with_docs():
+    initial_session = {
+        "status": "active",
+        "pending_questions": [{"field": "stale", "question_type": "B"}],
+        "current_question_index": 0,
+        "master_compliance_list": {"administrativo": [{"id": "A1", "nombre": "Carta"}]},
+        "tasks_completed": [
+            {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
+            {
+                "task": "stage_completed:compliance",
+                "result": {"status": "success", "data": {"data": {"administrativo": [{"id": "A1", "nombre": "Carta"}]}}},
+            },
+            {
+                "task": "economic_proposal",
+                "result": {
+                    "status": "success",
+                    "data": {
+                        "items": [{"concepto": "Servicio", "cantidad": 1, "precio_unitario": 10, "subtotal": 10}],
+                        "total_base": 10,
+                        "grand_total": 11.6,
+                    },
+                },
+            },
+            {"task": "stage_completed:economic", "result": {"status": "success", "data": {}}},
+        ],
+    }
+    mem = _memory_stub(initial_session, {"id": "co_test", "master_profile": {"razon_social": "Test SA", "rfc": "ABC010101AAA"}})
+    ctx = MCPContextManager(mem)
+    orch = OrchestratorAgent(ctx)
+
+    gate_ok = ComplianceGateResult(
+        is_blocking=False,
+        failed_rules=[],
+        warnings=[],
+        evidence={},
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+    econ_waiting_with_docs = AgentOutput(
+        status=AgentStatus.WAITING_FOR_DATA,
+        agent_id="economic_writer",
+        session_id="sess-final-ok",
+        message="Advertencia económica no bloqueante",
+        data={
+            "documentos": [
+                {"nombre": "Catálogo Económico", "ruta": "/tmp/cat.xlsx", "status": "FINAL", "tipo": "tabla_precios"}
+            ]
+        },
+    )
+
+    success_output = lambda agent_id: AgentOutput(
+        status=AgentStatus.SUCCESS,
+        agent_id=agent_id,
+        session_id="sess-final-ok",
+        data={"documentos": []},
+    )
+
+    with patch("app.agents.compliance_gate.ComplianceGate") as MGate, \
+         patch("app.agents.packager.CompraNetPackager") as MCN, \
+         patch("app.agents.data_gap.DataGapAgent") as MGap, \
+         patch("app.agents.technical_writer.TechnicalWriterAgent") as MTech, \
+         patch("app.agents.formats.FormatsAgent") as MForm, \
+         patch("app.agents.economic_writer.EconomicWriterAgent") as MEconW, \
+         patch("app.agents.document_packager.DocumentPackagerAgent") as MPkg, \
+         patch("app.agents.delivery.DeliveryAgent") as MDel, \
+         patch.object(OrchestratorAgent, "_generate_checklist", AsyncMock(return_value=[])):
+        MGate.return_value.evaluate.return_value = gate_ok
+        MCN.return_value.pack.return_value = PackResult(success=True, validation_passed=True)
+        MGap.return_value.process = AsyncMock(return_value={"status": "success"})
+        MTech.return_value.process = AsyncMock(return_value=success_output("technical"))
+        MForm.return_value.process = AsyncMock(return_value=success_output("formats"))
+        MEconW.return_value.process = AsyncMock(return_value=econ_waiting_with_docs)
+        MPkg.return_value.process = AsyncMock(return_value=success_output("packager"))
+        MDel.return_value.process = AsyncMock(return_value=success_output("delivery"))
+
+        out = await orch.process(
+            "sess-final-ok",
+            {"company_id": "co_test", "company_data": {"mode": "generation_only"}, "resume_generation": True},
+        )
+
+    assert out["orchestrator_decision"]["stop_reason"] == "FINAL_OK"
+    assert out["status"] == "success"
+    econ_job = next(j for j in out["generation_state"]["jobs"] if j["id"] == "economic_writer")
+    assert econ_job["status"] == "done"
+    final_session = await mem.get_session("sess-final-ok")
+    assert final_session.get("pending_questions") == []
+    assert final_session.get("current_question_index") == 0
 
 
 def test_apply_filtered_compliance_master_list_strips_causales():
@@ -217,5 +318,8 @@ def test_apply_filtered_compliance_master_list_strips_causales():
     input_data = {"compliance_master_list": raw}
     out_data, out_agent = _apply_filtered_compliance_master_list(input_data, agent_input)
     names = [x["nombre"] for x in out_data["compliance_master_list"]["administrativo"]]
-    assert names == ["Acta constitutiva"]
-    assert out_agent.company_data["compliance_master_list"]["administrativo"][0]["nombre"] == "Acta constitutiva"
+    # presentar_fisico y causales no entran a la cola de generación
+    assert names == []
+    assert out_data["compliance_master_list"]["tecnico"] == []
+    meta = out_data.get("generation_filter_meta") or {}
+    assert meta.get("skipped_action", 0) >= 1

@@ -29,7 +29,11 @@ async def test_writer_consume_input_data_sin_llamar_llm(tmp_path):
         session_id="sess_test_1",
         company_id="c1",
         company_data={
-            "master_profile": {"razon_social": "Test Inc"},
+            "master_profile": {
+                "razon_social": "Test Inc",
+                "rfc": "TST010101AAA",
+                "representante_legal": "Ana Test",
+            },
             "results": {
                 "economic": {
                     "data": {
@@ -52,6 +56,7 @@ async def test_writer_consume_input_data_sin_llamar_llm(tmp_path):
         
     assert out.status == AgentStatus.SUCCESS
     assert out.data["resumen_economico"]["total"] == 58
+    assert "materialization_metrics" in out.data
 
 
 @pytest.mark.asyncio

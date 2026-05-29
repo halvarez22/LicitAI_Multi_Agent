@@ -67,8 +67,18 @@ class Settings(BaseSettings):
     DOCUMENT_QUALITY_GATE_MAX_UNKNOWN_RATIO: float = 0.6
     DOCUMENT_QUALITY_GATE_MIN_EVIDENCE_MATCH_RATIO: float = 0.5
     DOCUMENT_FILL_QUALITY_GATE_ENABLED: bool = True
-    DOCUMENT_FILL_QUALITY_GATE_MODE: str = "audit"
+    DOCUMENT_FILL_QUALITY_GATE_MODE: str = "enforce"
     DOCUMENT_FILL_QUALITY_MIN_CONFIDENCE_CRITICAL: float = 0.75
+    # Cola de generación: conteo congruente (umbrales globales, no por licitación).
+    GENERATION_FILTER_ENABLED: bool = True
+    # Borra /data/outputs/{sesión} antes de writers en cada corrida de generación (evita duplicados viejos).
+    GENERATION_WIPE_OUTPUTS_BEFORE_WRITERS: bool = True
+    # Tras CompraNetPackager exitoso, elimina copias en SOBRE_* y carpetas de generación.
+    GENERATION_PRUNE_DUPLICATE_OUTPUTS_AFTER_PACK: bool = True
+    # Permite preguntar precios en chat aunque falte página/snippet estricto en el pliego.
+    ECONOMIC_RELAX_PRICE_ANCHORS_FOR_CHAT: bool = True
+    TECH_WRITER_MAX_GENERABLE_DOCS: int = 12
+    FORMATS_MAX_GENERABLE_DOCS: int = 18
     INTAKE_PLANNER_ENABLED: bool = True
     INTAKE_PLANNER_SHADOW_MODE: bool = False
     FAST_TRACK_DOC_CANDIDATES_ENABLED: bool = True
@@ -95,6 +105,11 @@ class Settings(BaseSettings):
 
     # En analysis_only/full: registra semáforo y brechas sin GO_NO_GO_PENDING ni panel UI.
     GO_NO_GO_SILENT_IN_ANALYSIS: bool = True
+
+    # Espejo de plantillas Office ingestadas (fase 2 universal).
+    TEMPLATE_MIRROR_ENABLED: bool = True
+    TEMPLATE_MIRROR_MAX_ADMIN: int = 40
+    TEMPLATE_MIRROR_MAX_ECONOMIC: int = 20
 
     # --- Resolución por bloques (Hito A1) ---
     ENABLE_BLOCK_RESOLUTION: bool = Field(

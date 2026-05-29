@@ -36,6 +36,7 @@ from app.agents.enhanced_models import (
     GapAnalysisItem,
 )
 from app.agents.enhanced_consolidator import consolidate_checklist
+from app.services.analyst_participacion_enrichment import enrich_analyst_participacion_output
 
 # Logger estructurado
 logger = get_logger(__name__)
@@ -126,7 +127,9 @@ def _coerce_cronograma_value(val: Any, default: str) -> str:
         return default
     if isinstance(val, str):
         s = val.strip()
-        return s if s else default
+        if not s or s == "..." or s.lower() in {"n/e", "—", "-"}:
+            return default
+        return s
     if isinstance(val, (int, float, bool)):
         return str(val)
     try:
@@ -591,7 +594,7 @@ class AnalystAgent(BaseAgent):
             
             if settings.ENHANCED_EXTRACTION_ENABLED:
                 # Inyección dinámica de keywords por sector (para no "casarnos" con una industria)
-                sector_id = agent_input.triage_context.get("tender_category", "BIENES").lower()
+                sector_id = (agent_input.triage_context or {}).get("tender_category", "BIENES").lower()
                 # Mapeo de categorías de triage a sectores de búsqueda
                 sector_map = {
                     "SERVICIOS": "servicios",
@@ -682,8 +685,9 @@ class AnalystAgent(BaseAgent):
                 "2. FILTRO DE SUPERVIVENCIA: Tu prioridad absoluta son las 'Causas de Descalificación'. Si detectas una, repórtala con urgencia.\n"
                 "3. ANÁLISIS DE BRECHA (GAP ANALYSIS): Compara requisitos contra el 'PERFIL DE LA EMPRESA' proporcionado. Marca lo que falta o está vencido.\n"
                 "4. TRAZABILIDAD TOTAL: Para cada requisito, gap o alerta, DEBES citar el número de página y nombre del archivo (ej: 'Pág. 12, bases.pdf'). Si no lo haces, tu análisis no es auditable.\n"
-                "5. SI NO ESTÁ, NO EXISTE: Mantén la precisión técnica absoluta.\n"
-                "6. Responde ÚNICAMENTE en JSON válido."
+                "5. PROHIBIDO usar '...', 'punto X' o texto genérico en texto_literal, evidence_snippet o preguntas_junta_aclaraciones. Copia el fragmento literal de los extractos.\n"
+                "6. SI NO ESTÁ, NO EXISTE: Mantén la precisión técnica absoluta.\n"
+                "7. Responde ÚNICAMENTE en JSON válido."
             )
             
             # --- INYECCIÓN DE TRIAGE ---
@@ -727,7 +731,7 @@ Responde con este JSON:
       {{"requisito": "...", "estado_empresa": "FALTANTE/VENCIDO/OK", "accion_requerida": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}}
     ],
     "preguntas_junta_aclaraciones": [
-      "Pregunta técnica para clarificar el punto X..."
+      "Con respecto a la cláusula 4.2, página 18, apartado REQUISITOS DEL PARTICIPANTE, donde se exige al menos 12 años de experiencia y en el anexo técnico se mencionan 3 años, ¿a cuál de estos dos plazos debemos apegarnos para acreditar experiencia?"
     ]
   }},
   "cronograma": {{
@@ -738,7 +742,7 @@ Responde con este JSON:
     "fallo": "...",
     "firma_contrato": "..."
   }},
-  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}}],
+  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "Texto literal copiado de las bases sin abreviar.", "pagina": "18", "archivo_fuente": "bases_convocatoria.pdf", "evidence_snippet": "Fragmento idéntico al párrafo citado."}}],
   "requisitos_filtro": ["causa de exclusión 1"],
   "garantias": {{"seriedad_oferta": "...", "cumplimiento": "..."}},
   "criterios_evaluacion": "...",
@@ -950,6 +954,12 @@ Responde con este JSON:
                     sector_id=str(extracted_data["sector_classification"].get("sector_id") or "indeterminado"),
                     confidence=float(extracted_data["sector_classification"].get("confidence") or 0.0),
                     method=str(extracted_data["sector_classification"].get("method") or "rule_based"),
+                )
+
+                enrich_analyst_participacion_output(
+                    extracted_data,
+                    participacion_context=search_participacion,
+                    full_context=context_str,
                 )
 
             # --- FASE 1: Cálculo de Confianza ---

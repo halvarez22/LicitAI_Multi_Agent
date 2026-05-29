@@ -141,3 +141,57 @@ async def test_checkpoint_full_reset_without_resume_flag():
         # Debieron llamarse a pesar del estado previo 'done'
         MGap.assert_called()
         MTech.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_hydrates_company_id_from_session_when_request_omits_it():
+    initial_state = {
+        "company_id": "co_session",
+        "tasks_completed": list(_PRE_GEN_TASKS),
+        "generation_state": {
+            "status": "running",
+            "jobs": [
+                {"id": "datagap", "type": "checkpoint", "status": "pending"},
+                {"id": "technical", "type": "agent", "status": "pending"},
+                {"id": "formats", "type": "agent", "status": "pending"},
+                {"id": "economic_writer", "type": "agent", "status": "pending"},
+                {"id": "packager", "type": "agent", "status": "pending"},
+                {"id": "delivery", "type": "agent", "status": "pending"},
+            ],
+        },
+    }
+    mem = _memory_stub(session_state=initial_state)
+    mem.get_company = AsyncMock(return_value={"id": "co_session", "master_profile": {}, "docs": {}})
+    ctx = MCPContextManager(mem)
+    orch = OrchestratorAgent(ctx)
+
+    with patch("app.agents.compliance_gate.ComplianceGate") as MGate, \
+         patch("app.agents.packager.CompraNetPackager") as MCN, \
+         patch("app.agents.data_gap.DataGapAgent") as MGap:
+        MGate.return_value.evaluate.return_value = _compliance_gate_ok()
+        MCN.return_value.pack.return_value = PackResult(success=True, validation_passed=True)
+
+        async def _datagap_ok(agent_input):
+            assert agent_input.company_id == "co_session"
+            return {"status": "success", "data": {"missing": [], "missing_blocking": []}}
+
+        MGap.return_value.process = AsyncMock(side_effect=_datagap_ok)
+
+        with patch("app.agents.technical_writer.TechnicalWriterAgent") as MTech, \
+             patch("app.agents.formats.FormatsAgent") as MForm, \
+             patch("app.agents.economic_writer.EconomicWriterAgent") as MEcon, \
+             patch("app.agents.document_packager.DocumentPackagerAgent") as MPkg, \
+             patch("app.agents.delivery.DeliveryAgent") as MDel:
+            MTech.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+            MForm.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+            MEcon.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+            MPkg.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+            MDel.return_value.process = AsyncMock(return_value={"status": "success", "data": {}})
+
+            out = await orch.process("sess_hydrate_company", {
+                "company_data": {"mode": "generation_only"},
+                "resume_generation": True,
+            })
+
+        assert out["status"] == "success"
+        MGap.return_value.process.assert_called_once()

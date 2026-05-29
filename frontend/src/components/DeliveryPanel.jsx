@@ -21,12 +21,17 @@ function IndicativoEtiqueta() {
 }
 
 /** Panel de entrega: las rutas de descarga usan session_id para alinear con /data/outputs en el backend. */
-const DeliveryPanel = ({ sessionId, sessionName, results }) => {
+const DeliveryPanel = ({ sessionId, sessionName, results, onExpedienteCleared, refreshToken = 0 }) => {
     const [structure, setStructure] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [miniLoading, setMiniLoading] = useState(true);
     const [downloading, setDownloading] = useState(null);
+    const [clearing, setClearing] = useState(false);
     /** Backend: carpeta /data/outputs resuelta con al menos un archivo (habilita ZIP aunque el árbol filtrado esté vacío). */
     const [zipAvailable, setZipAvailable] = useState(false);
+    const [deliveryInventory, setDeliveryInventory] = useState(null);
+    const [miniDictamen, setMiniDictamen] = useState(null);
+    const [clarificationTickets, setClarificationTickets] = useState([]);
 
     // PUENTE DE DATOS: Si no hay resultados de generación, usamos los de auditoría (causales)
     const rawChecklist = results?.formats?.checklists?.sobre || 
@@ -51,8 +56,11 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
             if (res.data.success) {
                 setStructure(res.data.data);
                 setZipAvailable(res.data.zip_available === true);
+                setDeliveryInventory(res.data.inventory || null);
                 if (res.data.data.length > 0 && res.data.data[0].files.length > 0) {
                     setSelectedFile(res.data.data[0].files[0]);
+                } else {
+                    setSelectedFile(null);
                 }
             }
         } catch (err) {
@@ -67,9 +75,39 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
         }
     };
 
+    const fetchMiniDictamen = async () => {
+        if (!sessionId || sessionId === 'null') {
+            setMiniDictamen(null);
+            setClarificationTickets([]);
+            setMiniLoading(false);
+            return;
+        }
+        try {
+            const res = await axios.get(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/mini-dictamen-anexos`);
+            if (res.data?.success) {
+                setMiniDictamen(res.data.data?.mini_dictamen_anexos || null);
+                setClarificationTickets(res.data.data?.clarification_tickets || []);
+            } else {
+                setMiniDictamen(null);
+                setClarificationTickets([]);
+            }
+        } catch (err) {
+            if (err.response?.status !== 404) {
+                console.error("Error fetching mini dictamen", err);
+            }
+            setMiniDictamen(null);
+            setClarificationTickets([]);
+        } finally {
+            setMiniLoading(false);
+        }
+    };
+
     useEffect(() => {
+        setLoading(true);
+        setMiniLoading(true);
         fetchStructure();
-    }, [sessionId]);
+        fetchMiniDictamen();
+    }, [sessionId, refreshToken]);
 
     const handleDownload = async (filePath, fileName, e) => {
         if (e) e.stopPropagation(); // Evitar seleccionar el archivo al hacer click en descargar
@@ -94,7 +132,11 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
     };
 
     const hasDownloadableFiles = structure.some((folder) => Array.isArray(folder.files) && folder.files.length > 0);
-    const canDownloadFullZip = hasDownloadableFiles || zipAvailable;
+    const hasGeneratedOnDisk = hasDownloadableFiles || zipAvailable;
+    const canDownloadFullZip = hasGeneratedOnDisk;
+    const deliverableCount = deliveryInventory?.deliverable_files ?? null;
+    const uniqueShaCount = deliveryInventory?.unique_sha256 ?? null;
+    const physicalCount = deliveryInventory?.total_files_physical ?? null;
 
     const handleClearGenerated = async () => {
         if (!sessionId || sessionId === 'null') return;
@@ -130,7 +172,24 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
             setClearing(false);
             setLoading(true);
             await fetchStructure();
+            setMiniLoading(true);
+            await fetchMiniDictamen();
         }
+    };
+
+    const parseDownloadErrorDetail = async (err) => {
+        const data = err?.response?.data;
+        if (data instanceof Blob) {
+            try {
+                const text = await data.text();
+                const parsed = JSON.parse(text);
+                if (parsed?.detail) return String(parsed.detail);
+            } catch {
+                /* no JSON */
+            }
+        }
+        if (typeof data?.detail === 'string') return data.detail;
+        return err?.message || null;
     };
 
     const handleDownloadZip = async () => {
@@ -142,20 +201,37 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
         try {
             const response = await axios.get(`${API_BASE}/downloads/zip`, {
                 params: { session_id: sessionId },
-                responseType: 'blob'
+                responseType: 'blob',
+                timeout: 600000,
             });
-            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const blob = response.data;
+            if (blob?.type?.includes('json')) {
+                const text = await blob.text();
+                let detail = text;
+                try {
+                    detail = JSON.parse(text)?.detail || text;
+                } catch {
+                    /* raw */
+                }
+                alert(detail || 'El servidor no devolvió un ZIP válido.');
+                return;
+            }
+            const url = window.URL.createObjectURL(new Blob([blob]));
             const link = document.createElement('a');
             link.href = url;
             link.setAttribute('download', `Propuesta_${(sessionName || sessionId || 'licitacion').replace(/\s+/g, '_')}.zip`);
             document.body.appendChild(link);
             link.click();
             link.remove();
+            window.URL.revokeObjectURL(url);
         } catch (err) {
+            const detail = await parseDownloadErrorDetail(err);
             if (err?.response?.status === 409) {
-                alert("La sesion existe, pero aun no hay expediente generado para descargar.");
+                alert(detail || "La sesion existe, pero aun no hay expediente generado para descargar.");
+            } else if (err?.code === 'ECONNABORTED') {
+                alert("La descarga tardó demasiado. Reintenta o descarga carpetas/archivos individuales desde el árbol.");
             } else {
-                alert("Error al descargar el paquete completo");
+                alert(detail || "Error al descargar el paquete completo");
             }
         } finally {
             setDownloading(null);
@@ -167,6 +243,9 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
     const packagerData = results?.packager?.data?.estructura_sobres || {};
     const economicResumen = results?.economic_writer?.data?.resumen_economico || null;
     const economicItems = results?.economic?.data?.items || results?.economic?.items || [];
+    const openClarificationTickets = clarificationTickets.filter((ticket) =>
+        ['open', 'ready_for_junta'].includes(ticket?.status)
+    );
 
     const checklistGeneral = deliveryData.checklist || [];
     const alertasLogistica = deliveryData.alertas || [];
@@ -191,7 +270,20 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
                 <div>
                     <h3 style={{ fontSize: '20px', fontWeight: 800, color: 'var(--primary)', marginBottom: '4px' }}>Logística y Expedientes</h3>
-                    <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Expediente completo organizado por sobres oficiales.</p>
+                    <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        Expediente CompraNet (sin duplicados de carpetas intermedias).
+                    </p>
+                    {deliverableCount != null && (
+                        <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                            <strong>{deliverableCount}</strong> archivo(s) de entrega
+                            {uniqueShaCount != null && uniqueShaCount !== deliverableCount
+                                ? ` · ${uniqueShaCount} único(s) por contenido`
+                                : ''}
+                            {physicalCount != null && physicalCount > deliverableCount
+                                ? ` · ${physicalCount} en disco antes de poda (referencia)`
+                                : ''}
+                        </p>
+                    )}
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', justifyContent: 'flex-end' }}>
                     <button
@@ -217,6 +309,22 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                         {clearing ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                         {clearing ? 'LIMPIANDO...' : 'LIMPIAR EXPEDIENTE GENERADO'}
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => { setLoading(true); setMiniLoading(true); fetchStructure(); fetchMiniDictamen(); }}
+                        disabled={loading || clearing}
+                        title="Vuelve a leer el expediente en disco tras una generación"
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                            padding: '10px 16px', borderRadius: '12px',
+                            background: 'rgba(255,255,255,0.06)', color: 'var(--text-secondary)',
+                            border: '1px solid var(--border-glass)', fontWeight: 700, fontSize: '11px',
+                            cursor: loading ? 'wait' : 'pointer',
+                        }}
+                    >
+                        {loading ? <Loader2 size={16} className="animate-spin" /> : <Folder size={16} />}
+                        ACTUALIZAR LISTA
+                    </button>
                     <button 
                         type="button"
                         onClick={handleDownloadZip}
@@ -235,6 +343,60 @@ const DeliveryPanel = ({ sessionId, sessionName, results }) => {
                         {downloading === 'ZIP' ? 'EMPAQUETANDO...' : 'DESCARGAR EXPEDIENTE COMPLETO'}
                     </button>
                 </div>
+            </div>
+
+            <div style={{
+                marginBottom: '18px',
+                padding: '14px 16px',
+                borderRadius: '14px',
+                border: '1px solid rgba(245, 158, 11, 0.22)',
+                background: 'rgba(245, 158, 11, 0.06)'
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <AlertTriangle size={16} color="#f59e0b" />
+                    <strong style={{ color: '#f8fafc', fontSize: '13px' }}>Mini Dictamen de Anexos</strong>
+                </div>
+                {miniLoading ? (
+                    <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
+                        Cargando cobertura canónica de anexos...
+                    </p>
+                ) : miniDictamen ? (
+                    <>
+                        <p style={{ margin: '0 0 8px 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                            {miniDictamen?.summary?.coverage_covered ?? 0} cubiertos · {miniDictamen?.summary?.coverage_pending ?? 0} pendientes · {miniDictamen?.summary?.coverage_blocked ?? 0} bloqueados · {miniDictamen?.summary?.clarification_candidates ?? 0} candidatos a junta
+                        </p>
+                        {openClarificationTickets.length > 0 ? (
+                            <div style={{ display: 'grid', gap: '8px' }}>
+                                {openClarificationTickets.slice(0, 5).map((ticket) => (
+                                    <div
+                                        key={ticket.ticket_id}
+                                        style={{
+                                            padding: '10px 12px',
+                                            borderRadius: '10px',
+                                            background: 'rgba(15, 23, 42, 0.35)',
+                                            border: '1px solid rgba(245, 158, 11, 0.18)',
+                                        }}
+                                    >
+                                        <div style={{ fontSize: '12px', fontWeight: 700, color: '#f8fafc', marginBottom: '4px' }}>
+                                            {ticket.display_name}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                            {ticket.reason || 'clarification_required'}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p style={{ margin: 0, fontSize: '12px', color: '#86efac' }}>
+                                No hay tickets abiertos de junta de aclaraciones para anexos.
+                            </p>
+                        )}
+                    </>
+                ) : (
+                    <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-muted)' }}>
+                        Aún no existe mini dictamen persistido para esta sesión.
+                    </p>
+                )}
             </div>
 
             {/* ALERTAS DE LOGÍSTICA (NUEVO) */}

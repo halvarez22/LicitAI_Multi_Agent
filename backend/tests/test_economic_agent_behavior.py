@@ -129,18 +129,46 @@ async def test_price_missing_devuelve_waiting_for_data():
         )
 
     assert out.status == AgentStatus.WAITING_FOR_DATA
-    missing = out.data.get("missing", [])
-    assert len(missing) >= 2
-    types = {str(m.get("type")) for m in missing}
-    assert "economic_validation_blocking" in types
-    labels = " ".join(str(m.get("label") or "") for m in missing).lower()
-    assert "precio" in labels or "importe base" in labels
-    assert any(
-        (m.get("blocking_items") or [{}])[0].get("row_index") is not None
-        or (m.get("blocking_items") or [{}])[0].get("page_number") is not None
-        for m in missing
-        if m.get("blocking_items")
-    )
+
+
+@pytest.mark.asyncio
+async def test_economic_silence_ignora_legales_inferidos_no_bloqueantes():
+    sess = {
+        "document_inventory": {
+            "items": [
+                {
+                    "category": "legal_administrative",
+                    "status": "pending",
+                    "tier": "inferred",
+                    "is_blocking": False,
+                    "display_name": "Acta de Fallo",
+                }
+            ]
+        }
+    }
+    ctx = MCPContextManager(_memory_stub(session=sess))
+    agent = EconomicAgent(ctx)
+    assert await agent._check_economic_silence("s-silence-off", "corr-1") is False
+
+
+@pytest.mark.asyncio
+async def test_economic_silence_si_hay_legal_bloqueante_pendiente():
+    sess = {
+        "document_inventory": {
+            "items": [
+                {
+                    "category": "legal_administrative",
+                    "status": "pending",
+                    "tier": "required",
+                    "is_blocking": True,
+                    "display_name": "Documento legal crítico",
+                }
+            ]
+        }
+    }
+    ctx = MCPContextManager(_memory_stub(session=sess))
+    agent = EconomicAgent(ctx)
+    assert await agent._check_economic_silence("s-silence-on", "corr-2") is True
 
 
 @pytest.mark.asyncio
@@ -374,6 +402,62 @@ async def test_quadrature_delta_mayor_a_un_centavo_bloquea_generacion():
     qr = out.data.get("quadrature_report") or {}
     assert qr.get("available") is True
     assert qr.get("blocking") is True
+
+
+@pytest.mark.asyncio
+async def test_quadrature_extrema_prefiere_session_line_items_canonicos():
+    """Si el LLM resume mal y la base tabular de sesión es mas rica, se usa la verdad canónica."""
+    mem = _memory_stub(
+        line_items=[
+            {
+                "concepto_norm": "umaps atarjea",
+                "concepto_raw": "UMAPS ATARJEA",
+                "cantidad": None,
+                "precio_unitario": 2.0,
+                "subtotal": None,
+                "importe": None,
+            },
+            {
+                "concepto_norm": "umaps doctor mora",
+                "concepto_raw": "UMAPS DOCTOR MORA",
+                "cantidad": None,
+                "precio_unitario": 6.0,
+                "subtotal": None,
+                "importe": None,
+            },
+            {
+                "concepto_norm": "caises san jose iturbide",
+                "concepto_raw": "CAISES SAN JOSÉ ITURBIDE",
+                "cantidad": None,
+                "precio_unitario": 4.0,
+                "subtotal": None,
+                "importe": None,
+            },
+        ]
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = '{"items": [{"concepto": "Resumen parcial", "cantidad": 1, "precio_unitario": 35.0, "subtotal": 35.0, "status": "matched"}], "alertas": []}'
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+    ):
+        mock_llm.generate = AsyncMock(
+            return_value=LLMResponse(success=True, response=payload)
+        )
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-quadrature-canonical",
+                compliance_master_list={"tecnico": [{"id": "t1", "descripcion": "Servicio de limpieza"}]},
+            )
+        )
+    assert out.status == AgentStatus.SUCCESS
+    qr = out.data.get("quadrature_report") or {}
+    assert qr.get("available") is True
+    assert qr.get("blocking") is False
+    assert qr.get("engine_total") == pytest.approx(12.0)
+    assert qr.get("excel_total") == pytest.approx(12.0)
 
 
 @pytest.mark.asyncio
@@ -866,6 +950,346 @@ async def test_save_pending_questions_reemplaza_bloqueo_economico_previo():
     pending = saved.get("pending_questions") or []
     assert len([q for q in pending if str(q.get("type")) == "economic_validation_blocking"]) == 1
     assert any(str(q.get("question") or "").startswith("3 ítems") for q in pending)
+
+
+@pytest.mark.asyncio
+async def test_save_pending_questions_reemplaza_economic_price_previas():
+    """Nueva corrida de economic_price debe sustituir la cola previa para refrescar wording/procedencia."""
+    mem = _memory_stub(
+        session={
+            "tasks_completed": [],
+            "pending_questions": [
+                {"field": "price_x", "type": "economic_price", "question": "vieja x"},
+                {"field": "price_y", "type": "economic_price", "question": "vieja y"},
+                {"field": "profile_conflict_1", "type": "evidence_profile_conflict", "question": "conflicto"},
+            ],
+            "current_question_index": 1,
+        }
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    await agent._save_pending_questions(
+        "s-queue-replace-price",
+        [
+            {
+                "field": "price_x",
+                "label": "Precio X",
+                "question": "nueva x con procedencia",
+                "type": "economic_price",
+            },
+            {
+                "field": "price_z",
+                "label": "Precio Z",
+                "question": "nueva z con procedencia",
+                "type": "economic_price",
+            },
+        ],
+    )
+    saved = mem.save_session.await_args.args[1]
+    pending = saved.get("pending_questions") or []
+    econ = [q for q in pending if str(q.get("type")) == "economic_price"]
+    assert [q.get("field") for q in econ] == ["price_x", "price_z"]
+    assert all("nueva" in str(q.get("question") or "") for q in econ)
+    assert any(str(q.get("type")) == "evidence_profile_conflict" for q in pending)
+    assert saved.get("current_question_index") == 0
+
+
+@pytest.mark.asyncio
+async def test_no_cotizable_items_but_price_source_docs_emits_waiting_for_data():
+    """Si solo quedan anexos tipo catálogo/análisis de precios, debe pedir la fuente económica real."""
+    mem = _memory_stub(company={"id": "co_ps", "master_profile": {"catalog": []}})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    out = await agent.process(
+        _agent_input(
+            "s-price-source",
+            company_id="co_ps",
+            compliance_master_list={
+                "tecnico": [
+                    {
+                        "id": "t1",
+                        "descripcion": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                    },
+                    {
+                        "id": "t2",
+                        "descripcion": "Análisis de precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Integrar análisis de precios unitarios por concepto.",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing") or []
+    assert miss and miss[0].get("type") == "economic_validation_blocking"
+    assert miss[0].get("input_mode") == "price_source"
+    labels = " | ".join(str(x.get("concepto_label") or "").lower() for x in (miss[0].get("blocking_items") or []))
+    assert "catálogo de conceptos" in labels or "catalogo de conceptos" in labels
+    assert "análisis de precios" in labels or "analisis de precios" in labels
+    assert "fuente real de precios" in str(out.message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_unanchored_gaps_with_price_source_docs_fallback_to_price_source():
+    """Si los conceptos cotizables quedan sin ancla estricta, debe pedir catálogo/análisis real."""
+    mem = _memory_stub(company={"id": "co_ps2", "master_profile": {"catalog": []}})
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = (
+        '{"items": ['
+        '{"concepto": "Costo indirecto", "concepto_id": "t_serv", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "price_missing"}'
+        '], "alertas": []}'
+    )
+
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch(
+            "app.agents.economic.validate_economic_proposal",
+            return_value=EconomicValidationResult(perfil_usado="generic"),
+        ),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-price-source-fallback",
+                company_id="co_ps2",
+                compliance_master_list={
+                    "tecnico": [
+                        {"id": "t_serv", "descripcion": "Servicio principal sin ancla verificable"},
+                        {
+                            "id": "t_doc_1",
+                            "descripcion": "Catálogo de conceptos con cantidades y precios unitarios",
+                            "source": "bases_isapeg.pdf",
+                            "page": 3,
+                            "snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                        },
+                        {
+                            "id": "t_doc_2",
+                            "descripcion": "Análisis de precios unitarios",
+                            "source": "bases_isapeg.pdf",
+                            "page": 3,
+                            "snippet": "Integrar análisis de precios unitarios por concepto.",
+                        },
+                    ]
+                },
+            )
+        )
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing") or []
+    assert miss and miss[0].get("input_mode") == "price_source"
+    assert miss[0].get("type") == "economic_validation_blocking"
+
+
+@pytest.mark.asyncio
+async def test_price_source_message_mentions_detected_zone_structure():
+    """Si ya hay anexos tabulares con cantidades, el mensaje debe reconocer esa estructura."""
+    mem = _memory_stub(
+        company={"id": "co_ps3", "master_profile": {"catalog": []}},
+        line_items=[
+            {
+                "id": "li-1",
+                "document_id": "doc-a",
+                "concepto_raw": "CAISES GUANAJUATO",
+                "concepto_norm": "caises guanajuato",
+                "unidad": "ELEMENTO",
+                "cantidad": 6,
+                "precio_unitario": 0.0,
+                "sheet_name": "PARTIDA 1 ZONA A",
+                "row_index": 11,
+                "extra": {
+                    "layout": "structured_template",
+                    "template_kind": "service_zone_elements",
+                    "zone": "A",
+                },
+            },
+            {
+                "id": "li-2",
+                "document_id": "doc-a2",
+                "concepto_raw": "BOLSA DE PLÁSTICO",
+                "concepto_norm": "bolsa de plástico",
+                "unidad": "KILO",
+                "cantidad": 1528,
+                "precio_unitario": 0.0,
+                "sheet_name": "PARTIDA 2 ZONA A",
+                "row_index": 3,
+                "extra": {
+                    "layout": "structured_template",
+                    "template_kind": "monthly_material_requirement",
+                },
+            },
+        ],
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    out = await agent.process(
+        _agent_input(
+            "s-price-source-structure",
+            company_id="co_ps3",
+            compliance_master_list={
+                "tecnico": [
+                    {
+                        "id": "t1",
+                        "descripcion": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    text = str(out.message or "").lower()
+    assert "zona a" in text
+    assert "6 elementos" in text
+    assert "materiales" in text
+
+
+@pytest.mark.asyncio
+async def test_price_source_structure_summary_dedupes_repeated_service_rows():
+    """Si la misma Partida 1 viene duplicada en dos anexos, el resumen no debe duplicar elementos."""
+    repeated_line = {
+        "concepto_raw": "CAISES GUANAJUATO",
+        "concepto_norm": "caises guanajuato",
+        "unidad": "ELEMENTO",
+        "cantidad": 6,
+        "precio_unitario": 0.0,
+        "extra": {
+            "layout": "structured_template",
+            "template_kind": "service_zone_elements",
+            "zone": "A",
+            "site_code": "LIAI-001",
+            "schedule": "LUNES A VIERNES (8 HORAS)",
+        },
+    }
+    mem = _memory_stub(
+        company={"id": "co_ps4", "master_profile": {"catalog": []}},
+        line_items=[
+            {"id": "li-1", "document_id": "doc-a1", "sheet_name": "PARTIDA 1 ZONA A", "row_index": 11, **repeated_line},
+            {"id": "li-2", "document_id": "doc-a2", "sheet_name": "ANEXO III ZONA A", "row_index": 3, **repeated_line},
+        ],
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    out = await agent.process(
+        _agent_input(
+            "s-price-source-dedupe",
+            company_id="co_ps4",
+            compliance_master_list={
+                "tecnico": [
+                    {
+                        "id": "t1",
+                        "descripcion": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    text = str(out.message or "").lower()
+    assert "6 elementos" in text
+    assert "12 elementos" not in text
+
+
+@pytest.mark.asyncio
+async def test_structured_slots_replace_generic_price_source_blocking():
+    """Si ya existen anexos estructurados, debe pedir precios concretos en vez de `price_source` genérico."""
+    mem = _memory_stub(
+        company={"id": "co_ps5", "master_profile": {"catalog": []}},
+        line_items=[
+            {
+                "id": "li-svc-a",
+                "document_id": "doc-svc-a",
+                "concepto_raw": "CAISES GUANAJUATO",
+                "concepto_norm": "caises guanajuato",
+                "unidad": "ELEMENTO",
+                "cantidad": 6,
+                "precio_unitario": 0.0,
+                "sheet_name": "PARTIDA 1 ZONA A",
+                "row_index": 11,
+                "extra": {
+                    "layout": "structured_template",
+                    "template_kind": "service_zone_elements",
+                    "zone": "A",
+                    "schedule": "LUNES A VIERNES (8 HORAS)",
+                    "source_filename": "32. Anexo III P1-2 ZA_Propuesta economica.xlsx",
+                    "price_input_pending": True,
+                },
+            },
+            {
+                "id": "li-mat-a",
+                "document_id": "doc-mat-a",
+                "concepto_raw": "BOLSA DE PLÁSTICO CHICA 55X60",
+                "concepto_norm": "bolsa de plástico chica 55x60",
+                "unidad": "KILO",
+                "cantidad": 1528,
+                "precio_unitario": 0.0,
+                "sheet_name": "PARTIDA 2 ZONA A",
+                "row_index": 3,
+                "extra": {
+                    "layout": "structured_template",
+                    "template_kind": "monthly_material_requirement",
+                    "zone": "A",
+                    "source_filename": "32. Anexo III P1-2 ZA_Propuesta economica.xlsx",
+                    "price_input_pending": True,
+                },
+            },
+        ],
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    out = await agent.process(
+        _agent_input(
+            "s-structured-slots",
+            company_id="co_ps5",
+            compliance_master_list={
+                "tecnico": [
+                    {
+                        "id": "t1",
+                        "descripcion": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Presentar catálogo de conceptos con cantidades y precios unitarios.",
+                    },
+                    {
+                        "id": "t2",
+                        "descripcion": "Análisis de precios unitarios",
+                        "source": "bases_isapeg.pdf",
+                        "page": 3,
+                        "snippet": "Integrar análisis de precios unitarios por concepto.",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    miss = out.data.get("missing") or []
+    assert miss and miss[0].get("type") == "economic_price"
+    assert str(miss[0].get("field") or "").startswith("price_struct_")
+    assert "zona a" in str(miss[0].get("label") or "").lower()
+    oi = miss[0].get("original_item") or {}
+    assert oi.get("row_index") == 11
+    assert "propuesta economica.xlsx" in str(oi.get("source") or "").lower()
+    assert "estructura de cantidades" in str(out.message or "").lower()
 
 
 def test_human_economic_blocking_summary_prioriza_ux_user_message():

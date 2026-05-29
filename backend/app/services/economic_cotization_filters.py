@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Set
 _DOC_PATTERNS = re.compile(
     r"(?i)(carta\s|protesta|declaraci[oó]n|manifiesto|resumen\s|anexo\s|formato\s"
     r"|constancia\s|escrito\s|acreditaci[oó]n|certificaci[oó]n\s|curriculum|cv\s"
-    r"|organigrama|relaci[oó]n\s+de\s+personal|poder\s+notarial|acta\s)"
+    r"|organigrama|relaci[oó]n\s+de\s+personal|poder\s+notarial|acta\s|curp\b"
+    r"|identificaci[oó]n\s+oficial|propuesta\s+t[eé]cnica|propuesta\s+econ[oó]mica)"
 )
 _PRICE_PATTERNS = re.compile(
     r"(?i)(precio|costo|tarifa|importe|monto|unitario|elemento|vigilante|guardia"
@@ -26,7 +27,8 @@ _PRICE_PATTERNS = re.compile(
 _HARD_DOC_PATTERNS = re.compile(
     r"(?i)(escrito|carta|declaraci[oó]n|bajo\s+protesta|manifiesto|anexo|formato"
     r"|constancia|folio|acreditaci[oó]n|certificaci[oó]n|presentaci[oó]n|copia"
-    r"|registro|original|acuse|folio|comprobante)"
+    r"|registro|original|acuse|folio|comprobante|curp\b|identificaci[oó]n\s+oficial"
+    r"|propuesta\s+t[eé]cnica|propuesta\s+econ[oó]mica)"
 )
 
 # Documentos técnicos de obra pública: entregables que se presentan como documentos,
@@ -36,6 +38,7 @@ _OBRA_PUBLICA_DOC_PATTERNS = re.compile(
     r"|relaci[oó]n\s+de\s+contratos|contratos\s+de\s+obras|contratos\s+en\s+vigor"
     r"|relaci[oó]n\s+de\s+maquinaria|equipo\s+de\s+construcci[oó]n|programa\s+de\s+utilizaci[oó]n"
     r"|programa\s+de\s+ejecuci[oó]n|programa\s+de\s+obra|calendario\s+de\s+obra"
+    r"|programa\s+calendarizado"
     r"|memoria\s+descriptiva|especificaciones\s+t[eé]cnicas|cat[aá]logo\s+de\s+conceptos"
     r"|explosivo\s+de\s+insumos|an[aá]lisis\s+de\s+precios\s+unitarios|tabulador"
     r"|curriculum\s+vitae|experiencia\s+del\s+licitante|capacidad\s+financiera"
@@ -46,6 +49,12 @@ _OBRA_PUBLICA_DOC_PATTERNS = re.compile(
 # Entregables económico-documentales (no partida operativa), aunque digan "mensual" o "anual".
 _DELIVERABLE_ECONOMIC_SUMMARY = re.compile(
     r"(?i)resumen\s+(de\s+)?(la\s+)?cotiz|estado\s+de\s+cuenta.*cotiz|propuesta\s+econ[oó]mica\s+resumen"
+)
+_ECONOMIC_SOURCE_DOC_PATTERNS = re.compile(
+    r"(?i)(cat[aá]logo\s+de\s+conceptos.*precios?\s+unitarios"
+    r"|an[aá]lisis\s+de\s+precios?\s+unitarios"
+    r"|tabulador\s+de\s+precios?"
+    r"|propuesta\s+econ[oó]mica)"
 )
 
 
@@ -98,6 +107,14 @@ def should_exclude_technical_for_cotization(
     is_doc = bool(_DOC_PATTERNS.search(text))
     is_price = bool(_PRICE_PATTERNS.search(text))
     return bool(is_doc and not is_price)
+
+
+def is_required_price_source_artifact(req: Dict[str, Any]) -> bool:
+    """True cuando el requisito pide la fuente económica real, no una partida cotizable."""
+    text = merge_technical_item_text(req)
+    if not text:
+        return False
+    return bool(_ECONOMIC_SOURCE_DOC_PATTERNS.search(text))
 
 
 def _pending_economic_core_concept_text(q: Dict[str, Any]) -> str:

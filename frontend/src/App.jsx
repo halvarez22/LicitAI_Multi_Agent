@@ -3,12 +3,14 @@ import {
     FileText, Search, Shield, AlertTriangle, CheckCircle, 
     Download, Clock, ChevronRight, MessageSquare, Bot, 
     User, Send, Bell, Plus, FileSearch, Loader2, ArrowLeft,
-    Copy, DownloadCloud, FileCheck, Info, Trash2, Eraser, RefreshCw
+    Copy, DownloadCloud, FileCheck, Info, Trash2, Eraser, RefreshCw, Paperclip
 } from 'lucide-react';
 import axios from 'axios';
 import DeliveryPanel from './components/DeliveryPanel';
 import SubmissionChecklistPanel from './components/SubmissionChecklistPanel';
+import CriticalDatesList from './components/CriticalDatesList';
 import PostClarificationPanel from './components/PostClarificationPanel';
+import JuntaAclaracionesPanel from './components/JuntaAclaracionesPanel';
 import EconomicValidationPanel from './components/EconomicValidationPanel';
 import Dashboard from './components/Dashboard';
 import ExportPDF from './components/ExportPDF';
@@ -19,9 +21,11 @@ import ValidationAlert from './components/ValidationAlert';
 import JustificationModal from './components/JustificationModal';
 import ValidationPolicyAdmin from './components/ValidationPolicyAdmin';
 import BlockResolutionPanel from './components/BlockResolutionPanel';
+import CaptureMatrixPanel from './components/CaptureMatrixPanel';
 import DocumentQualityDiagnosticPanel from './components/DocumentQualityDiagnosticPanel';
 import IntakeProgressCard from './components/IntakeProgressCard';
 import DocumentCandidatePanel from './components/DocumentCandidatePanel';
+import DetectedFormatsPanel from './components/DetectedFormatsPanel';
 import PhysicalChecklistPanel from './components/PhysicalChecklistPanel';
 import { useValidationManager } from './hooks/useValidationManager';
 import {
@@ -31,6 +35,7 @@ import {
     applyInfrastructureUxOverrides,
     synthesizePipelineTelemetryFromDictamen,
     pickDocumentCandidatesForPanel,
+    pickDetectedFormatsForPanel,
 } from './utils/auditSummary';
 import { LICITAI_APP_VERSION } from './appVersion.js';
 import { API_BASE } from './apiBase.js';
@@ -338,6 +343,23 @@ function formatGenerationWaitingExtra(orchestrator) {
     return parts.length ? '\n\n' + parts.join('\n\n') : '';
 }
 
+/**
+ * Resumen legible de generation_state.jobs para mensajes cuando el pipeline no llega a success.
+ * @param {Record<string, unknown>|null|undefined} generationState
+ * @returns {string}
+ */
+function formatGenerationStateJobsSummary(generationState) {
+    const jobs = generationState?.jobs;
+    if (!Array.isArray(jobs) || jobs.length === 0) return '';
+    const lines = jobs.map((j) => {
+        if (!j || typeof j !== 'object') return null;
+        const id = generationStageLabelEs(j.id);
+        const st = String(j.status || 'pending');
+        return `• ${id}: ${st}`;
+    }).filter(Boolean);
+    return lines.length ? `\n\nEstado de la cola:\n${lines.join('\n')}` : '';
+}
+
 // --- Sub-componente para mostrar resultados de auditoría ---
 const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
     const [activeZoneTab, setActiveZoneTab] = useState('all');
@@ -566,6 +588,8 @@ const App = () => {
     const [chatInput, setChatInput] = useState("");
     const [isThinking, setIsThinking] = useState(false);
     const [generationResults, setGenerationResults] = useState(null);
+    /** Incrementa tras generación OK para que DeliveryPanel relea /downloads/list. */
+    const [deliveryRefreshToken, setDeliveryRefreshToken] = useState(0);
     const [dragOffset, setDragOffset] = useState({ x: 30, y: 30 });
     const [isDragging, setIsDragging] = useState(false);
     const [validationEvents, setValidationEvents] = useState([]);
@@ -599,7 +623,7 @@ const App = () => {
     /**
      * Fase C (cinturón A1): herramientas de sesión bajo el Dashboard.
      * null = ningún panel visible (pestaña pulsada de nuevo para contraer).
-     * @type {null | 'calendario' | 'checklist_fisico' | 'documentos_candidatos' | 'post_junta' | 'economico' | 'calidad_docs' | 'avanzado'}
+     * @type {null | 'calendario' | 'checklist_fisico' | 'documentos_candidatos' | 'formatos_detectados' | 'post_junta' | 'economico' | 'calidad_docs' | 'avanzado'}
      */
     const [sessionToolsTab, setSessionToolsTab] = useState(null);
 
@@ -618,6 +642,7 @@ const App = () => {
     }, [sessionToolsTab]);
 
     const fileInputRef = useRef(null);
+    const chatQuotationFileRef = useRef(null);
     const uploadAbortControllerRef = useRef(null);
     const chatEndRef = useRef(null);
     /** Solo para limpiar claves del Set de módulo al cambiar de sesión. */
@@ -887,6 +912,14 @@ const App = () => {
                         enriched = { ...enriched, fastTrackDocumentCandidates: ftFromApi };
                     }
                 }
+                const checklistFromApi = res.data.data?.submission_checklist;
+                if (checklistFromApi && typeof checklistFromApi === 'object') {
+                    enriched = { ...enriched, submissionChecklist: checklistFromApi };
+                }
+                const corpFromApi = res.data.data?.corporate_physical_document_candidates;
+                if (corpFromApi && typeof corpFromApi === 'object') {
+                    enriched = { ...enriched, corporatePhysicalDocumentCandidates: corpFromApi };
+                }
                 const inferredTelem = synthesizePipelineTelemetryFromDictamen(enriched);
                 if (inferredTelem) {
                     enriched = { ...enriched, pipelineTelemetry: inferredTelem };
@@ -930,6 +963,16 @@ const App = () => {
             console.error("Error fetching dictamen from Postgres:", err);
         }
     };
+
+    useEffect(() => {
+        if (
+            (sessionToolsTab === 'documentos_candidatos' || sessionToolsTab === 'formatos_detectados')
+            && sessionId
+            && sessionId !== 'null'
+        ) {
+            fetchDictamen();
+        }
+    }, [sessionToolsTab, sessionId]);
 
     const saveDictamenToPostgres = async (dictamen) => {
         try {
@@ -1336,6 +1379,7 @@ const App = () => {
         setIsGenerating(true);
         setGenerationProgress({ percent: 0, message: "Encolando trabajo de generación..." });
 
+        let finalOrchStatus = null;
         try {
             const res = await axios.post(`${API_BASE}/agents/process`, {
                 session_id: sessionId,
@@ -1371,7 +1415,14 @@ const App = () => {
             }
 
             const orchStatus = orchestrator?.status;
+            finalOrchStatus = orchStatus;
             const stopReason = orchestrator?.agent_decision?.stop_reason;
+            console.info('[LicitAI] Generación finalizó', {
+                status: orchStatus,
+                stop_reason: stopReason,
+                has_data: Boolean(orchestrator?.data),
+                generation_state: orchestrator?.generation_state,
+            });
             if (stopReason === "GO_NO_GO_PENDING" || orchStatus === "go_no_go_pending") {
                 const gngResult = orchestrator?.go_no_go_result
                     || orchestrator?.data?.go_no_go_result
@@ -1404,7 +1455,17 @@ const App = () => {
                 setEconomicBlockingSessionLatch(!!latchOn);
                 setDocumentQualityBlockingSessionLatch(!!qualityLatchOn);
                 setDocumentQualityGateSnapshot(qualitySnapshot);
-                pushAssistantGuidance(baseMsg + formatGenerationWaitingExtra(orchestrator), true);
+                setDeliveryRefreshToken((t) => t + 1);
+                pushAssistantGuidance(
+                    baseMsg
+                        + formatGenerationWaitingExtra(orchestrator)
+                        + formatGenerationStateJobsSummary(orchestrator?.generation_state),
+                    true
+                );
+                setGenerationProgress((prev) => ({
+                    percent: Math.max(prev.percent, 5),
+                    message: `Pausado: ${stopReason || 'faltan datos'}`,
+                }));
                 const events = [];
                 const results = orchestrator?.data;
                 if (results && typeof results === "object") {
@@ -1430,8 +1491,20 @@ const App = () => {
                         item_id: ev?.context?.item_id,
                     }).catch(() => {});
                 }
+            } else if (orchStatus === "partial") {
+                setGenerationResults(orchestrator.data || orchestrator);
+                setDeliveryRefreshToken((t) => t + 1);
+                pushAssistantGuidance(
+                    (orchestrator?.chatbot_message || 'Generación parcial.')
+                        + formatGenerationWaitingExtra(orchestrator)
+                        + formatGenerationStateJobsSummary(orchestrator?.generation_state)
+                        + '\n\nRevisa **Logística y Expedientes** por si hay archivos listos; pulsa **ACTUALIZAR LISTA**.',
+                    true
+                );
+                setGenerationProgress({ percent: 100, message: 'Completado con advertencias' });
             } else if (orchStatus === "success") {
                 setGenerationResults(orchestrator.data || orchestrator);
+                setDeliveryRefreshToken((t) => t + 1);
                 // Req 6.3: No mostrar mensaje de éxito ambiguo si aún hay pending_questions activas.
                 // El intakeUiSnapshot refleja si el flujo de preguntas sigue activo.
                 const hasPendingIntake = intakeUiSnapshot && intakeUiSnapshot.progressTotal > 0 && intakeUiSnapshot.remainingCount > 0;
@@ -1449,9 +1522,42 @@ const App = () => {
                 setValidationEvents([]);
                 setValidationBlockingCount(0);
                 setGenerationProgress({ percent: 100, message: "Generación completada" });
+            } else if (orchStatus === "hard_disqualification") {
+                setDeliveryRefreshToken((t) => t + 1);
+                const gateData =
+                    orchestrator?.data?.compliance_gate?.data
+                    || orchestrator?.data?.results?.compliance_gate?.data;
+                const failed = Array.isArray(gateData?.failed_rules) ? gateData.failed_rules : [];
+                const errMsg =
+                    orchestrator?.message
+                    || orchestrator?.chatbot_message
+                    || (failed.length
+                        ? `Generación detenida por reglas 12.1: ${failed.join(', ')}.`
+                        : "Generación detenida por reglas deterministas de descalificación (12.1).");
+                pushAssistantGuidance(errMsg, true);
+                setGenerationProgress({
+                    percent: 0,
+                    message: stopReason === 'COMPLIANCE_GATE_BLOCKING'
+                        ? 'Detenido: gate 12.1'
+                        : 'Detenido: descalificación 12.1',
+                });
+                setEconomicBlockingSessionLatch(false);
+                setDocumentQualityBlockingSessionLatch(false);
             } else if (orchStatus === "error") {
+                setDeliveryRefreshToken((t) => t + 1);
+                const errMsg =
+                    orchestrator?.chatbot_message
+                    || orchestrator?.message
+                    || "No se pudo completar la generación. Revisa el backend o vuelve a intentar.";
+                const jobs = orchestrator?.generation_state?.jobs;
+                const techDone = Array.isArray(jobs) && jobs.some((j) => j?.id === "technical" && j?.status === "done");
+                const fmtDone = Array.isArray(jobs) && jobs.some((j) => j?.id === "formats" && j?.status === "done");
+                const partialHint =
+                    techDone && fmtDone
+                        ? "\n\nLos documentos técnico y administrativo pueden estar en **Logística y Expedientes** — pulsa **ACTUALIZAR LISTA**."
+                        : "";
                 pushAssistantGuidance(
-                    orchestrator?.chatbot_message || "No se pudo completar la generación. Revisa el backend o vuelve a intentar.",
+                    errMsg + partialHint + formatGenerationStateJobsSummary(orchestrator?.generation_state),
                     true
                 );
                 setEconomicBlockingSessionLatch(false);
@@ -1459,7 +1565,23 @@ const App = () => {
                 setDocumentQualityGateSnapshot(null);
                 setValidationEvents([]);
                 setValidationBlockingCount(0);
-                setGenerationProgress({ percent: 0, message: "Error durante la generación" });
+                setGenerationProgress({
+                    percent: 0,
+                    message: `Error: ${stopReason || 'generación'}`,
+                });
+            } else {
+                setDeliveryRefreshToken((t) => t + 1);
+                pushAssistantGuidance(
+                    (orchestrator?.chatbot_message
+                        || `La generación terminó con estado «${orchStatus || 'desconocido'}».`)
+                        + formatGenerationWaitingExtra(orchestrator)
+                        + formatGenerationStateJobsSummary(orchestrator?.generation_state),
+                    true
+                );
+                setGenerationProgress((prev) => ({
+                    percent: Math.max(prev.percent, 10),
+                    message: `Estado: ${stopReason || orchStatus || 'revisar'}`,
+                }));
             }
 
         } catch (err) {
@@ -1475,9 +1597,12 @@ const App = () => {
             );
         } finally {
             setIsGenerating(false);
-            setTimeout(() => {
-                setGenerationProgress((prev) => ({ ...prev, percent: 0 }));
-            }, 2000);
+            const keepBar = finalOrchStatus && finalOrchStatus !== 'success';
+            if (!keepBar) {
+                setTimeout(() => {
+                    setGenerationProgress((prev) => ({ ...prev, percent: 0 }));
+                }, 4000);
+            }
         }
     };
 
@@ -1590,6 +1715,87 @@ const App = () => {
         }
     };
 
+    const applyChatbotResponse = useCallback((res) => {
+        const botData = res.data?.data || {};
+        updateIntakeUiSnapshotFromBotData(botData);
+        const botMsg = {
+            sender: 'bot',
+            text: botData.respuesta || res.data.reply,
+            citations: botData.citas || res.data.citations || [],
+            confidence: botData.confianza || res.data.confidence,
+            tipo: botData.tipo,
+            suggestedActions: res.data.suggested_actions || [],
+            isGlow:
+                botData.tipo === 'data_saved' ||
+                botData.tipo === 'pending_question' ||
+                botData.tipo === 'economic_price_provenance',
+        };
+        setChatMessages((prev) => [...prev, botMsg]);
+        if (botData.tipo === 'economic_price_provenance') {
+            setLatestPriceProvenance({
+                text: botData.respuesta || res.data.reply || '',
+                confidence: botData.confianza || res.data.confidence || 'Media',
+                capturedAt: new Date().toLocaleString('es-MX'),
+            });
+        }
+        const updatedGng = botData.go_no_go_result || res.data?.data?.go_no_go_result;
+        const gngOverride = res.data?.data?.go_no_go_override || botData.go_no_go_override;
+        if (updatedGng && !isGoNoGoAcknowledged(gngOverride)) {
+            setGoNoGoResult(updatedGng);
+            if (!showGoNoGoPanel) setShowGoNoGoPanel(true);
+        }
+        setTimeout(() => {
+            chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+    }, [updateIntakeUiSnapshotFromBotData, showGoNoGoPanel]);
+
+    const handleChatQuotationUpload = async (event) => {
+        const file = event?.target?.files?.[0];
+        if (event?.target) event.target.value = '';
+        if (!file || !sessionId || !selectedCompanyId) {
+            pushAssistantGuidance('Selecciona empresa y sesión antes de adjuntar la cotización.', true);
+            return;
+        }
+        setChatMessages((prev) => [
+            ...prev,
+            { sender: 'user', text: `📎 Cotización económica: ${file.name}` },
+        ]);
+        setIsThinking(true);
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('session_id', sessionId);
+            const uploadRes = await axios.post(`${API_BASE}/upload/upload`, form, {
+                headers: { 'Content-Type': 'multipart/form-data' },
+            });
+            const docId = uploadRes.data?.data?.doc_id;
+            if (!docId) {
+                throw new Error('El servidor no devolvió identificador del archivo.');
+            }
+            const res = await axios.post(`${API_BASE}/chatbot/ask`, {
+                query: 'Importar cotización económica desde archivo adjunto',
+                session_id: sessionId,
+                company_id: selectedCompanyId,
+                doc_id: docId,
+            });
+            if (res.data?.status === 'pending') {
+                pushAssistantGuidance(res.data?.message || 'Procesando archivo…', false);
+            } else {
+                applyChatbotResponse(res);
+            }
+        } catch (err) {
+            console.error('Quotation upload error:', err);
+            pushAssistantGuidance(
+                err?.response?.data?.detail ||
+                    err?.message ||
+                    'No se pudo importar la cotización. Verifica que sea Excel o CSV con columnas de concepto y precio.',
+                true
+            );
+        } finally {
+            setIsThinking(false);
+        }
+    };
+
     const handleSendMessage = async (e) => {
         if (e) e.preventDefault();
         if (!chatInput.trim()) return;
@@ -1631,36 +1837,7 @@ const App = () => {
                     setChatMessages(prev => prev.filter(m => !m.isPending));
                 }
 
-                const botData = res.data?.data || {};
-                updateIntakeUiSnapshotFromBotData(botData);
-                const botMsg = { 
-                    sender: 'bot', 
-                    text: botData.respuesta || res.data.reply,
-                    citations: botData.citas || res.data.citations || [],
-                    confidence: botData.confianza || res.data.confidence,
-                    tipo: botData.tipo,
-                    suggestedActions: res.data.suggested_actions || [],
-                    isGlow: botData.tipo === 'data_saved' || botData.tipo === 'pending_question' || botData.tipo === 'economic_price_provenance'
-                };
-                setChatMessages(prev => [...prev, botMsg]);
-                if (botData.tipo === 'economic_price_provenance') {
-                    setLatestPriceProvenance({
-                        text: botData.respuesta || res.data.reply || '',
-                        confidence: botData.confianza || res.data.confidence || 'Media',
-                        capturedAt: new Date().toLocaleString('es-MX'),
-                    });
-                }
-
-                const updatedGng = botData.go_no_go_result || res.data?.data?.go_no_go_result;
-                const gngOverride = res.data?.data?.go_no_go_override || botData.go_no_go_override;
-                if (updatedGng && !isGoNoGoAcknowledged(gngOverride)) {
-                    setGoNoGoResult(updatedGng);
-                    if (!showGoNoGoPanel) setShowGoNoGoPanel(true);
-                }
-                
-                setTimeout(() => {
-                    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-                }, 100);
+                applyChatbotResponse(res);
 
             } catch (err) {
                 console.error("Chat error:", err);
@@ -2102,6 +2279,8 @@ const App = () => {
                                     { id: 'calendario', label: 'Hitos / calendario' },
                                     { id: 'checklist_fisico', label: 'Aduana Corporativa (Checklist Físico)' },
                                     { id: 'documentos_candidatos', label: 'Documentos detectados' },
+                                    { id: 'formatos_detectados', label: 'Formatos/Anexos Detectados' },
+                                    { id: 'junta_preguntas', label: 'Preguntas para la Junta' },
                                     { id: 'post_junta', label: 'Actas y aclaraciones' },
                                     { id: 'economico', label: 'Validaciones económicas' },
                                     { id: 'calidad_docs', label: 'Calidad documental' },
@@ -2141,16 +2320,46 @@ const App = () => {
                                 })}
                             </div>
                             {sessionToolsTab == null && (
-                                <p
-                                    style={{
-                                        fontSize: '11px',
-                                        color: 'var(--text-muted)',
-                                        margin: 0,
-                                        lineHeight: 1.45,
-                                    }}
-                                >
-                                    Elige una pestaña para abrir el panel. Pulsa la misma pestaña otra vez para contraerlo.
-                                </p>
+                                <>
+                                    <p
+                                        style={{
+                                            fontSize: '11px',
+                                            color: 'var(--text-muted)',
+                                            margin: '0 0 12px',
+                                            lineHeight: 1.45,
+                                        }}
+                                    >
+                                        Elige una pestaña para abrir el panel. Pulsa la misma pestaña otra vez para contraerlo.
+                                    </p>
+                                    {auditResults?.submissionChecklist?.hitos?.length > 0 && (
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <CriticalDatesList
+                                                hitos={auditResults.submissionChecklist.hitos}
+                                                compact
+                                                onAskAboutHito={(h) => {
+                                                    const q = `Según las bases de esta licitación, ¿qué debo cumplir respecto al hito «${h.nombre}»? Contexto: ${h.fecha_texto_raw || 'sin fecha textual'}.`;
+                                                    setChatInput(q);
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => setSessionToolsTab('calendario')}
+                                                style={{
+                                                    marginTop: '10px',
+                                                    fontSize: '10px',
+                                                    fontWeight: 700,
+                                                    color: 'var(--primary)',
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    cursor: 'pointer',
+                                                    textDecoration: 'underline',
+                                                }}
+                                            >
+                                                Ver calendario completo y marcar hitos →
+                                            </button>
+                                        </div>
+                                    )}
+                                </>
                             )}
 
                             {sessionToolsTab === 'calendario' && (
@@ -2161,6 +2370,8 @@ const App = () => {
                                 >
                                     <SubmissionChecklistPanel
                                         sessionId={sessionId}
+                                        flatList
+                                        initialData={auditResults?.submissionChecklist}
                                         syncKey={auditResults?.fechaAuditoria || ''}
                                         onAskAboutHito={(h) => {
                                             const q = `Según las bases de esta licitación, ¿qué debo cumplir respecto al hito «${h.nombre}»? Contexto: ${h.fecha_texto_raw || 'sin fecha textual'}.`;
@@ -2189,6 +2400,32 @@ const App = () => {
                                         onAskExpert={(q) => { setChatInput(q); }}
                                         sessionId={sessionId}
                                         companyId={selectedCompanyId}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'formatos_detectados' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-formatos_detectados"
+                                    aria-labelledby="session-tool-tab-formatos_detectados"
+                                >
+                                    <DetectedFormatsPanel
+                                        formats={pickDetectedFormatsForPanel(auditResults)}
+                                        onAskExpert={(q) => { setChatInput(q); }}
+                                    />
+                                </div>
+                            )}
+                            {sessionToolsTab === 'junta_preguntas' && (
+                                <div
+                                    role="tabpanel"
+                                    id="session-tool-panel-junta_preguntas"
+                                    aria-labelledby="session-tool-tab-junta_preguntas"
+                                >
+                                    <JuntaAclaracionesPanel
+                                        sessionId={sessionId}
+                                        companyId={selectedCompanyId}
+                                        syncKey={auditResults?.fechaAuditoria || ''}
+                                        onAskExpert={(q) => setChatInput(q)}
                                     />
                                 </div>
                             )}
@@ -2257,8 +2494,10 @@ const App = () => {
                         results={generationResults || auditResults || {}}
                         sessionName={sessionName}
                         sessionId={sessionId}
+                        refreshToken={deliveryRefreshToken}
                         onExpedienteCleared={() => {
                             setGenerationResults(null);
+                            setDeliveryRefreshToken((t) => t + 1);
                             setDocumentQualityGateSnapshot(null);
                             setDocumentQualityBlockingSessionLatch(false);
                         }}
@@ -2348,6 +2587,7 @@ const App = () => {
                     </div>
 
                     <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                        <CaptureMatrixPanel sessionId={sessionId} />
                         <BlockResolutionPanel
                             sessionId={sessionId}
                             companyId={selectedCompanyId}
@@ -2837,7 +3077,34 @@ const App = () => {
                         )}
                     </div>
 
-                    <form onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px' }}>
+                    <form onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <input
+                            ref={chatQuotationFileRef}
+                            type="file"
+                            accept=".xlsx,.xls,.csv,.tsv"
+                            style={{ display: 'none' }}
+                            onChange={handleChatQuotationUpload}
+                        />
+                        {sessionId && selectedCompanyId && !economicBlockingSessionLatch && (
+                            <button
+                                type="button"
+                                title="Adjuntar Excel/CSV con cotización (precios unitarios)"
+                                onClick={() => chatQuotationFileRef.current?.click()}
+                                disabled={isThinking}
+                                style={{
+                                    background: 'rgba(34, 197, 94, 0.15)',
+                                    border: '1px solid rgba(34, 197, 94, 0.35)',
+                                    color: '#86efac',
+                                    padding: '10px 12px',
+                                    borderRadius: '10px',
+                                    cursor: isThinking ? 'not-allowed' : 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                <Paperclip size={18} />
+                            </button>
+                        )}
                         {(() => {
                             const lastBotMsg = [...chatMessages].reverse().find(m => m.sender === 'bot');
                             const isNumericStep = lastBotMsg?.text?.includes('Paso 1 de 4') || lastBotMsg?.text?.includes('Paso 3 de 4') || lastBotMsg?.text?.includes('Paso 4 de 4');
@@ -2860,6 +3127,8 @@ const App = () => {
                             placeholder={
                                 economicBlockingSessionLatch
                                     ? 'Pregunta al asistente (bases, totales, IVA…) — el desbloqueo es en Excel y Revalidar arriba'
+                                    : intakeUiSnapshot
+                                    ? 'Pregunta sobre las bases o adjunta 📎 tu Excel de cotización…'
                                     : 'Pregunta sobre las bases o aporta un dato del expediente…'
                             }
                             style={{

@@ -10,6 +10,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from typing import List, Optional
 
 from app.api.deps import get_connected_memory
+from app.services.output_delivery_view import (
+    build_delivery_structure,
+    delivery_zip_available,
+    iter_delivery_zip_entries,
+    _find_prebuilt_zip_path,
+)
 
 router = APIRouter()
 
@@ -128,57 +134,9 @@ async def _session_exists(session_id: str) -> bool:
     return False
 
 
-def _walk_output_structure(session_path: str):
-    descriptions = {}
-    meta_path = os.path.join(session_path, "descriptions.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                descriptions = json.load(f)
-        except Exception:
-            pass
-
-    structure = []
-    for root, dirs, files in os.walk(session_path):
-        rel_path = os.path.relpath(root, session_path)
-        display_name = rel_path if rel_path != "." else "GENERAL / LOGÍSTICA"
-
-        folder_files = []
-        for file in files:
-            if file.endswith((".docx", ".pdf", ".xlsx")) and not file.startswith("~$"):
-                file_path = os.path.join(root, file)
-                folder_files.append(
-                    {
-                        "name": file,
-                        "path": os.path.join(rel_path, file) if rel_path != "." else file,
-                        "size": os.path.getsize(file_path),
-                        "description": descriptions.get(
-                            file,
-                            "Documento generado automáticamente para cumplir con los requisitos logísticos y técnicos.",
-                        ),
-                    }
-                )
-
-        if folder_files:
-            structure.append({"folder": display_name, "files": folder_files})
-
-    return structure
-
-
-def _has_files_for_zip(session_path: str) -> bool:
-    """True si hay al menos un archivo real bajo la salida (el ZIP incluye todo el árbol)."""
-    for _, _, files in os.walk(session_path):
-        for name in files:
-            if name.startswith("~$") or name.startswith("."):
-                continue
-            return True
-    return False
-
-
 def _list_response(session_path: Optional[str]) -> dict:
     """
-    Payload de /downloads/list: árbol filtrado para UI + banderas para habilitar ZIP
-    aunque el árbol quede vacío (p. ej. solo JSON/manifiestos fuera del filtro .docx).
+    Payload de /downloads/list: vista deduplicada (CompraNet validado + logística).
     """
     if not session_path:
         return {
@@ -186,13 +144,15 @@ def _list_response(session_path: Optional[str]) -> dict:
             "data": [],
             "output_dir_resolved": False,
             "zip_available": False,
+            "inventory": None,
         }
-    structure = _walk_output_structure(session_path)
+    structure, inventory = build_delivery_structure(session_path)
     return {
         "success": True,
         "data": structure,
         "output_dir_resolved": True,
-        "zip_available": _has_files_for_zip(session_path),
+        "zip_available": delivery_zip_available(session_path),
+        "inventory": inventory,
     }
 
 
@@ -237,17 +197,39 @@ async def download_file(path: str, session_id: str):
 
 
 def _zip_streaming_response(session_path: str, filename_hint: str):
+    prebuilt = _find_prebuilt_zip_path(session_path)
+    if prebuilt:
+        safe = re.sub(r"[^\w.\-]+", "_", filename_hint, flags=re.UNICODE)[:120] or "licitacion"
+        return FileResponse(
+            path=prebuilt,
+            filename=f"Propuesta_{safe}.zip",
+            media_type="application/x-zip-compressed",
+        )
+
+    entries = iter_delivery_zip_entries(session_path)
+    if not entries:
+        raise HTTPException(
+            status_code=409,
+            detail="No hay archivos de entrega para empaquetar en ZIP.",
+        )
+
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-        for root, dirs, files in os.walk(session_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, session_path)
-                zip_file.write(file_path, rel_path)
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zip_file:
+        for file_path, arcname in entries:
+            if os.path.isfile(file_path):
+                zip_file.write(file_path, arcname.replace("\\", "/"))
     zip_buffer.seek(0)
     safe = re.sub(r"[^\w.\-]+", "_", filename_hint, flags=re.UNICODE)[:120] or "licitacion"
+
+    def _iter_chunks(chunk_size: int = 512 * 1024):
+        while True:
+            chunk = zip_buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
     return StreamingResponse(
-        zip_buffer,
+        _iter_chunks(),
         media_type="application/x-zip-compressed",
         headers={"Content-Disposition": f"attachment; filename=Propuesta_{safe}.zip"},
     )
@@ -264,6 +246,36 @@ async def download_all_zip_query(session_id: str = Query(..., min_length=1)):
             )
         raise HTTPException(status_code=404, detail="Sesión no encontrada")
     return _zip_streaming_response(session_path, os.path.basename(session_path.rstrip(os.sep)))
+
+
+@router.get("/patch-delta/{session_id:path}")
+async def download_patch_delta_zip(session_id: str):
+    """ZIP solo con archivos actualizados tras corrección quirúrgica (Ítem B)."""
+    session_path = await resolve_outputs_root(session_id)
+    if not session_path:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada")
+    memory = get_connected_memory()
+    state = await memory.get_session(session_id) or {}
+    patch = state.get("last_document_patch") or {}
+    updated = list(patch.get("updated_files") or [])
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay archivos parciales actualizados para descargar.",
+        )
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for path in updated:
+            if os.path.isfile(path):
+                zf.write(path, os.path.basename(path))
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/x-zip-compressed",
+        headers={
+            "Content-Disposition": f"attachment; filename=Actualizados_{session_id[:32]}.zip"
+        },
+    )
 
 
 @router.get("/zip/{session_id:path}")

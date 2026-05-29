@@ -64,8 +64,17 @@ class PostgresMemoryAdapter(MemoryRepository):
             db_obj = result.scalars().first()
             if not db_obj:
                 db_obj = Session(id=session_id, user_id=data.get('user_id', 'system'))
-            
-            db_obj.state_data = data
+                merged = dict(data)
+            else:
+                existing = db_obj.state_data if isinstance(db_obj.state_data, dict) else {}
+                merged = {**existing, **data}
+                # Precios: fusionar claves, no sustituir el dict entero con un subconjunto.
+                prev_inputs = existing.get("economic_user_inputs")
+                new_inputs = data.get("economic_user_inputs")
+                if isinstance(prev_inputs, dict) and isinstance(new_inputs, dict):
+                    merged["economic_user_inputs"] = {**prev_inputs, **new_inputs}
+
+            db_obj.state_data = merged
             db_session.add(db_obj)
             await db_session.commit()
             return True

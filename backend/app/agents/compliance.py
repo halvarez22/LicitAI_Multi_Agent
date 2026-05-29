@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 _C01_SEMANTIC_PATTERN = re.compile(
     r"(?i)(motivo de descalif|causa de desech|se desech|exclusi[oó]n|causa de rechazo|12\.1\.|inhabilit|descalif)"
 )
-_VALID_ACTION_TYPES = {"generar", "presentar_fisico", "informativo"}
+_VALID_ACTION_TYPES = {"generar", "presentar_fisico", "informativo", "requiere_datos_licitante"}
 
 # --- DOCUMENTACIÓN DE VARIABLES DE OPERACIÓN (PRODUCCIÓN) ---
 # COMPLIANCE_CHUNK_CHARS (default 8000): Tamaño de ventana RAG por bloque Map.
@@ -783,6 +783,10 @@ FORMATO JSON OBLIGATORIO:
 
             # ✅ TRAZABILIDAD: estampar zona_origen (propagada desde _extract_zone_chunk)
             item["zona_origen"] = raw.get("zona_origen", zone_name)
+
+            from app.services.document_deliverable_filter import enforce_deterministic_tipo_accion
+
+            item = enforce_deterministic_tipo_accion(item)
 
             # --- FALLBACK DE SEGURIDAD ( unknown -> informativo ) ---
             # Si el ítem no fue clasificado por el LLM y NO fue forzado por la matriz Must-Have,

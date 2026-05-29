@@ -66,6 +66,94 @@ def test_packager_ok_con_estructura_sobres(tmp_path: Path) -> None:
     assert pr.files[0]["sha256"] and pr.files[0]["bytes"] > 0
 
 
+def test_packager_usa_nombre_convocante_si_disponible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMPRANET_PREFER_CONVOCANTE_FILENAMES", "true")
+    profile = _profile_from_fixture()
+    rfc = str(profile.get("rfc") or "RFC_FIXTURE")
+    lic = "isapeg-test"
+    root = tmp_path / lic
+    sobre = root / "SOBRE_1_ADMINISTRATIVO"
+    sobre.mkdir(parents=True)
+    doc = sobre / "01_anexo_j.xlsx"
+    doc.write_bytes(b"xlsx-content")
+
+    estructura = {
+        "sobre_1": {
+            "titulo": "SOBRE 1",
+            "carpeta": str(sobre),
+            "documentos": [
+                {
+                    "orden": 1,
+                    "nombre": "9. Anexo J Datos de Facturación",
+                    "source_filename": "9. Anexo J Datos de Facturación.xlsx",
+                    "archivo": "01_anexo_j.xlsx",
+                },
+            ],
+            "total_documentos": 1,
+        }
+    }
+    pr = CompraNetPackager().pack(
+        {
+            "output_root": str(root),
+            "rfc": rfc,
+            "licitacion_id": lic,
+            "estructura_sobres": estructura,
+        }
+    )
+    assert pr.success
+    assert pr.files
+    entrega = pr.files[0].get("nombre_entrega") or pr.files[0]["path"].split("/")[-1]
+    assert "Anexo J" in entrega
+    assert pr.files[0].get("naming_mode", "").startswith("convocante")
+    staged = Path(pr.staged_root or "")
+    assert (staged / "INDICE_ENTREGA.json").is_file()
+
+
+def test_packager_persiste_lineage_en_indice_y_manifest(tmp_path: Path) -> None:
+    profile = _profile_from_fixture()
+    rfc = str(profile.get("rfc") or "RFC_FIXTURE")
+    lic = "lineage-test"
+    root = tmp_path / lic
+    sobre = root / "SOBRE_2_TECNICO"
+    sobre.mkdir(parents=True)
+    doc = sobre / "01_tecnico.docx"
+    doc.write_bytes(b"contenido lineage")
+
+    estructura = {
+        "sobre_2": {
+            "titulo": "SOBRE 2",
+            "carpeta": str(sobre),
+            "documentos": [
+                {
+                    "orden": 1,
+                    "nombre": "Anexo Técnico",
+                    "archivo": "01_tecnico.docx",
+                    "source_doc_id": "doc-77",
+                    "source_filename": "ANEXO TÉCNICO 2026.docx",
+                    "template_id": "anexo_tecnico",
+                    "mirror_mode": "copy_docx_filled",
+                    "materialization_route": "mirror",
+                }
+            ],
+            "total_documentos": 1,
+        }
+    }
+    pr = CompraNetPackager().pack(
+        {
+            "output_root": str(root),
+            "rfc": rfc,
+            "licitacion_id": lic,
+            "estructura_sobres": estructura,
+        }
+    )
+    assert pr.success
+    assert pr.files[0]["source_doc_id"] == "doc-77"
+    assert pr.files[0]["template_id"] == "anexo_tecnico"
+    assert pr.files[0]["materialization_route"] == "mirror"
+
+
 def test_packager_rechaza_extension_invalida(tmp_path: Path) -> None:
     profile = _profile_from_fixture()
     root = tmp_path / "sess"
