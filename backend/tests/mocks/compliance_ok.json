@@ -1,7 +1,16 @@
 {
   "data": {
+    "administrativo": [
+      {
+        "id": "C01_mock",
+        "texto": "La omisión de firma en la propuesta será causa de desechamiento conforme al apartado 12.1."
+      }
+    ],
     "causas_desechamiento": [
       "La omision de firma en la propuesta sera causa de desechamiento."
-    ]
+    ],
+    "compliance_gate_result": {
+      "is_blocking": false
+    }
   }
 }

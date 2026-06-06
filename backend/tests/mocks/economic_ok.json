@@ -1,5 +1,12 @@
 {
   "data": {
+    "items": [
+      {
+        "concepto": "Servicio de supervisor sin costo para la convocante",
+        "descripcion": "Supervisor sin costo",
+        "precio_unitario": 0
+      }
+    ],
     "proposal_items": [
       {
         "concepto": "Servicio de supervisor sin costo para la convocante",

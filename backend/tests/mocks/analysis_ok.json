@@ -3,6 +3,9 @@
     "cronograma": {
       "plazo_minimo_meses": "12 meses",
       "plazo_maximo_meses": "24 meses"
+    },
+    "reglas_economicas": {
+      "meses_o_periodo_minimo_citado": "12 meses mínimo de cotización"
     }
   }
 }
