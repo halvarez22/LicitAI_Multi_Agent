@@ -77,6 +77,13 @@ backend/app/brain/
 backend/acid_test_*.py
 backend/tests/fixtures/real_sessions/
 
+# Scripts de diagnóstico local (peek / underscore); no commitear
+backend/_peek_*.py
+backend/_test_*.py
+backend/scripts/_*.py
+backend/scripts/peek_*.py
+backend/tests/_*.txt
+
 # Scripts sueltos en raíz del repo (no producto)
 /acid_test*.py
 /clear_pending.py
