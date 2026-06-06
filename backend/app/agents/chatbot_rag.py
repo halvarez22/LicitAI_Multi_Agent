@@ -112,8 +112,13 @@ class ChatbotRAGAgent(BaseAgent):
             "que falta",
             "qué sigue",
             "que sigue",
+            "como vamos",
+            "cómo vamos",
+            "como va",
+            "cómo va",
             "avanzar",
             "continuar",
+            "adelante",
         )
         return any(t in q for t in tokens)
 
@@ -1695,6 +1700,22 @@ Genera el mensaje conversacional para solicitar este dato."""
         # Si el usuario pide generar la propuesta, disparamos el EconomicAgent directamente
         # para validar si faltan precios, en lugar de dejar que el RAG responda 'cómo' hacerlo.
         is_gen_request = bool(user_query and self._is_economic_generation_command(user_query))
+
+        _early_intent = await self._route_early_user_intent(
+            session_id=session_id,
+            user_query=user_query,
+            session_state=session_state,
+            pending_questions=pending_questions,
+            current_idx=current_idx,
+            current_pending_type=_current_pending_type,
+            is_gen_request=is_gen_request,
+            company_id=company_id,
+            correlation_id=correlation_id,
+            activity_state=activity_state,
+        )
+        if _early_intent is not None:
+            return _early_intent
+
         if user_query and self._detect_user_confusion_intent(user_query) and not is_gen_request:
             return await self._handle_user_confusion_help(
                 session_id=session_id,
@@ -8642,6 +8663,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 seen.add(key)
                 citas.append({"documento": meta.get("source", "Bases"), "pagina": meta.get("page", 1)})
 
+        from app.services.chat_stop_reason_map import sanitize_user_visible_text
+
+        content = sanitize_user_visible_text(content)
+
         await self._save_chat_history(session_id, user_query, content)
 
         # --- C04: INYECCIÓN PROACTIVA DE ACCIONES SUGERIDAS ---
@@ -9218,9 +9243,101 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             tipo="economic_correction",
         )
 
+    async def _route_early_user_intent(
+        self,
+        *,
+        session_id: str,
+        user_query: str,
+        session_state: Dict[str, Any],
+        pending_questions: List[Dict[str, Any]],
+        current_idx: int,
+        current_pending_type: str,
+        is_gen_request: bool,
+        company_id: Optional[str],
+        correlation_id: str,
+        activity_state: str,
+    ) -> Optional[AgentOutput]:
+        """
+        Enrutamiento determinista por intención (SUPER ISSUE S.1–S.2).
+        Evita META forense o RAG cuando el usuario pide estado o «generar» ambiguo.
+        """
+        from app.services.chat_user_intent import (
+            DISAMBIGUATE_GENERAR_MESSAGE,
+            UserChatIntent,
+            resolve_user_intent,
+        )
+
+        if not user_query or not str(user_query).strip():
+            return None
+
+        eco_pending = [
+            q
+            for q in (pending_questions or [])
+            if str(q.get("type") or "")
+            in ("economic_price", "economic_price_matrix", "economic_validation_blocking")
+        ]
+        resolved = resolve_user_intent(
+            user_query,
+            has_economic_pending=bool(eco_pending),
+            has_any_pending=bool(pending_questions),
+            current_pending_type=current_pending_type,
+            is_explicit_gen_command=is_gen_request,
+        )
+
+        if resolved.intent == UserChatIntent.DESAMBIGUAR_GENERAR:
+            await self._save_chat_history(session_id, user_query, DISAMBIGUATE_GENERAR_MESSAGE)
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=DISAMBIGUATE_GENERAR_MESSAGE,
+                confianza="Alta",
+                tipo="clarification_needed",
+                activity_state=activity_state,
+            )
+
+        if resolved.intent == UserChatIntent.VER_ESTADO and not is_gen_request:
+            return await self._handle_meta_query(
+                session_id, user_query, session_state, correlation_id
+            )
+
+        if resolved.intent == UserChatIntent.AYUDA and company_id:
+            return await self._handle_user_confusion_help(
+                session_id=session_id,
+                session_state=session_state,
+                pending=pending_questions,
+                current_idx=current_idx,
+                user_query=user_query,
+                correlation_id=correlation_id,
+                company_id=company_id,
+            )
+
+        if resolved.intent == UserChatIntent.GENERAR_EXPEDIENTE and company_id:
+            msg = (
+                "Para **generar el expediente** (técnica, formatos y empaquetado), "
+                "usa el botón **Generar** en el panel principal cuando la cotización económica esté lista."
+            )
+            await self._save_chat_history(session_id, user_query, msg)
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=msg,
+                confianza="Alta",
+                tipo="meta_answer",
+                suggested_actions=[
+                    {"label": "🚀 Generar Documentos", "payload": "CMD_TRIGGER_DOC_GEN", "style": "primary"}
+                ],
+                activity_state=activity_state,
+            )
+
+        return None
+
     async def _handle_meta_query(self, session_id: str, query: str, session_state: Dict, correlation_id: str = "") -> AgentOutput:
         """Explica el estado del sistema basándose en la conciencia del orquestador (Hito 8)."""
-        from app.services.chat_stop_reason_map import humanize_stop_reason, sanitize_user_visible_text
+        from app.services.chat_stop_reason_map import (
+            humanize_stop_reason,
+            sanitize_user_visible_text,
+            single_cta_for_context,
+        )
 
         decision = session_state.get("last_orchestrator_decision", {})
         stop_reason = decision.get("stop_reason", "IDLE")
@@ -9242,12 +9359,11 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         
         pending_eco = [
             q for q in (session_state.get("pending_questions") or [])
-            if str(q.get("type") or "") in ("economic_price", "economic_validation_blocking")
+            if str(q.get("type") or "") in ("economic_price", "economic_validation_blocking", "economic_price_matrix")
         ]
-        cta = (
-            "Responde el precio pendiente en el chat."
-            if pending_eco
-            else "Usa el panel **Generar** o escribe «generar propuesta» cuando estés listo."
+        cta = single_cta_for_context(
+            stop_reason=stop_reason,
+            has_economic_pending=bool(pending_eco),
         )
 
         bot_msg = sanitize_user_visible_text(

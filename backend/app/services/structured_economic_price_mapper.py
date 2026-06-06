@@ -313,6 +313,7 @@ def build_structured_price_slots(
                 "sheet_name": row_ref["sheet_name"],
                 "row_index": row_ref["row_index"],
                 "source_name": row_ref["source_name"] or "anexo_economico.xlsx",
+                "price_column_header": str(extra.get("price_column_header") or "").strip(),
                 "context_snippet": snippet[:420],
                 "rows_count": 0,
                 "quantity_total": 0.0,

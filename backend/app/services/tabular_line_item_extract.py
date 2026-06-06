@@ -422,6 +422,7 @@ def _extract_from_structured_template(
         total_col = _find_first_col(headers, ("total", "costo total"))
         if location_col is None or price_col is None:
             return out
+        price_header_raw = df.iloc[header_row_idx, price_col] if price_col is not None else None
         for row_pos in range(header_row_idx + 1, len(df.index)):
             row = df.iloc[row_pos]
             raw_loc = row.iloc[location_col] if location_col is not None else None
@@ -437,6 +438,7 @@ def _extract_from_structured_template(
                 "template_kind": template_kind,
                 "header_row_index": int(header_row_idx + 1),
                 "price_column_index": price_col,
+                "price_column_header": str(price_header_raw or "").strip()[:200],
                 "subtotal_column_index": amount_col,
                 "total_column_index": total_col,
                 "location_label": loc_str[:128],

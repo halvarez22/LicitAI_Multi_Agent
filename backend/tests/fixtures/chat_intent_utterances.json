@@ -1,0 +1,10 @@
+[
+  {"utterance": "generar", "sample_bad_response": "MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems"},
+  {"utterance": "adelante", "sample_bad_response": "stop_reason COMPLIANCE_GATE_BLOCKING"},
+  {"utterance": "como vamos", "sample_bad_response": "Estado: MISSING_PRICES en compliance_truth"},
+  {"utterance": "generar propuesta", "sample_bad_response": "FINAL_OK completado"},
+  {"utterance": "que falta", "sample_bad_response": "Faltan datos — IDLE"},
+  {"utterance": "no entiendo", "sample_bad_response": "Responde el precio pendiente."},
+  {"utterance": "cotizar precios", "sample_bad_response": "Completa la matriz."},
+  {"utterance": "generar documentos", "sample_bad_response": "Usa el panel Generar."}
+]

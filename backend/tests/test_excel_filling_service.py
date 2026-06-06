@@ -100,3 +100,44 @@ def test_fill_proposal_excel_omite_locator_invalido(tmp_path: Path) -> None:
     wb = openpyxl.load_workbook(output, data_only=False)
     assert wb["Partidas"].cell(row=2, column=1).value == "Servicio A"
     assert wb["Partidas"].cell(row=2, column=2).value is None
+
+
+def test_fill_proposal_excel_writes_amount_and_sheet_total(tmp_path: Path) -> None:
+    source = tmp_path / "grid.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ZB"
+    ws.cell(row=1, column=1, value="Localidad")
+    ws.cell(row=1, column=2, value="Cantidad")
+    ws.cell(row=1, column=3, value="Precio")
+    ws.cell(row=1, column=4, value="Importe")
+    ws.cell(row=1, column=5, value="Total")
+    ws.cell(row=2, column=1, value="Acámbaro")
+    ws.cell(row=2, column=2, value=2)
+    ws.cell(row=10, column=5, value="")
+    wb.save(source)
+
+    svc = ExcelFillingService(base_data_dir=str(tmp_path))
+    output = svc.fill_proposal_excel(
+        session_id="s3",
+        source_filename="grid.xlsx",
+        source_path=str(source),
+        output_filename="grid_out.xlsx",
+        items_to_fill=[
+            {
+                "sheet_name": "ZB",
+                "row_index": 0,
+                "price_column_index": 2,
+                "quantity": 2,
+                "amount_column_index": 3,
+                "total_column_index": 4,
+                "final_price": 100.0,
+            }
+        ],
+    )
+
+    out = openpyxl.load_workbook(output, data_only=False)
+    sheet = out["ZB"]
+    assert sheet.cell(row=2, column=3).value == 100.0
+    assert sheet.cell(row=2, column=4).value == 200.0
+    assert sheet.cell(row=2, column=5).value == 200.0

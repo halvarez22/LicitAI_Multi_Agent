@@ -780,6 +780,7 @@ const App = () => {
     const [goNoGoResult, setGoNoGoResult] = useState(null);
     const [showGoNoGoPanel, setShowGoNoGoPanel] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [analysisOverlayVisible, setAnalysisOverlayVisible] = useState(true);
     const [isGenerating, setIsGenerating] = useState(false);
     const [reprocessingDocId, setReprocessingDocId] = useState(null);
     const [auditProgress, setAuditProgress] = useState({ percent: 0, currentFile: "" });
@@ -1453,6 +1454,7 @@ const App = () => {
         auditJobWatchRef.current = jobId;
 
         setIsAnalyzing(true);
+        setAnalysisOverlayVisible(true);
         savePendingAgentsJob(sessionId, jobId);
         const prog = initialProgress || {};
         setAuditProgress({
@@ -1851,6 +1853,7 @@ const App = () => {
         chatProactiveBootstrapDoneKeys.delete(bootstrapKey);
 
         setIsAnalyzing(true);
+        setAnalysisOverlayVisible(true);
         setAuditProgress({ percent: 10, currentFile: "Iniciando Auditoría..." });
 
         const pulseInterval = setInterval(() => {
@@ -1886,23 +1889,15 @@ const App = () => {
             let orchestrator = null;
 
             if (encolado?.job_id) {
-                savePendingAgentsJob(sessionId, encolado.job_id);
-                setAuditProgress((prev) => ({
-                    ...prev,
-                    currentFile: 'Análisis en servidor: sincronizando estado…',
-                }));
-                orchestrator = await pollAgentsJobUntilDone(encolado.job_id, (u) => {
-                    setAuditProgress((prev) => {
-                        const nextMsg = u.message || prev.currentFile;
-                        let nextPct = prev.percent;
-                        if (typeof u.pct === 'number' && !Number.isNaN(u.pct)) {
-                            const p = Math.max(0, Math.min(100, u.pct));
-                            nextPct = Math.max(prev.percent, p);
-                        }
-                        return { ...prev, currentFile: nextMsg, percent: nextPct };
-                    });
+                clearInterval(pulseInterval);
+                continueAuditJobInBackground(encolado.job_id, {
+                    pct: 10,
+                    message: 'Análisis en servidor (puedes seguir navegando)…',
                 });
-            } else if (encolado && (encolado.analysis || encolado.compliance || encolado.economic)) {
+                return;
+            }
+
+            if (encolado && (encolado.analysis || encolado.compliance || encolado.economic)) {
                 orchestrator = {
                     status: res.data.status,
                     data: encolado,
@@ -3940,7 +3935,7 @@ const App = () => {
             )}
 
             {/* OVERLAY DE CARGA (DRAGGABLE) */}
-            {isAnalyzing && (
+            {isAnalyzing && analysisOverlayVisible && (
                 <div 
                     onMouseDown={(e) => {
                         setIsDragging(true);
@@ -3975,6 +3970,25 @@ const App = () => {
                         <div style={{ height: '100%', width: `${auditProgress.percent}%`, background: 'var(--primary)', transition: 'width 0.3s' }}></div>
                     </div>
                     <div style={{ fontSize: '10px', marginTop: '10px', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{auditProgress.currentFile}</div>
+
+                    <button
+                        type="button"
+                        onClick={() => setAnalysisOverlayVisible(false)}
+                        style={{
+                            width: '100%',
+                            marginTop: '10px',
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(139, 92, 246, 0.45)',
+                            background: 'transparent',
+                            color: 'var(--primary)',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                        }}
+                    >
+                        Seguir navegando (análisis en segundo plano)
+                    </button>
                     
                     <button 
                         onClick={handleCancelUpload}

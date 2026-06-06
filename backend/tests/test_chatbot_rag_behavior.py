@@ -1930,3 +1930,56 @@ async def test_data_intake_last_pending_confirms_save_and_full_generation_cta(ag
     assert "propuesta económica" not in body
     assert "generar documentos" in body
     assert resp.data.get("intake_active") is False
+
+
+@pytest.mark.asyncio
+async def test_bare_generar_disambiguates_not_meta_forensic(agent, mock_context):
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": [],
+        "current_question_index": 0,
+        "tasks_completed": [{"task": "stage_completed:compliance", "result": {"status": "success"}}],
+        "last_orchestrator_decision": {"stop_reason": "MISSING_ECONOMIC_PROPOSAL"},
+    }
+    mock_context.memory.get_documents = AsyncMock(return_value=[{"id": "doc1"}])
+    resp = await agent.process(_inp("sess_gen_amb", "generar"))
+    body = resp.data.get("respuesta") or ""
+    assert "cotizar precios" in body.lower() or "generar el expediente" in body.lower()
+    assert "MISSING_" not in body
+    assert resp.data.get("tipo") == "clarification_needed"
+
+
+@pytest.mark.asyncio
+async def test_como_vamos_routes_to_human_status(agent, mock_context):
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": [],
+        "current_question_index": 0,
+        "tasks_completed": [{"task": "stage_completed:analysis", "result": {"status": "success"}}],
+        "last_orchestrator_decision": {"stop_reason": "ANALYSIS_COMPLETED"},
+    }
+    mock_context.memory.get_documents = AsyncMock(return_value=[{"id": "doc1"}])
+    resp = await agent.process(_inp("sess_status", "cómo vamos"))
+    body = resp.data.get("respuesta") or ""
+    assert "MISSING_" not in body
+    assert "Gate 12.1" not in body
+    assert resp.data.get("tipo") == "meta_answer"
+    assert "análisis" in body.lower() or "estado" in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_rag_answer_sanitized_from_internal_codes(agent, mock_context):
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": [],
+        "current_question_index": 0,
+        "tasks_completed": [{"task": "stage_completed:compliance", "result": {"status": "success"}}],
+    }
+    mock_context.memory.get_documents = AsyncMock(return_value=[{"id": "doc1"}])
+    agent.llm.chat = AsyncMock(
+        return_value=LLMResponse(
+            success=True,
+            response="Gate 12.1 bloqueó MISSING_ECONOMIC_PROPOSAL con 401 ítems.",
+        )
+    )
+    resp = await agent.process(_inp("sess_rag_clean", "¿Cuál es la moneda de la propuesta?"))
+    body = resp.data.get("respuesta") or ""
+    assert "MISSING_" not in body
+    assert "Gate 12.1" not in body

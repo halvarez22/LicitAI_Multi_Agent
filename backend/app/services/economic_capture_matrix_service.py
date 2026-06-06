@@ -8,9 +8,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 from app.services.economic_column_roles import (
-    ROLE_LOCATION_LABEL,
     ROLE_UNIT_PRICE_EXCL_IVA,
     ROLE_UNIT_PRICE_IVA_INCLUDED,
+    detect_column_role,
     human_role_label,
 )
 from app.services.structured_economic_price_mapper import build_structured_price_slots
@@ -196,8 +196,9 @@ def build_capture_matrix_blocks(
     groups: Dict[str, Dict[str, Any]] = {}
     for slot in pending:
         source = str(slot.get("source_name") or "anexo_economico.xlsx")
-        role = ROLE_UNIT_PRICE_IVA_INCLUDED
-        if "sin iva" in str(slot.get("label") or "").lower():
+        header_hint = str(slot.get("price_column_header") or slot.get("label") or "")
+        role = detect_column_role(header_hint) or ROLE_UNIT_PRICE_EXCL_IVA
+        if role not in (ROLE_UNIT_PRICE_IVA_INCLUDED, ROLE_UNIT_PRICE_EXCL_IVA):
             role = ROLE_UNIT_PRICE_EXCL_IVA
         gkey = f"{source}|{role}"
         bucket = groups.setdefault(
