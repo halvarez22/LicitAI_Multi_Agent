@@ -55,6 +55,7 @@ def is_bare_generar_ambiguous(query: str) -> bool:
         {
             "generar",
             "genera",
+            "genrar",
             "adelante",
             "listo",
             "vamos",
@@ -68,6 +69,21 @@ def is_bare_generar_ambiguous(query: str) -> bool:
     )
     if q in bare:
         return True
+    if re.search(r"(^|\s)generar(\s|$)", q) or q.endswith(" generar") or q.endswith(" genera"):
+        if not any(
+            w in q
+            for w in (
+                "propuesta",
+                "economica",
+                "economico",
+                "documento",
+                "documentos",
+                "expediente",
+                "cotizacion",
+                "cotizar",
+            )
+        ):
+            return True
     if q.startswith("generar ") and not any(
         w in q
         for w in (
@@ -104,6 +120,15 @@ def is_expediente_generation_command(query: str) -> bool:
         "generar sobres",
         "empaquetar",
         "crear expediente",
+        "armar expediente",
+        "propuesta tecnica",
+        "sobre tecnico",
+        "sobre economico",
+        "sobre administrativo",
+        "compranet",
+        "paquete final",
+        "documentos finales",
+        "todo el expediente",
     )
     return any(m in q for m in markers)
 
@@ -116,7 +141,9 @@ def is_economic_generation_command(query: str) -> bool:
     q = normalize_for_intent(raw).replace("ó", "o")
     if not q:
         return False
-    if re.search(r"\b(generar|genera|armar|calcular|cotizar)\b", q) and (
+    if ("propuesta tecnica" in q or "sobre tecnico" in q) and "economica" not in q and "economico" not in q:
+        return False
+    if re.search(r"\b(generar|genera|armar|calcular|cotizar|validar|recalcular|cerrar)\b", q) and (
         "propuesta" in q or "economica" in q or "economico" in q or "cotizacion" in q
     ):
         return True
@@ -142,12 +169,18 @@ def is_status_query(query: str) -> bool:
         "que falta",
         "que falta por hacer",
         "que hace falta",
+        "donde vamos",
+        "en que paso vamos",
+        "cual es el siguiente paso",
+        "siguiente paso",
     )
     return any(m in q for m in status_markers)
 
 
 def is_help_query(query: str) -> bool:
     q = normalize_for_intent(query)
+    if q in ("ayuda", "help", "auxilio"):
+        return True
     if len(q) < 8:
         return False
     needles = (
@@ -162,6 +195,11 @@ def is_help_query(query: str) -> bool:
         "en que me ayudas",
         "no se que hacer",
         "no se que hacer",
+        "me puedes ayudar",
+        "estoy perdido",
+        "estoy confundido",
+        "no me queda claro",
+        "por donde empezar",
         "ayuda",
         "help",
     )
@@ -196,6 +234,9 @@ def is_cotizar_query(query: str) -> bool:
     cotizar_markers = (
         "cotizar",
         "cotizacion",
+        "validar propuesta",
+        "recalcular propuesta",
+        "cerrar cotizacion",
         "precio unitario",
         "precios unitarios",
         "capturar precio",
@@ -229,19 +270,24 @@ def resolve_user_intent(
         return ResolvedUserIntent(UserChatIntent.UNKNOWN, reason="empty")
 
     if q.startswith("CMD_"):
+        qu = q.upper()
+        if "DOC_GEN" in qu:
+            return ResolvedUserIntent(UserChatIntent.GENERAR_EXPEDIENTE, reason="cmd_doc_gen")
+        if "ECONOMIC" in qu or "GENERATION" in qu:
+            return ResolvedUserIntent(UserChatIntent.COTIZAR, reason="cmd_economic")
         return ResolvedUserIntent(UserChatIntent.VER_ESTADO, reason="ui_command")
 
     if is_help_query(q):
         return ResolvedUserIntent(UserChatIntent.AYUDA, reason="help_markers")
-
-    if is_bare_generar_ambiguous(q) and not is_explicit_gen_command:
-        return ResolvedUserIntent(UserChatIntent.DESAMBIGUAR_GENERAR, reason="bare_generar")
 
     if is_expediente_generation_command(q):
         return ResolvedUserIntent(UserChatIntent.GENERAR_EXPEDIENTE, reason="expediente_cmd")
 
     if is_economic_generation_command(q) or is_explicit_gen_command:
         return ResolvedUserIntent(UserChatIntent.COTIZAR, reason="economic_gen_cmd")
+
+    if is_bare_generar_ambiguous(q) and not is_explicit_gen_command:
+        return ResolvedUserIntent(UserChatIntent.DESAMBIGUAR_GENERAR, reason="bare_generar")
 
     if is_status_query(q):
         return ResolvedUserIntent(UserChatIntent.VER_ESTADO, reason="status_markers")

@@ -77,13 +77,19 @@ def test_assert_user_visible_clean_raises():
 
 
 def test_utterance_battery_no_crude_codes():
-    """Batería mínima S.6: frases reales no deben quedar con códigos internos tras sanitizar."""
+    """Gate S.6: respuestas simuladas quedan limpias tras sanitizar (batería mínima legacy)."""
     fixtures_path = Path(__file__).parent / "fixtures" / "chat_intent_utterances.json"
     utterances = json.loads(fixtures_path.read_text(encoding="utf-8"))
     for row in utterances:
         msg = sanitize_user_visible_text(row.get("sample_bad_response", ""))
         if msg:
             assert_user_visible_clean(msg)
+
+
+def test_battery_module_meets_minimum_size():
+    from app.services.chat_intent_battery import BATTERY_MIN_CASES, build_chat_intent_battery
+
+    assert len(build_chat_intent_battery()) >= BATTERY_MIN_CASES
 
 
 def test_generation_command_helpers():

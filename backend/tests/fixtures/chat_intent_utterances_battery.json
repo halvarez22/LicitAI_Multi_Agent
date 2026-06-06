@@ -1,0 +1,1786 @@
+[
+  {
+    "case_id": "disambig_000",
+    "utterance": "generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_001",
+    "utterance": "genera",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_002",
+    "utterance": "GENERAR",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_003",
+    "utterance": "  generar  ",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_004",
+    "utterance": "adelante",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_005",
+    "utterance": "listo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_006",
+    "utterance": "vamos",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_007",
+    "utterance": "dale",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_008",
+    "utterance": "ok",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_009",
+    "utterance": "de acuerdo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_010",
+    "utterance": "continuar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_011",
+    "utterance": "continua",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_012",
+    "utterance": "sigue",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_013",
+    "utterance": "generar ya",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_014",
+    "utterance": "generar por favor",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_015",
+    "utterance": "generar ahora",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_016",
+    "utterance": "generar todo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_017",
+    "utterance": "generar lo que falta",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_018",
+    "utterance": "generar lo pendiente",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_019",
+    "utterance": "genrar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_020",
+    "utterance": "generar plis",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_021",
+    "utterance": "a ver generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_022",
+    "utterance": "bueno generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_023",
+    "utterance": "simon generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_024",
+    "utterance": "órale generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_025",
+    "utterance": "va generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_026",
+    "utterance": "pues generar",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_027",
+    "utterance": "generar !!!",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_028",
+    "utterance": "generar...",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "disambig_029",
+    "utterance": "generar ??",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_000",
+    "utterance": "como vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_001",
+    "utterance": "cómo vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_002",
+    "utterance": "como vamos?",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_003",
+    "utterance": "que tal vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_004",
+    "utterance": "qué tal vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_005",
+    "utterance": "como va",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_006",
+    "utterance": "cómo va",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_007",
+    "utterance": "como va todo",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_008",
+    "utterance": "como llevamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_009",
+    "utterance": "en que vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_010",
+    "utterance": "en qué vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_011",
+    "utterance": "estatus",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_012",
+    "utterance": "estatus del proceso",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_013",
+    "utterance": "estado del proceso",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_014",
+    "utterance": "estado de la licitacion",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_015",
+    "utterance": "estado de la licitación",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_016",
+    "utterance": "avance",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_017",
+    "utterance": "avance del expediente",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_018",
+    "utterance": "progreso",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_019",
+    "utterance": "progreso general",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_020",
+    "utterance": "que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_021",
+    "utterance": "qué sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_022",
+    "utterance": "que sigue ahora",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_023",
+    "utterance": "que falta",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_024",
+    "utterance": "qué falta",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_025",
+    "utterance": "que falta por hacer",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_026",
+    "utterance": "que hace falta",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_027",
+    "utterance": "que hace falta todavia",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_028",
+    "utterance": "donde vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_029",
+    "utterance": "dónde vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_030",
+    "utterance": "como vamos con esto",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_031",
+    "utterance": "como vamos con la propuesta",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_032",
+    "utterance": "reporte de avance",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_033",
+    "utterance": "me das un resumen del avance",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_034",
+    "utterance": "en que paso vamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_035",
+    "utterance": "cual es el siguiente paso",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "status_036",
+    "utterance": "cuál es el siguiente paso",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_000",
+    "utterance": "no entiendo",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_001",
+    "utterance": "no entiendo nada",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_002",
+    "utterance": "no te entiendo",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_003",
+    "utterance": "no entiendo que necesitas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_004",
+    "utterance": "no entiendo qué necesitas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_005",
+    "utterance": "que necesitas de mi",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_006",
+    "utterance": "qué necesitas de mí",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_007",
+    "utterance": "que ocupas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_008",
+    "utterance": "qué ocupas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_009",
+    "utterance": "que requieres",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_010",
+    "utterance": "qué requieres",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_011",
+    "utterance": "que debo hacer",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_012",
+    "utterance": "qué debo hacer",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_013",
+    "utterance": "que hago ahora",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_014",
+    "utterance": "qué hago ahora",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_015",
+    "utterance": "en que me ayudas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_016",
+    "utterance": "en qué me ayudas",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_017",
+    "utterance": "no se que hacer",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_018",
+    "utterance": "no sé qué hacer",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_019",
+    "utterance": "necesito ayuda",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_020",
+    "utterance": "ayuda por favor",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_021",
+    "utterance": "ayuda!",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_022",
+    "utterance": "ayuda",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_023",
+    "utterance": "me puedes ayudar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_024",
+    "utterance": "estoy perdido",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_025",
+    "utterance": "no se por donde empezar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_026",
+    "utterance": "no sé por dónde empezar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_027",
+    "utterance": "no me queda claro",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_028",
+    "utterance": "estoy confundido",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "help_029",
+    "utterance": "help",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_000",
+    "utterance": "generar propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_001",
+    "utterance": "generar propuesta económica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_002",
+    "utterance": "genera propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_003",
+    "utterance": "generar propuesta",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_004",
+    "utterance": "genera propuesta",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_005",
+    "utterance": "calcular propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_006",
+    "utterance": "armar propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_007",
+    "utterance": "cotizar propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_008",
+    "utterance": "cotizar",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_009",
+    "utterance": "cotizacion economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_010",
+    "utterance": "cotización económica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_011",
+    "utterance": "capturar precios",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_012",
+    "utterance": "captura precio unitario",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_013",
+    "utterance": "matriz de precios",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_014",
+    "utterance": "matriz de precio",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_015",
+    "utterance": "generar cotizacion",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_016",
+    "utterance": "generar cotización",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_017",
+    "utterance": "quiero cotizar",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_018",
+    "utterance": "vamos a cotizar",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_019",
+    "utterance": "cerrar cotizacion",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_020",
+    "utterance": "cerrar cotización",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_021",
+    "utterance": "recalcular propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_022",
+    "utterance": "validar propuesta economica",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_023",
+    "utterance": "generar la propuesta economica final",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_024",
+    "utterance": "generar propuesta economica por favor",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_025",
+    "utterance": "genera la propuesta economica ya",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_026",
+    "utterance": "CMD_TRIGGER_ECONOMIC_PROPOSAL",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_027",
+    "utterance": "CMD_TRIGGER_GENERATION",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_000",
+    "utterance": "generar documentos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_001",
+    "utterance": "generar documento",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_002",
+    "utterance": "generar expediente",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_003",
+    "utterance": "generar anexos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_004",
+    "utterance": "generar anexo",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_005",
+    "utterance": "generar formatos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_006",
+    "utterance": "generar sobres",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_007",
+    "utterance": "empaquetar",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_008",
+    "utterance": "empaquetar sobres",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_009",
+    "utterance": "crear expediente",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_010",
+    "utterance": "armar expediente",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_011",
+    "utterance": "generar entrega compranet",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_012",
+    "utterance": "generar paquete final",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_013",
+    "utterance": "generar los documentos finales",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_014",
+    "utterance": "generar documentos finales",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_015",
+    "utterance": "generar todo el expediente",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_016",
+    "utterance": "generar sobres administrativos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_017",
+    "utterance": "generar sobre tecnico",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_018",
+    "utterance": "generar sobre economico",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_019",
+    "utterance": "generar propuesta tecnica y formatos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_020",
+    "utterance": "quiero generar documentos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_021",
+    "utterance": "listo para generar documentos",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_022",
+    "utterance": "generar documentos ya",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_023",
+    "utterance": "generar documentos por favor",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "expediente_024",
+    "utterance": "CMD_TRIGGER_DOC_GEN",
+    "expected_intent": "GENERAR_EXPEDIENTE",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_000",
+    "utterance": "¿Qué dice el anexo 1 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_001",
+    "utterance": "Según el pliego, ¿qué establece el anexo 1 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_002",
+    "utterance": "¿Qué dice el anexo 1 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_003",
+    "utterance": "Según el pliego, ¿qué establece el anexo 1 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_004",
+    "utterance": "¿Qué dice el anexo 1 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_005",
+    "utterance": "Según el pliego, ¿qué establece el anexo 1 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_006",
+    "utterance": "¿Qué dice el anexo 1 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_007",
+    "utterance": "Según el pliego, ¿qué establece el anexo 1 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_008",
+    "utterance": "¿Qué dice el anexo 1 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_009",
+    "utterance": "Según el pliego, ¿qué establece el anexo 1 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_010",
+    "utterance": "¿Qué dice el anexo 2 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_011",
+    "utterance": "Según el pliego, ¿qué establece el anexo 2 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_012",
+    "utterance": "¿Qué dice el anexo 2 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_013",
+    "utterance": "Según el pliego, ¿qué establece el anexo 2 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_014",
+    "utterance": "¿Qué dice el anexo 2 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_015",
+    "utterance": "Según el pliego, ¿qué establece el anexo 2 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_016",
+    "utterance": "¿Qué dice el anexo 2 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_017",
+    "utterance": "Según el pliego, ¿qué establece el anexo 2 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_018",
+    "utterance": "¿Qué dice el anexo 2 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_019",
+    "utterance": "Según el pliego, ¿qué establece el anexo 2 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_020",
+    "utterance": "¿Qué dice el anexo 3 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_021",
+    "utterance": "Según el pliego, ¿qué establece el anexo 3 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_022",
+    "utterance": "¿Qué dice el anexo 3 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_023",
+    "utterance": "Según el pliego, ¿qué establece el anexo 3 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_024",
+    "utterance": "¿Qué dice el anexo 3 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_025",
+    "utterance": "Según el pliego, ¿qué establece el anexo 3 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_026",
+    "utterance": "¿Qué dice el anexo 3 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_027",
+    "utterance": "Según el pliego, ¿qué establece el anexo 3 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_028",
+    "utterance": "¿Qué dice el anexo 3 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_029",
+    "utterance": "Según el pliego, ¿qué establece el anexo 3 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_030",
+    "utterance": "¿Qué dice el anexo 4 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_031",
+    "utterance": "Según el pliego, ¿qué establece el anexo 4 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_032",
+    "utterance": "¿Qué dice el anexo 4 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_033",
+    "utterance": "Según el pliego, ¿qué establece el anexo 4 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_034",
+    "utterance": "¿Qué dice el anexo 4 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_035",
+    "utterance": "Según el pliego, ¿qué establece el anexo 4 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_036",
+    "utterance": "¿Qué dice el anexo 4 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_037",
+    "utterance": "Según el pliego, ¿qué establece el anexo 4 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_038",
+    "utterance": "¿Qué dice el anexo 4 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_039",
+    "utterance": "Según el pliego, ¿qué establece el anexo 4 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_040",
+    "utterance": "¿Qué dice el anexo 5 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_041",
+    "utterance": "Según el pliego, ¿qué establece el anexo 5 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_042",
+    "utterance": "¿Qué dice el anexo 5 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_043",
+    "utterance": "Según el pliego, ¿qué establece el anexo 5 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_044",
+    "utterance": "¿Qué dice el anexo 5 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_045",
+    "utterance": "Según el pliego, ¿qué establece el anexo 5 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_046",
+    "utterance": "¿Qué dice el anexo 5 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_047",
+    "utterance": "Según el pliego, ¿qué establece el anexo 5 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_048",
+    "utterance": "¿Qué dice el anexo 5 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_049",
+    "utterance": "Según el pliego, ¿qué establece el anexo 5 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_050",
+    "utterance": "¿Qué dice el anexo 7 sobre garantías en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_051",
+    "utterance": "Según el pliego, ¿qué establece el anexo 7 sobre garantías?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_052",
+    "utterance": "¿Qué dice el anexo 7 sobre solvencia en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_053",
+    "utterance": "Según el pliego, ¿qué establece el anexo 7 sobre solvencia?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_054",
+    "utterance": "¿Qué dice el anexo 7 sobre cronograma en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_055",
+    "utterance": "Según el pliego, ¿qué establece el anexo 7 sobre cronograma?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_056",
+    "utterance": "¿Qué dice el anexo 7 sobre muestras en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_057",
+    "utterance": "Según el pliego, ¿qué establece el anexo 7 sobre muestras?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_058",
+    "utterance": "¿Qué dice el anexo 7 sobre penalizaciones en las bases?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "bases_059",
+    "utterance": "Según el pliego, ¿qué establece el anexo 7 sobre penalizaciones?",
+    "expected_intent": "PREGUNTAR_BASES",
+    "context": {},
+    "sample_bad_response": "Estado: COMPLIANCE_GATE_BLOCKING — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_000",
+    "utterance": "45250",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_001",
+    "utterance": "$45,250.00",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_002",
+    "utterance": "45250 mxn",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_003",
+    "utterance": "1234.56",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_004",
+    "utterance": "0.85",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_005",
+    "utterance": "Zona A 45250",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_006",
+    "utterance": "concepto A; 1200",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_007",
+    "utterance": "1200.00",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_008",
+    "utterance": "no aplica",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_009",
+    "utterance": "N/A",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_010",
+    "utterance": "45250 por favor",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_011",
+    "utterance": "te paso 9876",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_012",
+    "utterance": "9876.50",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_013",
+    "utterance": "150000",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "eco_pending_014",
+    "utterance": "$1,500.00",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": true,
+      "has_any_pending": true,
+      "current_pending_type": "economic_price"
+    },
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "profile_pending_000",
+    "utterance": "RFC123456789",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": false,
+      "has_any_pending": true,
+      "current_pending_type": "profile_field"
+    },
+    "sample_bad_response": ""
+  },
+  {
+    "case_id": "profile_pending_001",
+    "utterance": "mi rfc es ABC123456XYZ",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": false,
+      "has_any_pending": true,
+      "current_pending_type": "profile_field"
+    },
+    "sample_bad_response": ""
+  },
+  {
+    "case_id": "profile_pending_002",
+    "utterance": "5551234567",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": false,
+      "has_any_pending": true,
+      "current_pending_type": "profile_field"
+    },
+    "sample_bad_response": ""
+  },
+  {
+    "case_id": "profile_pending_003",
+    "utterance": "contacto@empresa.com.mx",
+    "expected_intent": "RESPONDER_PENDIENTE",
+    "context": {
+      "has_economic_pending": false,
+      "has_any_pending": true,
+      "current_pending_type": "profile_field"
+    },
+    "sample_bad_response": ""
+  },
+  {
+    "case_id": "unknown_000",
+    "utterance": "hola",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_001",
+    "utterance": "buenos dias",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_002",
+    "utterance": "gracias",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_003",
+    "utterance": "perfecto",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_004",
+    "utterance": "entendido",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_005",
+    "utterance": "👍",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_006",
+    "utterance": "si",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_007",
+    "utterance": "sí",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_008",
+    "utterance": "ok gracias",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_009",
+    "utterance": "muchas gracias",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_010",
+    "utterance": "bye",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_011",
+    "utterance": "saludos",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_012",
+    "utterance": "excelente",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_013",
+    "utterance": "de nada",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "unknown_014",
+    "utterance": "listo gracias",
+    "expected_intent": "UNKNOWN",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  }
+]
