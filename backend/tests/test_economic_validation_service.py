@@ -43,6 +43,7 @@ async def test_refresh_economic_validations_for_session():
         def __init__(self):
             self.get_session = AsyncMock(side_effect=lambda sid: store.get(sid))
             self.save_session = AsyncMock(side_effect=lambda sid, data: store.update({sid: data}) or True)
+            self.get_line_items_for_session = AsyncMock(return_value=[])
 
     mem = Mem()
     out = await refresh_economic_validations_for_session(mem, "sx")
