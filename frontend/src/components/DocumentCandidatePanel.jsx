@@ -5,7 +5,7 @@ import {
     FileText, CheckCircle2, AlertCircle, HelpCircle, 
     MessageSquare, ChevronRight, Search, FileCheck, Loader2
 } from 'lucide-react';
-import ForensicCard from './ForensicCard';
+import { buildStableReactKey } from '../utils/stableReactKey.js';
 
 /**
  * Panel de Documentos Detectados (Fast-Track)
@@ -99,32 +99,32 @@ const DocumentCandidatePanel = ({
         );
     }
 
-    const slugKey = (s) =>
-        String(s || '')
-            .toLowerCase()
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .replace(/[^a-z0-9]+/g, '_')
-            .replace(/^_|_$/g, '')
-            .slice(0, 64) || 'item';
-
     const renderDocumentCard = (doc, idx, categoryLabel) => {
         const isToGenerate = doc.tipo === 'generar' || doc.tipo_accion_final === 'generar';
         const isPhysical = doc.tipo === 'presentar_fisico' || doc.tipo_accion_final === 'presentar_fisico';
         const nombre = doc.nombre_canonico || doc.nombre;
-        const cardKey = `candidate-${slugKey(categoryLabel)}-${idx}-${slugKey(
-            doc.id || doc.document_id || nombre
-        )}`;
+        const cardKey = buildStableReactKey({
+            prefix: 'candidate',
+            scope: categoryLabel,
+            index: idx,
+            item: doc,
+            identityFields: [
+                'id',
+                'document_id',
+                'nombre_canonico',
+                'nombre',
+                'numero_anexo',
+                'tipo',
+                'tipo_accion_final',
+                'snippet_representativo',
+                'evidence_snippet',
+            ],
+        });
         
         const evidencia = doc.snippet_representativo || doc.evidence_snippet;
         const conf = doc.confidence ?? 0.7;
         const numItems = doc.items_fusionados ?? 1;
 
-        if (filter && !nombre.toLowerCase().includes(filter.toLowerCase()) && 
-            !(categoryLabel && categoryLabel.toLowerCase().includes(filter.toLowerCase()))) {
-            return null;
-        }
-        
         return (
             <div 
                 key={cardKey}
@@ -269,9 +269,17 @@ const DocumentCandidatePanel = ({
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                {candidatesArray.map((doc, idx) =>
-                    renderDocumentCard(doc, idx, 'Expediente empresarial')
-                )}
+                {candidatesArray
+                    .map((doc, idx) => ({ doc, idx }))
+                    .filter(({ doc }) => {
+                        if (!filter) return true;
+                        const nombre = doc.nombre_canonico || doc.nombre || '';
+                        return (
+                            nombre.toLowerCase().includes(filter.toLowerCase())
+                            || 'Expediente empresarial'.toLowerCase().includes(filter.toLowerCase())
+                        );
+                    })
+                    .map(({ doc, idx }) => renderDocumentCard(doc, idx, 'Expediente empresarial'))}
             </div>
         </div>
     );

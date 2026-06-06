@@ -6,6 +6,7 @@ import {
     Copy, DownloadCloud, FileCheck, Info, Trash2, Eraser, RefreshCw, Paperclip
 } from 'lucide-react';
 import axios from 'axios';
+import { buildStableReactKey } from './utils/stableReactKey.js';
 import DeliveryPanel from './components/DeliveryPanel';
 import SubmissionChecklistPanel from './components/SubmissionChecklistPanel';
 import CriticalDatesList from './components/CriticalDatesList';
@@ -686,7 +687,13 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         {visibleCompliance.map((c, i) => {
-                            const cardKey = `${activeZoneTab}-${i}-${c.id || ''}`;
+                            const cardKey = buildStableReactKey({
+                                prefix: 'compliance',
+                                scope: activeZoneTab,
+                                index: i,
+                                item: c,
+                                identityFields: ['id', 'tipo', 'page', 'zona_origen', 'bucketKey', 'agent_id', 'snippet'],
+                            });
                             return (
                                 <ForensicCard
                                     key={cardKey}
@@ -720,7 +727,13 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         {otrosHallazgos.map((c, i) => {
-                            const cardKey = `otros-${i}-${c.id || ''}`;
+                            const cardKey = buildStableReactKey({
+                                prefix: 'otros',
+                                scope: 'hallazgos',
+                                index: i,
+                                item: c,
+                                identityFields: ['id', 'tipo', 'page', 'zona_origen', 'bucketKey', 'agent_id', 'snippet'],
+                            });
                             return (
                                 <ForensicCard
                                     key={cardKey}

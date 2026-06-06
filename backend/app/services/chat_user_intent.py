@@ -65,6 +65,15 @@ def is_bare_generar_ambiguous(query: str) -> bool:
             "continuar",
             "continua",
             "sigue",
+            "procede",
+            "hazlo",
+            "siguiente",
+            "confirmo",
+            "simon",
+            "sip",
+            "mandale",
+            "dale con todo",
+            "haz lo",
         }
     )
     if q in bare:
@@ -173,13 +182,37 @@ def is_status_query(query: str) -> bool:
         "en que paso vamos",
         "cual es el siguiente paso",
         "siguiente paso",
+        "y ahora",
+        "ahora que",
+        "que procede",
+        "como sigo",
+        "como continuo",
+        "cuanto falta",
+        "todavia falta",
+        "aun falta",
+        "que toca",
+        "y luego",
+        "que sigue despues",
+        "en que estamos",
+        "resumen rapido",
+        "resumen del avance",
     )
     return any(m in q for m in status_markers)
 
 
 def is_help_query(query: str) -> bool:
     q = normalize_for_intent(query)
-    if q in ("ayuda", "help", "auxilio"):
+    if q in (
+        "ayuda",
+        "help",
+        "auxilio",
+        "empezar",
+        "iniciar",
+        "arrancar",
+        "comenzar",
+        "orientame",
+        "guiame",
+    ):
         return True
     if len(q) < 8:
         return False
@@ -200,6 +233,19 @@ def is_help_query(query: str) -> bool:
         "estoy confundido",
         "no me queda claro",
         "por donde empezar",
+        "y ahora que hago",
+        "no se como empezar",
+        "no se como continuar",
+        "que hago con esto",
+        "por donde empiezo",
+        "orientame",
+        "guiame",
+        "explicame el proceso",
+        "que es lo primero",
+        "como funciona esto",
+        "no se usar esto",
+        "no se como empezar",
+        "no se como continuar",
         "ayuda",
         "help",
     )

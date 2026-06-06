@@ -5,6 +5,7 @@ import {
     FileText, AlertCircle, HelpCircle, ChevronRight, Search, FileCheck, Sparkles, Loader2,
 } from 'lucide-react';
 import { countActionableDeliverables } from '../utils/auditSummary';
+import { buildStableReactKey } from '../utils/stableReactKey.js';
 
 /**
  * Inventario previo a la generación: formatos y anexos del pliego (GET /pliego-formats-panel).
@@ -82,15 +83,6 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
         );
     }
 
-    const slugKey = (s) =>
-        String(s || '')
-            .toLowerCase()
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .replace(/[^a-z0-9]+/g, '_')
-            .replace(/^_|_$/g, '')
-            .slice(0, 64) || 'item';
-
     const renderDocumentCard = (doc, idx, categoryLabel) => {
         const isToGenerate =
             doc.tipo === 'generar'
@@ -99,18 +91,27 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
         const isPhysical =
             doc.tipo === 'presentar_fisico' || doc.tipo_accion_final === 'presentar_fisico';
         const nombre = doc.nombre_canonico || doc.nombre;
-        const cardKey = `fmt-${slugKey(categoryLabel)}-${idx}-${slugKey(doc.id || doc.document_id || nombre)}`;
+        const cardKey = buildStableReactKey({
+            prefix: 'fmt',
+            scope: categoryLabel,
+            index: idx,
+            item: doc,
+            identityFields: [
+                'id',
+                'document_id',
+                'nombre_canonico',
+                'nombre',
+                'numero_anexo',
+                'tipo',
+                'tipo_accion_final',
+                'tipo_accion_propuesto',
+                'snippet_representativo',
+                'evidence_snippet',
+            ],
+        });
         const evidencia = doc.snippet_representativo || doc.evidence_snippet;
         const conf = doc.confidence ?? 0.7;
         const numItems = doc.items_fusionados ?? 1;
-
-        if (
-            filter
-            && !nombre.toLowerCase().includes(filter.toLowerCase())
-            && !(categoryLabel && categoryLabel.toLowerCase().includes(filter.toLowerCase()))
-        ) {
-            return null;
-        }
 
         const actionLabel = isToGenerate
             ? 'A GENERAR'
@@ -329,6 +330,23 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
         );
     };
 
+    const matchesFilter = (doc, categoryLabel) => {
+        if (!filter) return true;
+        const nombre = doc.nombre_canonico || doc.nombre || '';
+        return (
+            nombre.toLowerCase().includes(filter.toLowerCase())
+            || (categoryLabel && categoryLabel.toLowerCase().includes(filter.toLowerCase()))
+        );
+    };
+
+    let consolidatedListIndex = 0;
+    const renderFilteredCard = (doc, categoryLabel) => {
+        if (!matchesFilter(doc, categoryLabel)) return null;
+        const card = renderDocumentCard(doc, consolidatedListIndex, categoryLabel);
+        consolidatedListIndex += 1;
+        return card;
+    };
+
     const generarCount = isConsolidated
         ? [
             ...(rawFormats.sobre_1_tecnico || []),
@@ -409,8 +427,8 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
                                 >
                                     📂 SOBRE 1: PROPUESTA TÉCNICA
                                 </h5>
-                                {rawFormats.sobre_1_tecnico.map((doc, idx) =>
-                                    renderDocumentCard(doc, idx, 'Propuesta Técnica'),
+                                {rawFormats.sobre_1_tecnico.map((doc) =>
+                                    renderFilteredCard(doc, 'Propuesta Técnica'),
                                 )}
                             </div>
                         )}
@@ -427,8 +445,8 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
                                 >
                                     💰 SOBRE 2: PROPUESTA ECONÓMICA
                                 </h5>
-                                {rawFormats.sobre_2_economico.map((doc, idx) =>
-                                    renderDocumentCard(doc, idx, 'Propuesta Económica'),
+                                {rawFormats.sobre_2_economico.map((doc) =>
+                                    renderFilteredCard(doc, 'Propuesta Económica'),
                                 )}
                             </div>
                         )}
@@ -445,8 +463,8 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
                                 >
                                     ⚖️ REQUISITOS LEGALES
                                 </h5>
-                                {rawFormats.requisitos_legales.map((doc, idx) =>
-                                    renderDocumentCard(doc, idx, 'Documentación Legal'),
+                                {rawFormats.requisitos_legales.map((doc) =>
+                                    renderFilteredCard(doc, 'Documentación Legal'),
                                 )}
                             </div>
                         )}
@@ -463,17 +481,18 @@ const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId,
                                 >
                                     ⚠️ OTROS REQUISITOS CRÍTICOS
                                 </h5>
-                                {rawFormats.otros_requisitos_criticos.map((doc, idx) =>
-                                    renderDocumentCard(doc, idx, 'Requisito General'),
+                                {rawFormats.otros_requisitos_criticos.map((doc) =>
+                                    renderFilteredCard(doc, 'Requisito General'),
                                 )}
                             </div>
                         )}
                     </>
                 ) : (
                     <div>
-                        {candidatesArray.map((doc, idx) =>
-                            renderDocumentCard(doc, idx, 'Formato / Anexo'),
-                        )}
+                        {candidatesArray
+                            .map((doc, idx) => ({ doc, idx }))
+                            .filter(({ doc }) => matchesFilter(doc, 'Formato / Anexo'))
+                            .map(({ doc, idx }) => renderDocumentCard(doc, idx, 'Formato / Anexo'))}
                     </div>
                 )}
             </div>

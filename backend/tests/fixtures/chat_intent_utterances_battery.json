@@ -1782,5 +1782,362 @@
     "expected_intent": "UNKNOWN",
     "context": {},
     "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_000",
+    "utterance": "y ahora",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_001",
+    "utterance": "y ahora?",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_002",
+    "utterance": "ahora que",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_003",
+    "utterance": "que procede",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_004",
+    "utterance": "como sigo",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_005",
+    "utterance": "como continuo",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_006",
+    "utterance": "cuanto falta",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_007",
+    "utterance": "todavia falta algo",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_008",
+    "utterance": "aun falta algo",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_009",
+    "utterance": "que toca ahora",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_010",
+    "utterance": "y luego que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_011",
+    "utterance": "listo que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_012",
+    "utterance": "ok que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_013",
+    "utterance": "va que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_014",
+    "utterance": "terminamos esto que sigue",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_015",
+    "utterance": "en que estamos",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_016",
+    "utterance": "como vamos hasta ahora",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_017",
+    "utterance": "dame el estatus",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_018",
+    "utterance": "resumen rapido",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_status_019",
+    "utterance": "resumen rápido del avance",
+    "expected_intent": "VER_ESTADO",
+    "context": {},
+    "sample_bad_response": "Estado: ANALYSIS_COMPLETED — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_000",
+    "utterance": "empezar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_001",
+    "utterance": "iniciar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_002",
+    "utterance": "arrancar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_003",
+    "utterance": "comenzar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_004",
+    "utterance": "y ahora que hago",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_005",
+    "utterance": "no se como empezar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_006",
+    "utterance": "no se como continuar",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_007",
+    "utterance": "que hago con esto",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_008",
+    "utterance": "por donde empiezo",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_009",
+    "utterance": "orientame",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_010",
+    "utterance": "oríentame",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_011",
+    "utterance": "guiame",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_012",
+    "utterance": "guíame",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_013",
+    "utterance": "explicame el proceso",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_014",
+    "utterance": "explícame el proceso",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_015",
+    "utterance": "que es lo primero",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_016",
+    "utterance": "qué es lo primero",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_017",
+    "utterance": "como funciona esto",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_018",
+    "utterance": "cómo funciona esto",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_019",
+    "utterance": "no se usar esto",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_help_020",
+    "utterance": "no sé usar esto",
+    "expected_intent": "AYUDA",
+    "context": {},
+    "sample_bad_response": "Estado: IDLE — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_000",
+    "utterance": "simon",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_001",
+    "utterance": "sip",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_002",
+    "utterance": "confirmo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_003",
+    "utterance": "hazlo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_004",
+    "utterance": "haz lo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_005",
+    "utterance": "procede",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_006",
+    "utterance": "mandale",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_007",
+    "utterance": "mándale",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_008",
+    "utterance": "dale con todo",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "demo_disambig_009",
+    "utterance": "siguiente",
+    "expected_intent": "DESAMBIGUAR_GENERAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_ECONOMIC_PROPOSAL — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   }
 ]

@@ -326,6 +326,69 @@ def build_chat_intent_battery() -> List[ChatIntentBatteryCase]:
     ]
     cases.extend(_expand("unknown", unknown, "UNKNOWN"))
 
+    demo_status = [
+        "y ahora",
+        "y ahora?",
+        "ahora que",
+        "que procede",
+        "como sigo",
+        "como continuo",
+        "cuanto falta",
+        "todavia falta algo",
+        "aun falta algo",
+        "que toca ahora",
+        "y luego que sigue",
+        "listo que sigue",
+        "ok que sigue",
+        "va que sigue",
+        "terminamos esto que sigue",
+        "en que estamos",
+        "como vamos hasta ahora",
+        "dame el estatus",
+        "resumen rapido",
+        "resumen rápido del avance",
+    ]
+    cases.extend(_expand("demo_status", demo_status, "VER_ESTADO", bad_code="ANALYSIS_COMPLETED"))
+
+    demo_help = [
+        "empezar",
+        "iniciar",
+        "arrancar",
+        "comenzar",
+        "y ahora que hago",
+        "no se como empezar",
+        "no se como continuar",
+        "que hago con esto",
+        "por donde empiezo",
+        "orientame",
+        "oríentame",
+        "guiame",
+        "guíame",
+        "explicame el proceso",
+        "explícame el proceso",
+        "que es lo primero",
+        "qué es lo primero",
+        "como funciona esto",
+        "cómo funciona esto",
+        "no se usar esto",
+        "no sé usar esto",
+    ]
+    cases.extend(_expand("demo_help", demo_help, "AYUDA", bad_code="IDLE"))
+
+    demo_disambig = [
+        "simon",
+        "sip",
+        "confirmo",
+        "hazlo",
+        "haz lo",
+        "procede",
+        "mandale",
+        "mándale",
+        "dale con todo",
+        "siguiente",
+    ]
+    cases.extend(_expand("demo_disambig", demo_disambig, "DESAMBIGUAR_GENERAR"))
+
     return cases
 
 
