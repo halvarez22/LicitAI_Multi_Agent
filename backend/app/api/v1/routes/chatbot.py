@@ -6,6 +6,7 @@ from app.agents.mcp_context import MCPContextManager
 from app.api.deps import get_connected_memory
 from app.contracts.agent_contracts import AgentInput
 from app.core.logging_config import get_logger
+from app.services.job_service import get_active_session_job
 
 logger = get_logger("licitai.chatbot")
 
@@ -26,27 +27,29 @@ async def ask_chatbot(request: ChatbotRequest):
     safe_session_id = request.session_id.strip().lower().replace("-", "_")
     
     try:
+        active_job = get_active_session_job(safe_session_id)
+        analysis_running = active_job.get("status") == "RUNNING"
+
         # ── HITO 11: Auto-Curación de Vectores (VectorSyncService) ───────────
-        # Verifica coherencia entre Postgres (ANALYZED) y ChromaDB (chunks).
-        # Si detecta desincronización (0 chunks para un doc ANALYZED), re-indexa
-        # silenciosamente desde el texto guardado. Idempotente y universal.
-        try:
-            from app.services.vector_sync_service import VectorSyncService
-            sync_result = await VectorSyncService().ensure_session_indexed(memory, safe_session_id)
-            if sync_result.get("healed"):
-                logger.warning(
-                    "vector_sync_auto_healed",
+        # Omitir durante análisis pesado en background: Chroma sync bloquea el loop
+        # y deja colgados listados de fuentes / estado de job en la UI.
+        if not analysis_running:
+            try:
+                from app.services.vector_sync_service import VectorSyncService
+                sync_result = await VectorSyncService().ensure_session_indexed(memory, safe_session_id)
+                if sync_result.get("healed"):
+                    logger.warning(
+                        "vector_sync_auto_healed",
+                        session_id=safe_session_id,
+                        docs_healed=sync_result.get("docs_healed"),
+                        pages_indexed=sync_result.get("pages_indexed"),
+                    )
+            except Exception as _sync_exc:
+                logger.error(
+                    "vector_sync_guard_failed",
                     session_id=safe_session_id,
-                    docs_healed=sync_result.get("docs_healed"),
-                    pages_indexed=sync_result.get("pages_indexed"),
+                    error=str(_sync_exc)[:200],
                 )
-        except Exception as _sync_exc:
-            # La auto-curación NUNCA bloquea al usuario — falla silenciosa
-            logger.error(
-                "vector_sync_guard_failed",
-                session_id=safe_session_id,
-                error=str(_sync_exc)[:200],
-            )
         # ─────────────────────────────────────────────────────────────────────
 
         agent_input = AgentInput(
@@ -58,6 +61,7 @@ async def ask_chatbot(request: ChatbotRequest):
                 "uploaded_doc_id": request.doc_id,
             },
             mode="full",
+            job_id=active_job.get("job_id") if analysis_running else None,
         )
         result = await rag_agent.process(agent_input)
         reply_data = result.data if result.data is not None else {}

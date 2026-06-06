@@ -48,8 +48,9 @@ async def test_intake_planner_prioriza_knockouts_primero():
     out = await agent.process(inp)
     assert out.status == AgentStatus.SUCCESS
     qs = out.data.get("questions") or []
-    assert len(qs) >= 3
-    assert qs[0]["priority"] == "BLOQUEANTE"
+    vb = out.data.get("viability_brechas") or []
+    assert len(qs) >= 2
+    assert vb[0]["priority"] == "BLOQUEANTE"
     assert out.data["summary"]["blocking_count"] >= 1
 
 
@@ -74,9 +75,10 @@ async def test_intake_planner_deduplica_preguntas_parecidas():
         },
     )
     out = await agent.process(inp)
-    qs = out.data.get("questions") or []
-    # Ambas brechas colapsan por field_target similar
-    assert len(qs) == 1
+    vb = out.data.get("viability_brechas") or []
+    # Ambas brechas colapsan por field_target similar (panel Go/No-Go, no chat)
+    assert len(vb) == 1
+    assert len(out.data.get("questions") or []) == 0
 
 
 @pytest.mark.asyncio

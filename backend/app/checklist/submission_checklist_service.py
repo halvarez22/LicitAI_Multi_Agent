@@ -3,6 +3,7 @@ Persistencia y reglas de negocio del checklist de hitos (sesión → submission_
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from app.core.logging_config import get_logger
 from datetime import datetime
@@ -64,7 +65,23 @@ async def upsert_checklist_from_cronograma(
     if isinstance(prev_block, dict) and isinstance(prev_block.get("hitos"), list):
         prev_hitos = [h for h in prev_block["hitos"] if isinstance(h, dict)]
 
-    nuevos_raw = build_hitos_from_cronograma(cronograma)
+    cronograma_merged = cronograma
+    try:
+        from app.services.cronograma_bases_extract import merge_cronograma_with_bases
+        from app.services.junta_bases_corpus import build_bases_corpus
+
+        docs = await memory.get_documents(session_id) or []
+        corpus = build_bases_corpus(session_id, docs, session_state=session)
+        if (corpus.combined or "").strip():
+            cronograma_merged = merge_cronograma_with_bases(cronograma, corpus.combined)
+    except Exception as exc:
+        logger.warning(
+            "checklist_cronograma_merge_failed session=%s err=%s",
+            session_id,
+            str(exc)[:200],
+        )
+
+    nuevos_raw = build_hitos_from_cronograma(cronograma_merged)
     if merge and prev_hitos:
         merged = merge_hitos_preservar_completados(nuevos_raw, prev_hitos)
     else:
@@ -172,11 +189,60 @@ async def ensure_session_cronograma_and_checklist(
         break
 
     if cron is None and isinstance(session.get("submission_checklist"), dict):
-        return await get_submission_checklist(memory, session_id, auto_sync=False)
+        # Sin cronograma en analysis pero checklist persistido: devolver tal cual.
+        # refresh_placeholders=False evita reentrar aquí vía get_submission_checklist (RecursionError).
+        return await get_submission_checklist(
+            memory, session_id, auto_sync=False, refresh_placeholders=False
+        )
 
-    if cronograma_needs_enrichment(cron):
-        enriched = enrich_cronograma_from_rag(session_id, cron)
-        if cronograma_improved(cron, enriched):
+    bases_text = ""
+    try:
+        from app.services.junta_bases_corpus import build_bases_corpus
+
+        docs = await memory.get_documents(session_id) or []
+        corpus = build_bases_corpus(session_id, docs, session_state=session)
+        bases_text = corpus.combined
+    except Exception as exc:
+        logger.warning(
+            "cronograma_bases_corpus_failed session=%s err=%s",
+            session_id,
+            str(exc)[:200],
+        )
+
+    if cron is not None and bases_text.strip():
+        from app.services.cronograma_bases_extract import merge_cronograma_with_bases
+        from app.services.cronograma_enrichment_service import cronograma_dates_changed
+
+        merged = merge_cronograma_with_bases(cron, bases_text)
+        if cronograma_improved(cron, merged) or cronograma_dates_changed(cron, merged):
+            await _persist_cronograma_in_session(memory, session_id, merged)
+            cron = merged
+
+    if cron is not None and cronograma_needs_enrichment(cron):
+        from app.config.settings import settings
+        from app.services.cronograma_enrichment_service import cronograma_dates_changed
+
+        timeout_s = float(settings.CRONOGRAMA_ENRICHMENT_TIMEOUT_S or 12.0)
+        try:
+            enriched = await asyncio.wait_for(
+                asyncio.to_thread(
+                    enrich_cronograma_from_rag,
+                    session_id,
+                    cron,
+                    bases_text=bases_text or None,
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "cronograma_enrichment_timeout",
+                session_id=session_id,
+                timeout_s=timeout_s,
+            )
+            return await get_submission_checklist(
+                memory, session_id, auto_sync=False, refresh_placeholders=False
+            )
+        if cronograma_improved(cron, enriched) or cronograma_dates_changed(cron, enriched):
             await _persist_cronograma_in_session(memory, session_id, enriched)
             logger.info(
                 "cronograma_enriched_from_rag",
@@ -188,6 +254,41 @@ async def ensure_session_cronograma_and_checklist(
     return await get_submission_checklist(
         memory, session_id, auto_sync=True, refresh_placeholders=False
     )
+
+
+def _checklist_has_untrusted_dates(block: Dict[str, Any], bases_text: str) -> bool:
+    """True si algún hito tiene año no verificable en el corpus (p. ej. 2023 en bases 2026)."""
+    from app.services.cronograma_bases_extract import _cronograma_year_unsupported_by_corpus
+
+    if not str(bases_text or "").strip():
+        return False
+    hitos = block.get("hitos") if isinstance(block.get("hitos"), list) else []
+    for h in hitos:
+        if not isinstance(h, dict):
+            continue
+        raw = str(h.get("fecha_texto_raw") or h.get("nombre") or "")
+        if _cronograma_year_unsupported_by_corpus(raw, bases_text):
+            return True
+    return False
+
+
+def checklist_ready_without_enrichment(
+    session: Dict[str, Any],
+    *,
+    bases_text: str = "",
+) -> bool:
+    """
+    True si el checklist persistido puede servirse sin enrichment RAG del cronograma.
+    Usado por GET /dictamen para evitar trabajo síncrono pesado en el worker único.
+    """
+    block = session.get(SESSION_KEY)
+    if not isinstance(block, dict) or not block.get("hitos"):
+        return False
+    if _checklist_has_placeholder_dates(block):
+        return False
+    if _checklist_has_untrusted_dates(block, bases_text):
+        return False
+    return True
 
 
 async def get_submission_checklist(
@@ -205,13 +306,34 @@ async def get_submission_checklist(
     if not session:
         return None
     block = session.get(SESSION_KEY)
+    bases_text = ""
+    try:
+        from app.services.junta_bases_corpus import build_bases_corpus
+
+        docs = await memory.get_documents(session_id) or []
+        corpus = build_bases_corpus(session_id, docs, session_state=session)
+        bases_text = corpus.combined or ""
+    except Exception:
+        pass
     if (
         refresh_placeholders
         and isinstance(block, dict)
         and block.get("hitos")
-        and _checklist_has_placeholder_dates(block)
+        and (
+            _checklist_has_placeholder_dates(block)
+            or _checklist_has_untrusted_dates(block, bases_text)
+        )
     ):
-        await ensure_session_cronograma_and_checklist(memory, session_id)
+        # Solo re-enriquecer si aún hay cronograma en el último análisis; si no, usar checklist persistido.
+        tasks = session.get("tasks_completed") or []
+        has_analysis_cron = any(
+            t.get("task") == "stage_completed:analysis"
+            and _cronograma_from_analysis_result(t.get("result")) is not None
+            for t in reversed(tasks)
+            if isinstance(t, dict)
+        )
+        if has_analysis_cron:
+            await ensure_session_cronograma_and_checklist(memory, session_id)
         session = await memory.get_session(session_id) or session
         block = session.get(SESSION_KEY)
     if isinstance(block, dict) and block.get("hitos"):

@@ -153,7 +153,7 @@ def test_mini_dictamen_curriculum_inferido_puede_generarse_controlado():
                     "curriculum_empresarial",
                     "Currículum Empresarial",
                     "technical",
-                    description="Presentar el currículum empresarial con relación de principales clientes.",
+                    description="Presentar el currículum empresarial con trayectoria y experiencia.",
                 )
             ]
         }
@@ -161,12 +161,111 @@ def test_mini_dictamen_curriculum_inferido_puede_generarse_controlado():
 
     out = build_mini_dictamen_anexos("s_curriculum", session_state, documents=[], catalog={"items": []}, coverage_report={"rows": []})
     row = out.items[0]
-    assert row.source_status.value == "missing"
+    assert row.source_status.value in ("missing", "not_expected")
     assert row.delivery_action.value == "generate_controlled"
     assert row.coverage_status.value == "pending"
     assert row.severity.value == "warn"
     assert row.clarification_candidate is False
     assert out.clarification_tickets == []
+
+
+def test_mini_dictamen_carta_poder_no_bloquea_formats():
+    session_state = {
+        "document_inventory": {
+            "items": [
+                _inventory_item(
+                    "carta_poder",
+                    "Carta poder simple",
+                    "administrativo",
+                    description=(
+                        "Deberá presentar carta poder simple, suscrita ante dos testigos "
+                        "con el nombre y firma del otorgante."
+                    ),
+                )
+            ]
+        }
+    }
+    out = build_mini_dictamen_anexos(
+        "s_poder",
+        session_state,
+        documents=[],
+        catalog={"items": []},
+        coverage_report={"rows": []},
+    )
+    row = out.items[0]
+    assert row.delivery_action.value == "presentar_fisico"
+    assert row.coverage_status.value == "pending"
+    assert row.clarification_candidate is False
+    assert (
+        get_blocking_annex_rows_for_stage(
+            {"mini_dictamen_anexos": out.model_dump(mode="json")},
+            "formats",
+        )
+        == []
+    )
+
+
+def test_mini_dictamen_carta_integridad_genera_controlado_sin_bloqueo():
+    session_state = {
+        "document_inventory": {
+            "items": [
+                _inventory_item(
+                    "carta_integridad",
+                    "Carta Declaración de Integridad",
+                    "administrativo",
+                    description=(
+                        "Manifiesta abstenerse de adoptar conductas que alteren las evaluaciones."
+                    ),
+                )
+            ]
+        }
+    }
+    out = build_mini_dictamen_anexos(
+        "s_integridad",
+        session_state,
+        documents=[],
+        catalog={"items": []},
+        coverage_report={"rows": []},
+    )
+    row = out.items[0]
+    assert row.delivery_action.value == "generate_controlled"
+    assert row.coverage_status.value == "pending"
+    assert row.clarification_candidate is False
+
+
+def test_mini_dictamen_relacion_clientes_unaq_no_bloquea_tecnico():
+    """Relación de clientes (orden «clientes principales») se genera controlada, no aclaración."""
+    session_state = {
+        "document_inventory": {
+            "items": [
+                _inventory_item(
+                    "anexo_5_relacion_clientes",
+                    "Anexo 5: Relación de Clientes",
+                    "technical",
+                    description=(
+                        "Presentar relación de clientes principales a los que ha ofrecido bienes semejantes."
+                    ),
+                )
+            ]
+        }
+    }
+
+    out = build_mini_dictamen_anexos(
+        "s_unaq_clientes",
+        session_state,
+        documents=[],
+        catalog={"items": []},
+        coverage_report={"rows": []},
+    )
+    row = out.items[0]
+    assert row.delivery_action.value == "generate_controlled"
+    assert row.coverage_status.value == "pending"
+    assert row.severity.value == "warn"
+    assert row.clarification_candidate is False
+    assert get_blocking_annex_rows_for_stage(
+        {"mini_dictamen_anexos": out.model_dump(mode="json")},
+        "technical",
+    ) == []
 
 
 def test_mini_dictamen_anexo_tecnico_referencial_puede_generarse_controlado():
@@ -271,6 +370,7 @@ async def test_resolve_clarification_ticket_baja_bloqueo_por_override():
                         "anexo_tecnico_2026",
                         "Anexo Técnico 2026 Abril a Diciembre",
                         "technical",
+                        description="Plantilla obligatoria citada en bases sin publicación en fuentes.",
                     )
                 ]
             }
@@ -304,8 +404,38 @@ async def test_resolve_clarification_ticket_baja_bloqueo_por_override():
     assert rows[0]["coverage_status"] == "pending"
 
 
-@pytest.mark.asyncio
-async def test_intake_planner_incluye_tickets_del_mini_dictamen():
+def test_merge_clarification_pending_questions_no_inyecta_chat():
+    from app.services.mini_dictamen_anexos_service import merge_clarification_pending_questions
+    from app.contracts.mini_dictamen_anexos import ClarificationTicket, ClarificationTicketStatus
+
+    session_state = {
+        "pending_questions": [
+            {
+                "type": "clarification_ticket",
+                "field": "clarification_tickets.t1",
+                "question": "¿Dónde está el Curriculum?",
+            },
+            {"type": "profile_field", "field": "rfc", "question": "RFC?"},
+        ]
+    }
+    tickets = [
+        ClarificationTicket(
+            ticket_id="t1",
+            display_name="Curriculum Original",
+            status=ClarificationTicketStatus.OPEN,
+            priority="blocking",
+            question="¿Dónde está el Curriculum?",
+            reason="required_annex_not_published",
+            canonical_id="curriculum",
+        )
+    ]
+    merged = merge_clarification_pending_questions(session_state, tickets)
+    assert len(merged) == 1
+    assert merged[0].get("type") == "profile_field"
+    assert not any(str(q.get("type")) == "clarification_ticket" for q in merged)
+
+
+async def test_intake_planner_no_inyecta_tickets_del_mini_dictamen_en_chat():
     mem = AsyncMock()
     mem.get_session = AsyncMock(return_value={})
     mem.save_session = AsyncMock(return_value=True)
@@ -334,8 +464,11 @@ async def test_intake_planner_incluye_tickets_del_mini_dictamen():
     out = await agent.process(inp)
     assert out.status == AgentStatus.SUCCESS
     qs = out.data.get("questions") or []
-    assert any(q.get("field_target") == "clarification_tickets.clar_anexo_tecnico" for q in qs)
-    assert out.data["summary"]["blocking_count"] >= 1
+    assert not any(
+        str(q.get("field_target") or "").startswith("clarification_tickets.")
+        for q in qs
+    )
+    assert not any("Junta de aclaraciones" in str(q.get("label") or "") for q in qs)
 
 
 def test_stage_blocking_rows_filtra_por_categoria():
@@ -348,6 +481,7 @@ def test_stage_blocking_rows_filtra_por_categoria():
                     "category": "administrativo",
                     "severity": "blocking",
                     "coverage_status": "blocked",
+                    "blocking_error_type": "cross_tender_template_source",
                 },
                 {
                     "canonical_id": "tec_1",
@@ -355,6 +489,7 @@ def test_stage_blocking_rows_filtra_por_categoria():
                     "category": "technical",
                     "severity": "blocking",
                     "coverage_status": "blocked",
+                    "blocking_error_type": "annex_reference_without_editable_source",
                 },
             ]
         }

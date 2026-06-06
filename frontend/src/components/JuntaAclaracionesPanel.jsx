@@ -27,6 +27,7 @@ const SOURCE_LABEL = {
     analyst_alert: 'Alerta bases',
     evidence_conflict: 'Inconsistencia bases/documentos',
     mini_dictamen: 'Anexo / plantilla',
+    thematic_bases: 'Detectado en bases',
     go_no_go: 'Go/No-Go',
     compliance: 'Compliance',
 };
@@ -35,7 +36,13 @@ const SOURCE_LABEL = {
  * Listado de preguntas para la convocante (junta de aclaraciones).
  * GET /sessions/{id}/junta-aclaraciones-questions
  */
-export default function JuntaAclaracionesPanel({ sessionId, companyId, syncKey, onAskExpert }) {
+export default function JuntaAclaracionesPanel({
+    sessionId,
+    companyId,
+    active = true,
+    syncKey,
+    onAskExpert,
+}) {
     const [expanded, setExpanded] = useState(true);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -52,6 +59,7 @@ export default function JuntaAclaracionesPanel({ sessionId, companyId, syncKey, 
                 const res = await axios.get(
                     `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/junta-aclaraciones-questions`,
                     {
+                        timeout: 30000,
                         params: {
                             ...(refresh ? { refresh: 'true' } : {}),
                             format: 'text',
@@ -80,8 +88,9 @@ export default function JuntaAclaracionesPanel({ sessionId, companyId, syncKey, 
     );
 
     useEffect(() => {
+        if (active === false || !sessionId) return;
         fetchQuestions(false);
-    }, [fetchQuestions, syncKey]);
+    }, [fetchQuestions, active, sessionId, syncKey]);
 
     const items = useMemo(() => {
         const raw = bundle?.items;

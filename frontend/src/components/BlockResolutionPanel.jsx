@@ -64,6 +64,7 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
             return;
         }
         setLoading(true);
+        setBlock(null);
         setErr(null);
         setInfo(null);
         try {
@@ -71,23 +72,20 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
                 params: { session_id: sessionId, company_id: companyId },
             });
             const body = res.data;
-            if (body?.success && body?.data?.capture_complete) {
-                const cap = body.data.capture_status || {};
+            const data = body?.data;
+            if (body?.success && data && data.ui_visible === false) {
                 setBlock(null);
-                setInfo(
-                    body.message ||
-                        `Cotización registrada (${cap.filled ?? '?'}/${cap.total ?? '?'} precios). Usa Generar propuesta en el panel.`
-                );
+                setInfo(null);
                 setErr(null);
                 return;
             }
-            if (!body?.success || !body?.data) {
-                const msg = body?.message || 'No hay bloque disponible en este momento.';
+            if (!body?.success || !data?.items?.length) {
                 setBlock(null);
-                setInfo(msg);
+                setInfo(null);
+                setErr(null);
                 return;
             }
-            resetForm(body.data);
+            resetForm(data);
             setInfo(null);
         } catch (e) {
             const msg = e?.response?.data?.detail || e?.message || 'Error al cargar el bloque.';
@@ -158,6 +156,10 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
         return null;
     }
 
+    if (!block?.items?.length) {
+        return null;
+    }
+
     return (
         <div style={cardStyle}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
@@ -181,17 +183,6 @@ export default function BlockResolutionPanel({ sessionId, companyId, onAfterSave
                 </button>
             </div>
 
-            {info && !block && (
-                <div
-                    style={{
-                        fontSize: '11px',
-                        color: info.includes('registrada') || info.includes('lista') ? '#86efac' : 'var(--text-muted)',
-                        lineHeight: 1.45,
-                    }}
-                >
-                    {info}
-                </div>
-            )}
             {err && (
                 <div
                     style={{

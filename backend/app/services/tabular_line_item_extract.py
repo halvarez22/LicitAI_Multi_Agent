@@ -49,6 +49,40 @@ def _norm_concepto(s: str) -> str:
     return t[:2000] if len(t) > 2000 else t
 
 
+def _line_item_dedupe_key(row: Dict[str, Any]) -> Tuple[str, float, float, str]:
+    """Clave estable para fusionar la misma partida en tablas/hojas repetidas (p. ej. DOCX)."""
+    try:
+        pu = round(float(row.get("precio_unitario") or 0.0), 4)
+    except (TypeError, ValueError):
+        pu = 0.0
+    try:
+        qty = round(float(row.get("cantidad") or 1.0), 4)
+    except (TypeError, ValueError):
+        qty = 1.0
+    concept = _norm_concepto(str(row.get("concepto_norm") or row.get("concepto_raw") or ""))
+    unit = re.sub(r"\s+", " ", str(row.get("unidad") or "").strip().lower())
+    return concept, pu, qty, unit
+
+
+def dedupe_tabular_line_items(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Elimina partidas duplicadas (mismo concepto, precio, cantidad y unidad).
+
+    Evita inflar ``excel_total`` en cuadratura cuando el DOCX repite la misma tabla.
+    """
+    out: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, float, float, str]] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        key = _line_item_dedupe_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
 def _norm_match_text(value: Any) -> str:
     """Normaliza texto para matching semántico de headers/celdas."""
     t = re.sub(r"\s+", " ", str(value or "").strip().lower())
@@ -664,7 +698,7 @@ def extract_line_items_from_excel_path(file_path: str, filename: str) -> List[Di
             rows_found = _extract_from_raw_layout(df_raw, sheet_name, filename)
 
         out.extend(rows_found)
-    return out
+    return dedupe_tabular_line_items(out)
 
 
 def extract_line_items_from_csv_path(file_path: str, filename: str) -> List[Dict[str, Any]]:
@@ -695,11 +729,11 @@ def extract_line_items_from_csv_path(file_path: str, filename: str) -> List[Dict
             rows_raw = _extract_from_raw_layout(df, "csv", filename)
             if rows_raw:
                 out.extend(rows_raw)
-                return out
+                return dedupe_tabular_line_items(out)
         except Exception as e:  # pragma: no cover - depende del archivo real
             tried.append(str(e))
             continue
-    return out
+    return dedupe_tabular_line_items(out)
 
 
 def extract_line_items_from_docx_path(file_path: str, filename: str) -> List[Dict[str, Any]]:
@@ -748,7 +782,7 @@ def extract_line_items_from_docx_path(file_path: str, filename: str) -> List[Dic
             if not df_raw.empty:
                 rows_found = _extract_from_raw_layout(df_raw, f"docx_table_{idx+1}", filename)
         out.extend(rows_found)
-    return out
+    return dedupe_tabular_line_items(out)
 
 
 def _extract_from_df(df: pd.DataFrame, sheet_name: str, filename: str) -> List[Dict[str, Any]]:

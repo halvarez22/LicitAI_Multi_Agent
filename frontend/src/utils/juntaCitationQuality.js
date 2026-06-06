@@ -37,6 +37,14 @@ const PATTERNS_CITA_COMPLETA = new Set([
     'explicit_conflict',
 ]);
 
+const PATTERNS_SOLO_DOCUMENTO = new Set([
+    'documento_sin_cita_bases',
+    'experience_years_conflict',
+    'unresolved_se_adjunta',
+    'format_placeholders',
+    'certification_cluster',
+]);
+
 /**
  * @param {object} item - ítem del bundle junta_aclaraciones_questions
  * @returns {keyof typeof CITATION_QUALITY_META}
@@ -52,7 +60,7 @@ export function resolveCitationQuality(item) {
     if (PATTERNS_CITA_COMPLETA.has(pattern)) {
         return CITATION_QUALITY.CITA_COMPLETA;
     }
-    if (pattern === 'documento_sin_cita_bases') {
+    if (PATTERNS_SOLO_DOCUMENTO.has(pattern) || prov.source === 'thematic_bases') {
         return CITATION_QUALITY.SOLO_DOCUMENTO;
     }
 

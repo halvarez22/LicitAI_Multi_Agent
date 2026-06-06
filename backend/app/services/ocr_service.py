@@ -108,17 +108,32 @@ class OCRServiceClient:
                         except Exception as remote_err:
                             print(f"⚠️ [OCR] Fallo al extraer página {page_num} vía microservicio remoto: {remote_err}")
                     
-                    # Si no se pudo obtener de forma remota, usar el extractor de visión nativo
+                    vlm_detail: Dict[str, Any] = {}
                     if not page_text_vision.strip():
-                        page_text_vision = await self.vision_extractor.extract_page_vision(file_path, page_num)
-                        
+                        vlm_detail = await self.vision_extractor.extract_page_vision_detail(
+                            file_path, page_num
+                        )
+                        page_text_vision = str(vlm_detail.get("text") or "")
+
                     if page_text_vision.strip():
-                        print(f"[*] [OCR] Página {page_num}/{total_pages} -> EXTRAÍDA VÍA VLM-OCR con éxito.")
-                        pages_extracted.append({
+                        method = (
+                            vlm_detail.get("method", "vlm_ocr_vision")
+                            if vlm_detail
+                            else "vlm_ocr_vision_remote"
+                        )
+                        qflags = list(vlm_detail.get("quality_flags") or []) if vlm_detail else []
+                        print(
+                            f"[*] [OCR] Página {page_num}/{total_pages} -> VLM-OCR "
+                            f"({method}, flags={qflags or 'ok'})."
+                        )
+                        page_row: Dict[str, Any] = {
                             "page": page_num,
                             "text": page_text_vision,
-                            "method": "vlm_ocr_vision"
-                        })
+                            "method": method,
+                        }
+                        if qflags:
+                            page_row["quality_flags"] = qflags
+                        pages_extracted.append(page_row)
                         full_text_parts.append(f"\n--- PÁGINA {page_num} ---\n{page_text_vision}\n")
                     else:
                         # Respaldo final si todo falla

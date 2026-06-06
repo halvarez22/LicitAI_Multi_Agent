@@ -56,27 +56,22 @@ async def preview_interaction_block(
             current_idx=cur,
         )
         if block is None:
-            if cap.get("capture_complete"):
-                return GenericResponse(
-                    success=True,
-                    message=(
-                        f"Cotización económica registrada ({cap.get('filled')}/{cap.get('total')} precios). "
-                        "Usa **Generar propuesta** — no hace falta rellenar el bloque manualmente."
-                    ),
-                    data={
-                        "capture_complete": True,
-                        "capture_status": cap,
-                    },
-                )
+            # No exponer mensajes técnicos en UI: el panel solo aparece si hay bloque editable.
             return GenericResponse(
-                success=False,
-                message="No hay bloque económico agrupable (pendientes insuficientes o cluster por debajo del mínimo).",
-                data={"capture_status": cap},
+                success=True,
+                message="",
+                data={
+                    "ui_visible": False,
+                    "capture_complete": bool(cap.get("capture_complete")),
+                    "capture_status": cap,
+                },
             )
+        payload = block.model_dump(mode="json")
+        payload["ui_visible"] = True
         return GenericResponse(
             success=True,
             message="Bloque generado.",
-            data=block.model_dump(mode="json"),
+            data=payload,
         )
     except Exception as exc:
         logger.exception(

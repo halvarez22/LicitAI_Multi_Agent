@@ -1,17 +1,65 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { API_BASE } from '../apiBase.js';
 import { 
     FileText, CheckCircle2, AlertCircle, HelpCircle, 
-    MessageSquare, ChevronRight, Search, FileCheck 
+    MessageSquare, ChevronRight, Search, FileCheck, Loader2
 } from 'lucide-react';
 import ForensicCard from './ForensicCard';
 
 /**
  * Panel de Documentos Detectados (Fast-Track)
- * Muestra la lista de entregables identificados por el orquestador antes de la generación.
+ * Carga credenciales empresariales vía GET /document-candidates-summary (sin dictamen completo).
  */
-const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessionId, companyId }) => {
+const DocumentCandidatePanel = ({
+    candidates: rawCandidatesProp,
+    onAskExpert,
+    sessionId,
+    companyId,
+    active = true,
+}) => {
     const [filter, setFilter] = useState('');
     const [expandedKey, setExpandedKey] = useState(null);
+    const [fetched, setFetched] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [fetchError, setFetchError] = useState(null);
+
+    useEffect(() => {
+        if (!active || !sessionId) return undefined;
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            setFetchError(null);
+            try {
+                const res = await axios.get(
+                    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/document-candidates-summary`,
+                    {
+                        timeout: 30000,
+                        params: companyId ? { company_id: companyId } : undefined,
+                    }
+                );
+                if (cancelled) return;
+                if (res.data?.success && res.data?.data?.corporate_physical_document_candidates) {
+                    setFetched(res.data.data.corporate_physical_document_candidates);
+                } else {
+                    setFetched(null);
+                    setFetchError(res.data?.message || 'Sin documentos detectados.');
+                }
+            } catch (e) {
+                if (!cancelled) {
+                    setFetched(null);
+                    setFetchError(e?.response?.data?.detail || e?.message || 'Error de red');
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [active, sessionId, companyId]);
+
+    const rawCandidates = fetched ?? rawCandidatesProp;
 
     // Solo credenciales empresariales en presentación física (lista plana).
     const isCorporatePhysical = rawCandidates?._meta?.filtered_corporate_physical_only === true;
@@ -27,12 +75,23 @@ const DocumentCandidatePanel = ({ candidates: rawCandidates, onAskExpert, sessio
             : (rawCandidates?.candidate_document_list || []);
     const actionableCount = candidatesArray.length;
 
+    if (loading) {
+        return (
+            <div style={{ padding: '40px', textAlign: 'center', opacity: 0.7 }}>
+                <Loader2 size={32} style={{ margin: '0 auto 12px', animation: 'spin 1s linear infinite' }} />
+                <p style={{ fontSize: '13px' }}>Cargando documentos detectados…</p>
+            </div>
+        );
+    }
+
     if (!candidatesArray.length) {
         return (
             <div style={{ padding: '40px', textAlign: 'center', opacity: 0.5 }}>
                 <FileText size={48} style={{ marginBottom: '16px', margin: '0 auto' }} />
                 <p style={{ fontSize: '14px' }}>
-                    {looksLikeLegacyConsolidated
+                    {fetchError
+                        ? fetchError
+                        : looksLikeLegacyConsolidated
                         ? 'Vista antigua detectada (anexos del pliego). Recarga con Ctrl+F5 o abre de nuevo esta pestaña para cargar credenciales empresariales (IMSS, SAT, actas, etc.).'
                         : 'No se detectaron credenciales empresariales para presentación física. Revisa que las bases estén indexadas o pulsa «Actualizar análisis».'}
                 </p>

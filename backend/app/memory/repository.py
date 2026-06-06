@@ -103,6 +103,17 @@ class MemoryRepository(ABC):
     async def delete_company(self, company_id: str) -> bool:
         """Elimina una empresa"""
         pass
+
+    @abstractmethod
+    async def patch_company_state(
+        self,
+        company_id: str,
+        *,
+        docs_patch: Optional[Dict[str, Dict]] = None,
+        master_profile_patch: Optional[Dict] = None,
+    ) -> Optional[Dict]:
+        """Fusiona parches sobre el estado persistido (cargas/análisis concurrentes)."""
+        pass
     @abstractmethod
     async def save_feedback(self, data: Dict) -> bool:
         """Guarda feedback de una extracción"""

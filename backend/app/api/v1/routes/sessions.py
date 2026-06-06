@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 from app.api.deps import get_connected_memory
@@ -30,6 +31,7 @@ from app.services.mini_dictamen_anexos_service import (
 )
 from app.services.junta_aclaraciones_questions_service import (
     build_and_persist_junta_aclaraciones_questions,
+    mini_dictamen_needs_co_refresh,
     bundle_needs_regeneration,
     _enrich_session_for_junta,
     format_junta_questions_plain_text,
@@ -245,7 +247,26 @@ async def get_dictamen(session_id: str):
                         session_id,
                         rebuild_exc,
                     )
-            if isinstance(doc_candidates, dict) and doc_candidates.get("sobre_1_tecnico") is not None:
+            formats_panel_payload = None
+            try:
+                from app.services.document_candidate_list_service import (
+                    build_formats_panel_consolidated,
+                )
+
+                formats_panel_payload = await build_formats_panel_consolidated(
+                    repo, session_id, session_data
+                )
+            except Exception as fmt_exc:
+                logger.warning(
+                    "dictamen_formats_panel_failed session=%s err=%s",
+                    session_id,
+                    fmt_exc,
+                )
+            if isinstance(formats_panel_payload, dict) and formats_panel_payload.get(
+                "sobre_1_tecnico"
+            ) is not None:
+                doc_candidates = formats_panel_payload
+            elif isinstance(doc_candidates, dict) and doc_candidates.get("sobre_1_tecnico") is not None:
                 from app.services.document_deliverable_filter import (
                     filter_consolidated_document_candidates,
                 )
@@ -255,10 +276,17 @@ async def get_dictamen(session_id: str):
             corporate_physical_payload = None
             try:
                 from app.checklist.submission_checklist_service import (
+                    checklist_ready_without_enrichment,
                     ensure_session_cronograma_and_checklist,
+                    get_submission_checklist,
                 )
 
-                cl = await ensure_session_cronograma_and_checklist(repo, session_id)
+                if checklist_ready_without_enrichment(session_data):
+                    cl = await get_submission_checklist(
+                        repo, session_id, refresh_placeholders=False
+                    )
+                else:
+                    cl = await ensure_session_cronograma_and_checklist(repo, session_id)
                 if cl:
                     submission_checklist_payload = cl.model_dump(mode="json")
             except Exception as cl_exc:
@@ -296,6 +324,7 @@ async def get_dictamen(session_id: str):
                     if isinstance(last_fill_hints, dict)
                     else None,
                     "fast_track_document_candidates": doc_candidates if isinstance(doc_candidates, dict) else None,
+                    "pliego_formats_panel": doc_candidates if isinstance(doc_candidates, dict) else None,
                     "submission_checklist": submission_checklist_payload,
                     "corporate_physical_document_candidates": corporate_physical_payload,
                 }
@@ -355,6 +384,210 @@ async def get_submission_checklist_route(session_id: str):
     except Exception as e:
         logger.error(f"Error recuperando submission checklist: {e}")
         raise HTTPException(status_code=500, detail="Error al recuperar submission checklist")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/document-candidates-summary", response_model=GenericResponse)
+async def get_document_candidates_summary(session_id: str):
+    """
+    Credenciales empresariales para presentación física (panel ligero, sin dictamen completo).
+    """
+    repo = await get_repository()
+    try:
+        session_data = await repo.get_session(session_id)
+        if not session_data:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        from app.services.document_candidate_list_service import (
+            build_corporate_physical_panel_list,
+        )
+
+        payload = await build_corporate_physical_panel_list(repo, session_id, session_data)
+        if not isinstance(payload, dict):
+            payload = {"candidate_document_list": [], "_meta": {"total": 0}}
+        return GenericResponse(
+            success=True,
+            message="Documentos corporativos recuperados",
+            data={"corporate_physical_document_candidates": payload},
+        )
+    except Exception as e:
+        logger.error(
+            "document_candidates_summary_failed session=%s err=%s",
+            session_id,
+            e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Error al recuperar documentos corporativos detectados",
+        )
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/pliego-formats-panel", response_model=GenericResponse)
+async def get_pliego_formats_panel(session_id: str):
+    """
+    Formatos y anexos del pliego por sobre (panel ligero, sin dictamen completo).
+    """
+    repo = await get_repository()
+    try:
+        session_data = await repo.get_session(session_id)
+        if not session_data:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        from app.services.document_candidate_list_service import (
+            build_formats_panel_consolidated,
+        )
+
+        payload = await build_formats_panel_consolidated(repo, session_id, session_data)
+        if not isinstance(payload, dict):
+            payload = {
+                "sobre_1_tecnico": [],
+                "sobre_2_economico": [],
+                "_meta": {"total": 0},
+            }
+        return GenericResponse(
+            success=True,
+            message="Formatos detectados recuperados",
+            data={"pliego_formats_panel": payload},
+        )
+    except Exception as e:
+        logger.error(
+            "pliego_formats_panel_failed session=%s err=%s",
+            session_id,
+            e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Error al recuperar formatos detectados",
+        )
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/health", response_model=GenericResponse)
+async def get_session_health(session_id: str):
+    """
+    Salud de artefactos de análisis (conteos, stale, recomendación de rehidratación).
+    Lectura ligera: no ejecuta enrichment RAG ni rebuild pesado.
+    """
+    repo = await get_repository()
+    try:
+        from app.services.session_health_service import assess_session_health
+
+        state = await repo.get_session(session_id)
+        if not state:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        payload = assess_session_health(session_id, state)
+        return GenericResponse(
+            success=True,
+            message="Salud de sesión evaluada",
+            data={"session_health": payload},
+        )
+    except Exception as e:
+        logger.error("session_health_failed session=%s err=%s", session_id, e)
+        raise HTTPException(status_code=500, detail="Error al evaluar salud de sesión")
+    finally:
+        await repo.disconnect()
+
+
+class RehydrateArtifactsRequest(BaseModel):
+    company_id: Optional[str] = None
+    force_junta: bool = False
+    sync: bool = False
+
+
+@router.post("/{session_id}/rehydrate-analysis-artifacts", response_model=GenericResponse)
+async def post_rehydrate_analysis_artifacts(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    body: Optional[RehydrateArtifactsRequest] = None,
+    sync: bool = Query(False, description="Ejecución síncrona (scripts); default async job"),
+):
+    """
+    Reconstruye candidatos, hitos, junta y confirma snapshot.
+
+    Por defecto encola job async (202 + job_id) para no bloquear el worker HTTP.
+    ``sync=true`` o body.sync=true ejecuta en la petición (compat scripts).
+    """
+    repo = await get_repository()
+    try:
+        state = await repo.get_session(session_id)
+        if not state:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+
+        req = body or RehydrateArtifactsRequest()
+        run_sync = bool(sync or req.sync)
+
+        if not run_sync:
+            from app.services.job_service import get_active_session_maintenance_job
+            from app.services.session_maintenance_job_service import (
+                create_rehydrate_job,
+                run_rehydrate_job_in_thread,
+            )
+
+            active = get_active_session_maintenance_job(session_id)
+            if active.get("job_id"):
+                return JSONResponse(
+                    status_code=202,
+                    content=GenericResponse(
+                        success=True,
+                        message="Rehidratación ya en curso",
+                        data={
+                            "job_id": active["job_id"],
+                            "session_id": session_id,
+                            "async": True,
+                        },
+                    ).model_dump(),
+                )
+
+            job_id = create_rehydrate_job(session_id)
+            background_tasks.add_task(
+                run_rehydrate_job_in_thread,
+                job_id,
+                session_id,
+                company_id=req.company_id,
+                force_junta=bool(req.force_junta),
+            )
+            return JSONResponse(
+                status_code=202,
+                content=GenericResponse(
+                    success=True,
+                    message="Rehidratación encolada",
+                    data={
+                        "job_id": job_id,
+                        "session_id": session_id,
+                        "async": True,
+                        "poll_url": f"/api/v1/agents/jobs/{job_id}/status",
+                    },
+                ).model_dump(),
+            )
+
+        from app.services.analysis_artifacts_rehydrate_service import (
+            rehydrate_after_analysis_pipeline,
+        )
+        from app.services.session_health_service import assess_session_health
+
+        result = await rehydrate_after_analysis_pipeline(
+            repo,
+            session_id,
+            company_id=req.company_id,
+            commit_snapshot=True,
+            force_junta_refresh=bool(req.force_junta),
+        )
+        fresh = await repo.get_session(session_id) or state
+        health = assess_session_health(session_id, fresh)
+        return GenericResponse(
+            success=result.success,
+            message="Rehidratación completada" if result.success else "Rehidratación incompleta",
+            data={
+                "rehydrate": result.to_dict(),
+                "session_health": health,
+                "async": False,
+            },
+        )
+    except Exception as e:
+        logger.error("rehydrate_analysis_artifacts_failed session=%s err=%s", session_id, e)
+        raise HTTPException(status_code=500, detail="Error al rehidratar artefactos")
     finally:
         await repo.disconnect()
 
@@ -852,6 +1085,42 @@ async def get_coverage_report(session_id: str, refresh: bool = False):
         await repo.disconnect()
 
 
+@router.get("/{session_id}/document-catalog", response_model=GenericResponse)
+async def get_document_catalog(session_id: str, refresh: bool = False):
+    """
+    Catálogo de fuentes clasificadas (rol, casos de uso, entidades, procedencia).
+
+    ``refresh=true`` reconstruye desde todos los documentos ANALYZED de la sesión.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+
+        if refresh:
+            from app.services.document_catalog_service import refresh_session_document_catalog
+
+            catalog = await refresh_session_document_catalog(repo, session_id)
+        else:
+            catalog = session.get("document_catalog")
+            if not catalog:
+                from app.services.document_catalog_service import refresh_session_document_catalog
+
+                catalog = await refresh_session_document_catalog(repo, session_id)
+
+        return GenericResponse(
+            success=True,
+            message="Catálogo de fuentes de sesión",
+            data={"document_catalog": catalog},
+        )
+    except Exception as e:
+        logger.error("document_catalog_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al obtener catálogo de fuentes")
+    finally:
+        await repo.disconnect()
+
+
 @router.get("/{session_id}/capture-matrix-blocks", response_model=GenericResponse)
 async def get_capture_matrix_blocks(session_id: str):
     """Bloques de matriz orientadora para captura económica (Ítem D)."""
@@ -1015,15 +1284,21 @@ async def get_junta_aclaraciones_questions(
             repo, session_id, session, company_id=company_id
         )
         stored = session.get("junta_aclaraciones_questions")
-        if refresh or bundle_needs_regeneration(
+        try:
+            documents = await repo.get_documents(session_id)
+        except Exception:
+            documents = []
+        needs_rebuild = refresh or bundle_needs_regeneration(
             stored if isinstance(stored, dict) else None,
             session_state=enriched,
-        ):
+        ) or mini_dictamen_needs_co_refresh(session_id, enriched, documents)
+        if needs_rebuild:
             bundle = await build_and_persist_junta_aclaraciones_questions(
                 repo,
                 session_id,
                 session_state=enriched,
                 company_id=company_id,
+                force_refresh=bool(refresh),
             )
             payload = bundle.model_dump(mode="json")
         else:

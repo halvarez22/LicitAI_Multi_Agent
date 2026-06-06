@@ -20,15 +20,20 @@ _INTAKE_B_PREFIX = "INTAKE-COMP-"
 
 _FISCAL_PHYSICAL_RE = re.compile(
     r"(?i)\b("
-    r"declaraci[oó]n\s+anual|declaraci[oó]n\s+fiscal|"
+    r"declaraci[oó]n\s+anual|declaraci[oó]n\s+fiscal|declaraci[oó]n\s+de\s+integridad|"
     r"opini[oó]n\s+del\s+cumplimiento|opini[oó]n\s+positiva\s+del\s+sat|"
+    r"opini[oó]n\s+(de\s+)?cumplimiento\s+(sat|estatal|federal|fiscal)|"
     r"constancia\s+de\s+situaci[oó]n\s+fiscal|c\s*\.\s*s\s*\.\s*f\.?|"
     r"sat\b|hacienda|infonavit|imss|"
     r"identificaci[oó]n\s+oficial|credencial\s+para\s+votar|"
     r"acta\s+constitutiva|poder\s+notarial|"
-    r"comprobante\s+de\s+domicilio"
+    r"comprobante\s+de\s+domicilio|"
+    r"mipyme|micro\s*,?\s*peque[nñ]a|nacionalidad\s+mexicana|"
+    r"no\s+colusi[oó]n|integridad\s+y\s+no\s+colusi"
     r")\b"
 )
+
+_PARTICIPATION_CHECK_PREFIX = "participacion.check_"
 
 _STOPWORDS = frozenset(
     {"de", "la", "el", "los", "las", "en", "y", "o", "a", "del", "por", "con", "al", "su", "sus", "que", "para"}
@@ -46,11 +51,78 @@ def is_fiscal_or_physical_intake(label: str, question: str = "", field_target: s
     return bool(blob and _FISCAL_PHYSICAL_RE.search(blob))
 
 
-def should_exclude_from_chat_queue(question: Dict[str, Any]) -> bool:
+def is_participation_procedural_intake(question: Dict[str, Any]) -> bool:
+    """Requisitos literales del pliego (checklist participación) — no captura HITL en chat."""
+    if not isinstance(question, dict):
+        return False
+    qid = str(question.get("question_id") or "")
+    ft = str(question.get("field_target") or question.get("field") or "")
+    label = str(question.get("label") or "")
+    if qid.startswith("INTAKE-CHECK-"):
+        return True
+    if ft.startswith(_PARTICIPATION_CHECK_PREFIX):
+        return True
+    if label.startswith("Requisito:") and ft.startswith("participacion."):
+        return True
+    return False
+
+
+def is_contractual_or_strategic_meta_intake(question: Dict[str, Any]) -> bool:
     """
-    Excluye de ``pending_questions`` conversacional lo que debe vivir en checklist físico.
+    Condiciones de contrato, brechas Go/No-Go y gaps: panel de análisis, no chat.
+    """
+    from app.contracts.chat_queue_contract import is_panel_only_intake_item
+
+    if not isinstance(question, dict):
+        return False
+    if is_panel_only_intake_item(question):
+        return True
+    prov = question.get("provenance_ui") if isinstance(question.get("provenance_ui"), dict) else {}
+    if str(prov.get("reason") or "") in (
+        "condicion_contractual",
+        "brecha_detectada",
+        "gap_analysis",
+    ):
+        return True
+    qtext = _norm_text(question.get("question") or "")
+    if "aceptas esta condicion" in qtext or "manifiesto correspondiente" in qtext:
+        return True
+    if "condicion critica sobre" in qtext and "estas de acuerdo" in qtext:
+        return True
+    return False
+
+
+def is_deliverable_inventory_intake(question: Dict[str, Any]) -> bool:
+    """
+    True si la pregunta pide confirmar un anexo/formato del pliego (inventario UI),
+    no un dato puntual de perfil o precio.
     """
     if not isinstance(question, dict):
+        return False
+    qid = str(question.get("question_id") or "")
+    if qid.startswith("INTAKE-COMP-FOR-"):
+        return True
+    prov = question.get("provenance_ui") if isinstance(question.get("provenance_ui"), dict) else {}
+    if str(prov.get("reason") or "") == "master_list_formatos":
+        return True
+    qtext = _norm_text(question.get("question") or "")
+    if "para armar el expediente de" in qtext and "documento de referencia" in qtext:
+        return True
+    return False
+
+
+def should_exclude_from_chat_queue(question: Dict[str, Any]) -> bool:
+    """
+    Excluye de ``pending_questions`` conversacional lo que debe vivir en checklist físico
+    o en Documentos detectados (no solicitar anexos/formatos por chat).
+    """
+    if not isinstance(question, dict):
+        return True
+    if is_deliverable_inventory_intake(question):
+        return True
+    if is_contractual_or_strategic_meta_intake(question):
+        return True
+    if is_participation_procedural_intake(question):
         return True
     qid = str(question.get("question_id") or "")
     if qid.startswith(_INTAKE_B_PREFIX) and is_fiscal_or_physical_intake(
@@ -59,6 +131,14 @@ def should_exclude_from_chat_queue(question: Dict[str, Any]) -> bool:
         str(question.get("field_target") or ""),
     ):
         return True
+    label = str(question.get("label") or "")
+    question_text = str(question.get("question") or "")
+    ft = str(question.get("field_target") or question.get("field") or "")
+    if is_fiscal_or_physical_intake(label, question_text, ft):
+        if qid.startswith(_INTAKE_B_PREFIX) or qid.startswith("INTAKE-COMP-"):
+            return True
+        if str(question.get("type") or "") == "intake_planner":
+            return True
     tipo = str(question.get("type") or "").lower()
     if tipo == "intake_physical_only":
         return True
@@ -126,6 +206,20 @@ def dedupe_pending_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, 
 def sort_pending_questions_priority(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Ordena: económico → bloqueos perfil → resto → intake tipo B al final."""
     return sorted(list(questions or []), key=_question_sort_key)
+
+
+def sanitize_chat_pending_questions(
+    pending: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Cola conversacional: solo perfil puntual y precios (sin meta-análisis ni inventario)."""
+    from app.services.mini_dictamen_anexos_service import strip_chat_excluded_pending_questions
+
+    out: List[Dict[str, Any]] = []
+    for q in strip_chat_excluded_pending_questions(pending or []):
+        if should_exclude_from_chat_queue(q):
+            continue
+        out.append(q)
+    return normalize_pending_queue(out)
 
 
 def normalize_pending_queue(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

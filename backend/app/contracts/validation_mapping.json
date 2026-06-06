@@ -41,10 +41,10 @@
       "error_type": "placeholder_detected",
       "severity": "block",
       "ux": {
-        "title": "Texto de relleno detectado en documento",
-        "user_message": "Se detectaron placeholders o textos de dato pendiente en un documento final. Antes de enviar, corrige el contenido para que quede con datos reales verificables.",
-        "primary_action": { "label": "Revisar documento afectado", "type": "navigate", "target": "chat_pricing" },
-        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "title": "Quedó texto sin llenar",
+        "user_message": "En uno de los documentos quedó texto de plantilla o un espacio vacío donde debe ir un dato real (por ejemplo RFC o nombre del representante). Complétalo en **Empresas** o escríbemelo aquí en el chat.",
+        "primary_action": { "label": "Completar en Empresas", "type": "navigate", "target": "companies" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
         "impact": "Enviar formatos con texto de relleno puede invalidar la propuesta por incumplimiento formal."
       },
       "context_fields": ["document_id", "field_key", "detected_value", "expected_rule"]
@@ -53,10 +53,10 @@
       "error_type": "required_field_missing",
       "severity": "block",
       "ux": {
-        "title": "Campo crítico faltante en documento",
-        "user_message": "Se detectó un campo obligatorio sin valor útil en el documento generado. Completa el dato y vuelve a generar/revalidar.",
-        "primary_action": { "label": "Completar dato faltante", "type": "navigate", "target": "chat_pricing" },
-        "secondary_action": { "label": "Revalidar", "type": "navigate", "target": "economic_panel" },
+        "title": "Falta un dato obligatorio",
+        "user_message": "Para armar los documentos me falta un dato de tu empresa (por ejemplo RFC, razón social o representante legal). Puedes completarlo en **Empresas** o decírmelo aquí en el chat.",
+        "primary_action": { "label": "Completar en Empresas", "type": "navigate", "target": "companies" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
         "impact": "Un campo crítico vacío puede causar observaciones o descalificación."
       },
       "context_fields": ["document_id", "field_key", "detected_value", "expected_rule"]
@@ -192,6 +192,162 @@
         "impact": "Ninguno. Estado preservado."
       },
       "context_fields": ["last_active"]
+    },
+    {
+      "error_type": "llm_refusal_detected",
+      "severity": "block",
+      "ux": {
+        "title": "El asistente no redactó el documento",
+        "user_message": "Se detectó un mensaje de rechazo del modelo en un archivo generado. Pulsa Generar de nuevo; el sistema reintentará con autorización legal.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
+        "impact": "Un archivo con texto de rechazo puede causar descalificación inmediata."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "evaluator_perspective_detected",
+      "severity": "block",
+      "ux": {
+        "title": "Documento con voz de evaluador",
+        "user_message": "Un archivo parece redactado como comité evaluador y no como concursante. Regenera la propuesta.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revisar expediente", "type": "navigate", "target": "economic_panel" },
+        "impact": "Entregar un dictamen interno del comité en lugar de la propuesta invalida la oferta."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "adjudication_language_in_proposal_stage",
+      "severity": "block",
+      "ux": {
+        "title": "Lenguaje de adjudicación prematura",
+        "user_message": "Un documento asume que ya fueron seleccionados como proveedores. Debe decir concursante o «en caso de resultar adjudicado».",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
+        "impact": "Inconsistencia de etapa que el comité puede penalizar."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "document_date_after_submission_deadline",
+      "severity": "block",
+      "ux": {
+        "title": "Fecha posterior al cierre",
+        "user_message": "La fecha impresa en un documento es posterior a la recepción de propuestas según el cronograma de las bases.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Ver fechas críticas", "type": "navigate", "target": "critical_dates" },
+        "impact": "Propuesta extemporánea o formalmente inconsistente."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "llm_meta_leak_detected",
+      "severity": "block",
+      "ux": {
+        "title": "Texto de instrucción en el documento",
+        "user_message": "Quedó texto meta del asistente (p. ej. «transcripción fiel») dentro del archivo. Regenera.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
+        "impact": "El comité puede interpretarlo como borrador no válido."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "apu_empty_prices",
+      "severity": "block",
+      "ux": {
+        "title": "APU sin precios",
+        "user_message": "El análisis de precios unitarios no tiene importes materializados o no cuadra con la cotización.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Ver panel económico", "type": "navigate", "target": "economic_panel" },
+        "impact": "APU vacío no sustituye la propuesta económica."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "document_shell_detected",
+      "severity": "block",
+      "ux": {
+        "title": "Documento sin cuerpo legal",
+        "user_message": "Un archivo generado quedó como plantilla vacía (solo encabezado y firma). Regenera la propuesta; el sistema no aceptará cascarones.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revisar formatos", "type": "navigate", "target": "validation_policy" },
+        "impact": "Presentar anexos sin declaración sustantiva puede invalidar la oferta."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "policy_coverage_insufficient",
+      "severity": "block",
+      "ux": {
+        "title": "Cobertura de validación insuficiente",
+        "user_message": "Demasiados documentos generados no tienen política de calidad aplicada. No se puede certificar el expediente; regenera tras revisar la clasificación.",
+        "primary_action": { "label": "Revisar clasificación", "type": "navigate", "target": "validation_policy" },
+        "secondary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "impact": "Sin política de llenado el gate no puede garantizar conformidad."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "document_metadata_leak",
+      "severity": "block",
+      "ux": {
+        "title": "Metadatos internos en el documento",
+        "user_message": "Un archivo incluye etiquetas internas del panel (p. ej. PANEL_ADMINISTRATIVO). Regenera.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
+        "impact": "Texto de depuración en el expediente no es presentable al comité."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "document_multiple_dates_in_body",
+      "severity": "block",
+      "ux": {
+        "title": "Fechas contradictorias en el documento",
+        "user_message": "Una carta o anexo muestra más de una fecha distinta a la del encabezado. Regenera o reaplica cláusulas determinísticas.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Ver fechas críticas", "type": "navigate", "target": "critical_dates" },
+        "impact": "Inconsistencia formal que el comité puede rechazar."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "legal_text_truncated",
+      "severity": "block",
+      "ux": {
+        "title": "Texto legal incompleto",
+        "user_message": "Un manifiesto aparece truncado (p. ej. «que no se…»). Regenera con cláusula determinística.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Escribir en el chat", "type": "navigate", "target": "chat_pricing" },
+        "impact": "Declaración incompleta no cumple requisitos de las bases."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "bases_checklist_in_letter_body",
+      "severity": "block",
+      "ux": {
+        "title": "Lista de documentos dentro de una carta",
+        "user_message": "Un anexo administrativo incluye un checklist de entrega en lugar del manifiesto legal requerido.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revisar formatos", "type": "navigate", "target": "validation_policy" },
+        "impact": "Formato incorrecto ante el comité."
+      },
+      "context_fields": ["document_id", "detected_value"]
+    },
+    {
+      "error_type": "generic_legal_fallback_body",
+      "severity": "block",
+      "ux": {
+        "title": "Carta con texto genérico",
+        "user_message": "Un anexo usa plantilla genérica en lugar de la cláusula legal del pliego. Reaplica cláusulas o regenera.",
+        "primary_action": { "label": "Volver a generar", "type": "navigate", "target": "chat_pricing" },
+        "secondary_action": { "label": "Revisar formatos", "type": "navigate", "target": "validation_policy" },
+        "impact": "Contenido no alineado al anexo puede causar descalificación."
+      },
+      "context_fields": ["document_id", "detected_value"]
     }
   ]
 }

@@ -93,7 +93,7 @@ export default function CriticalDatesList({
                                         gap: '4px',
                                     }}
                                 >
-                                    <AlertTriangle size={11} /> Plazo vencido (revisar bases)
+                                    <AlertTriangle size={11} /> Fecha del calendario ya pasó (referencia en bases)
                                 </div>
                             )}
                         </div>

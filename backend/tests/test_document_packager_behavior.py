@@ -370,3 +370,100 @@ async def test_packager_preserva_lineage_en_estructura_sobres():
     assert doc["template_id"] == "anexo_tecnico"
     assert doc["materialization_route"] == "mirror"
     assert out.data["materialization_metrics"]["files_count"] == 1
+
+
+def test_mapear_deterministico_dedup_anexo_vii_sobre_ad32(tmp_path):
+    session = "sess_vii"
+    ad = tmp_path / "AD-32_Carta_Declaracion_de_Integridad.docx"
+    anexo = tmp_path / "Anexo_VII_Carta_Declaracion_de_Integridad.docx"
+    ad.write_bytes(b"ad")
+    anexo.write_bytes(b"anexo" * 20)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {"nombre": ad.name, "ruta": str(ad)},
+                {"nombre": anexo.name, "ruta": str(anexo)},
+            ],
+        },
+    )
+    assert len(est["sobre_1"]["documentos"]) == 1
+    assert "Anexo_VII" in est["sobre_1"]["documentos"][0]["nombre"]
+
+
+def test_mapear_deterministico_dedup_carta_compromiso_con_anexo_vi(tmp_path):
+    session = "sess_vi"
+    carta = tmp_path / "Carta_compromiso.docx"
+    anexo = tmp_path / "Anexo_VI_Carta_Compromiso.docx"
+    carta.write_bytes(b"c")
+    anexo.write_bytes(b"anexo" * 20)
+    est = mapear_sobres_deterministico(
+        session,
+        {
+            "administrativa": [
+                {"nombre": carta.name, "ruta": str(carta)},
+                {"nombre": anexo.name, "ruta": str(anexo)},
+            ],
+        },
+    )
+    assert len(est["sobre_1"]["documentos"]) == 1
+    assert "Anexo_VI" in est["sobre_1"]["documentos"][0]["nombre"]
+
+
+def test_mapear_deterministico_excluye_espejo_cmyt(tmp_path):
+    session = "sess_cmyt"
+    f = tmp_path / "cat_formato_hoja_membretada_cmyt_zen.docx"
+    f.write_bytes(b"x" * 100)
+    est = mapear_sobres_deterministico(
+        session,
+        {"administrativa": [{"nombre": f.name, "ruta": str(f)}]},
+    )
+    assert len(est["sobre_1"]["documentos"]) == 0
+
+
+def test_mapear_deterministico_fo35_modelo_en_sobre_2(tmp_path):
+    session = "sess_fo35"
+    f = tmp_path / "FO-35_Anexo_IV_Modelo_presentacion_Prop.docx"
+    f.write_bytes(b"x" * 100)
+    est = mapear_sobres_deterministico(
+        session,
+        {"administrativa": [{"nombre": f.name, "ruta": str(f)}]},
+    )
+    assert len(est["sobre_2"]["documentos"]) == 1
+    assert len(est["sobre_1"]["documentos"]) == 0
+
+
+def test_packager_sobres_stale_detects_missing_economic(tmp_path, monkeypatch):
+    from app.agents import document_packager as dp
+
+    session = "sess_stale"
+    root = tmp_path / "outputs" / session
+    econ_src = root / "2.propuesta_economica"
+    econ_src.mkdir(parents=True)
+    (econ_src / "ECON_01_tabla.xlsx").write_bytes(b"x" * 10)
+    sobre3 = root / "SOBRE_3_ECONOMICO"
+    sobre3.mkdir(parents=True)
+    (sobre3 / "00_CARATULA_SOBRE.docx").write_bytes(b"x" * 10)
+
+    original_join = dp.os.path.join
+    monkeypatch.setattr(
+        dp,
+        "mapear_sobres_deterministico",
+        lambda sid, gen=None: {
+            "sobre_1": {"documentos": []},
+            "sobre_2": {"documentos": []},
+            "sobre_3": {
+                "documentos": [
+                    {"nombre": "ECON_01_tabla.xlsx", "ruta": str(econ_src / "ECON_01_tabla.xlsx")}
+                ]
+            },
+        },
+    )
+
+    def fake_join(*parts):
+        if len(parts) >= 3 and parts[0] == "/data" and parts[1] == "outputs":
+            return str((tmp_path / "outputs").joinpath(*parts[2:]))
+        return original_join(*parts)
+
+    monkeypatch.setattr(dp.os.path, "join", fake_join)
+    assert dp.packager_sobres_stale(session) is True

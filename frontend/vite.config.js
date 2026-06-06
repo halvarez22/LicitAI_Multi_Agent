@@ -52,6 +52,8 @@ export default defineConfig({
             '/api': {
                 target: proxyTarget,
                 changeOrigin: true,
+                timeout: 120000,
+                proxyTimeout: 120000,
             },
         },
     },

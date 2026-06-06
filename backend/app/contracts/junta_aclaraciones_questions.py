@@ -34,6 +34,7 @@ class JuntaQuestionSource(str, Enum):
     ANALYST_ALERT = "analyst_alert"
     EVIDENCE_CONFLICT = "evidence_conflict"
     MINI_DICTAMEN = "mini_dictamen"
+    THEMATIC_BASES = "thematic_bases"
     GO_NO_GO = "go_no_go"
     COMPLIANCE = "compliance"
 
@@ -65,6 +66,7 @@ class JuntaAclaracionesQuestionsSummary(BaseModel):
     por_prioridad: Dict[str, int] = Field(default_factory=dict)
     por_fuente: Dict[str, int] = Field(default_factory=dict)
     listas_para_junta: int = 0
+    para_convocante: int = 0
 
 
 class JuntaAclaracionesQuestionsBundle(BaseModel):

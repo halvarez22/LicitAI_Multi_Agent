@@ -69,21 +69,42 @@ class Settings(BaseSettings):
     DOCUMENT_FILL_QUALITY_GATE_ENABLED: bool = True
     DOCUMENT_FILL_QUALITY_GATE_MODE: str = "enforce"
     DOCUMENT_FILL_QUALITY_MIN_CONFIDENCE_CRITICAL: float = 0.75
+    DOCUMENT_CONTAMINATION_GATE_ENABLED: bool = True
+    DELIVERY_CONTAMINATION_ENFORCE_AT_PACK: bool = True
+    DOCUMENT_DATE_OFFSET_BUSINESS_DAYS: int = 2
+    DOCUMENT_FORMAL_CLOSING_ENABLED: bool = True
+    DOCUMENT_MIN_SUBSTANTIVE_WORDS: int = 40
+    DOCUMENT_REQUIRE_LEGAL_MARKER: bool = True
     # Cola de generación: conteo congruente (umbrales globales, no por licitación).
     GENERATION_FILTER_ENABLED: bool = True
     # Borra /data/outputs/{sesión} antes de writers en cada corrida de generación (evita duplicados viejos).
     GENERATION_WIPE_OUTPUTS_BEFORE_WRITERS: bool = True
     # Tras CompraNetPackager exitoso, elimina copias en SOBRE_* y carpetas de generación.
-    GENERATION_PRUNE_DUPLICATE_OUTPUTS_AFTER_PACK: bool = True
+    GENERATION_PRUNE_DUPLICATE_OUTPUTS_AFTER_PACK: bool = False
     # Permite preguntar precios en chat aunque falte página/snippet estricto en el pliego.
     ECONOMIC_RELAX_PRICE_ANCHORS_FOR_CHAT: bool = True
     TECH_WRITER_MAX_GENERABLE_DOCS: int = 12
     FORMATS_MAX_GENERABLE_DOCS: int = 18
+    # Mínimo de anexos administrativos materializados vs panel/cola (0–1).
+    FORMATS_MIN_DELIVERABLE_RATIO: float = 0.85
+    # Cobertura mínima plantillas de oferta en _compranet_validated antes de FINAL_OK.
+    DELIVERY_MIN_COVERAGE_RATIO: float = 0.85
     INTAKE_PLANNER_ENABLED: bool = True
     INTAKE_PLANNER_SHADOW_MODE: bool = False
+    # Oferta «plan guiado» en chat (confunde si hay inventario en panel). False = solo resumen/acciones claras.
+    INTAKE_PROACTIVE_CHAT_OFFER_ENABLED: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "LICITAI_INTAKE_PROACTIVE_CHAT_OFFER",
+            "INTAKE_PROACTIVE_CHAT_OFFER_ENABLED",
+        ),
+    )
     FAST_TRACK_DOC_CANDIDATES_ENABLED: bool = True
     FAST_TRACK_REQUIRE_HUMAN_CONFIRM: bool = True
     FAST_TRACK_LOW_CONF_THRESHOLD: float = 0.70
+
+    # --- Estabilización UI: enrichment cronograma (P0-03) ---
+    CRONOGRAMA_ENRICHMENT_TIMEOUT_S: float = 12.0
 
     # --- Enhanced Analyst Agent (Solvencia Técnica y Condiciones Contractuales) ---
     ENHANCED_EXTRACTION_ENABLED: bool = True
@@ -126,6 +147,15 @@ class Settings(BaseSettings):
     # Redis for communication
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
+    AGENTS_JOB_STALE_SECONDS: int = Field(
+        default=5400,
+        validation_alias=AliasChoices("AGENTS_JOB_STALE_SECONDS", "LICITAI_AGENTS_JOB_STALE_SECONDS"),
+        description=(
+            "Segundos sin heartbeat (updated_at) para marcar un job RUNNING/QUEUED como FAILED "
+            "al consultar active-job (p. ej. tras reinicio del contenedor). "
+            "No aplica al polling de /jobs/{id}/status durante análisis activo."
+        ),
+    )
     
     model_config = {
         "env_file": ".env",

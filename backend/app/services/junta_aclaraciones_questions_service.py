@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.contracts.junta_aclaraciones_questions import (
     JuntaAclaracionesQuestionItem,
@@ -28,7 +28,19 @@ from app.services.evidence_profile_service import _CRITICAL_FIELDS, detect_profi
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = "1.1.0"
+_SCHEMA_VERSION = "1.2.0"
+
+# Ítems de control de calidad del análisis; no se copian al portal de la convocante.
+_JUNTA_INTERNAL_SOURCE_REFS = frozenset({"analyst_pending_citation_umbrella"})
+
+_STALE_GROUPED_TICKETS_RE = re.compile(
+    r"(?i)10\s+formatos\s+adicionales|grouped_required_annex_not_published"
+)
+
+_ARTIFACT_12_3_PREGUNTA_RE = re.compile(
+    r"(?i)12\s*a[nñ]os\s+de\s+experiencia.*3\s*a[nñ]os|"
+    r"al\s+menos\s+12\s*a[nñ]os.*anexo\s+t[eé]cnico.*3\s*a[nñ]os"
+)
 
 # Niveles de calidad de cita (badge en UI)
 CITATION_QUALITY_COMPLETE = "cita_completa"
@@ -50,6 +62,11 @@ _LEGACY_JUNTA_RE = re.compile(
     r"umbral general de las bases"
 )
 
+_INTERNAL_TICKET_LEAK_RE = re.compile(
+    r"(?i)necesito aclarar con la convocante|motivo detectado\s*:|"
+    r"¿\s*deseas prepararlo|prepararlo como punto para la junta"
+)
+
 _FIELD_LABELS: Dict[str, str] = {
     "anos_experiencia": "años de experiencia acreditable de la empresa licitante",
     "rfc": "RFC del licitante",
@@ -69,7 +86,11 @@ _FIELD_SEARCH_KEYS: Dict[str, List[str]] = {
 _PLACEHOLDER_RE = re.compile(
     r"(?i)(punto\s+x\b|pregunta\s+t[eé]cnica\s+para\s+clarificar|"
     r"requisito\s*«\s*\.{2,}\s*»|«\s*\.{2,}\s*»|^\s*\.\.\.\s*$|clarificar\s+el\s+punto\s+x|"
-    r"respecto al requisito\s*«\s*\.{2,})"
+    r"respecto al requisito\s*«\s*\.{2,}|fragmento idéntico al párrafo citado)"
+)
+
+_ANALYST_SNIPPET_PLACEHOLDER_RE = re.compile(
+    r"(?i)fragmento idéntico al párrafo citado|texto literal copiado sin abreviar"
 )
 
 
@@ -122,6 +143,14 @@ def bundle_needs_regeneration(
             return True
         if _STALE_GRAMMAR_RE.search(pregunta):
             return True
+        if _INTERNAL_TICKET_LEAK_RE.search(pregunta):
+            return True
+        if _ARTIFACT_12_3_PREGUNTA_RE.search(pregunta):
+            return True
+        if str(it.get("source_ref") or "") == "grouped_required_annex_not_published":
+            return True
+        if _STALE_GROUPED_TICKETS_RE.search(pregunta):
+            return True
 
     if session_state is None:
         return False
@@ -142,6 +171,62 @@ def bundle_needs_regeneration(
         if not any(r == field or r.startswith(f"{field}_") for r in refs):
             return True
 
+    return False
+
+
+def is_internal_junta_item(item: Any) -> bool:
+    """True si el ítem es solo para operación interna (no portal convocante)."""
+    if isinstance(item, JuntaAclaracionesQuestionItem):
+        ref = str(item.source_ref or "")
+        prov = item.provenance_ui or {}
+    elif isinstance(item, dict):
+        ref = str(item.get("source_ref") or "")
+        prov = item.get("provenance_ui") if isinstance(item.get("provenance_ui"), dict) else {}
+    else:
+        return False
+    if ref in _JUNTA_INTERNAL_SOURCE_REFS:
+        return True
+    return str(prov.get("audience") or "") == "interno"
+
+
+def mini_dictamen_needs_co_refresh(
+    session_id: str,
+    session_state: Dict[str, Any],
+    documents: Sequence[Dict[str, Any]],
+) -> bool:
+    """
+    True si tickets/mini dictamen están desalineados con el corpus (p. ej. formatos embebidos en PDF).
+    """
+    from app.services.junta_bases_corpus import build_bases_corpus, template_embedded_in_bases
+
+    corpus = build_bases_corpus(session_id, documents, session_state=session_state)
+    if not corpus.segments:
+        return False
+
+    open_annex: List[Dict[str, Any]] = []
+    for raw in session_state.get("clarification_tickets") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("status") or "").lower() not in ("open", "ready_for_junta"):
+            continue
+        if str(raw.get("reason") or "") != "required_annex_not_published":
+            continue
+        open_annex.append(raw)
+    if len(open_annex) >= 3:
+        return True
+    for raw in open_annex:
+        if template_embedded_in_bases(corpus, str(raw.get("display_name") or "")):
+            return True
+
+    junta = session_state.get("junta_aclaraciones_questions")
+    if isinstance(junta, dict):
+        for it in junta.get("items") or []:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("source_ref") or "") == "grouped_required_annex_not_published":
+                return True
+            if _ARTIFACT_12_3_PREGUNTA_RE.search(str(it.get("pregunta") or "")):
+                return True
     return False
 
 
@@ -805,6 +890,16 @@ def resolve_citation_quality(
         if not has_ubicacion:
             return CITATION_QUALITY_DOCUMENT_ONLY
 
+    if pattern in (
+        "experience_years_conflict",
+        "unresolved_se_adjunta",
+        "format_placeholders",
+        "certification_cluster",
+    ):
+        return CITATION_QUALITY_DOCUMENT_ONLY
+    if str(prov.get("source") or "") == "thematic_bases":
+        return CITATION_QUALITY_DOCUMENT_ONLY
+
     if str(source or "") in (
         JuntaQuestionSource.ANALYST_JUNTA.value,
         JuntaQuestionSource.ANALYST_GAP.value,
@@ -952,19 +1047,43 @@ def _collect_analyst_pending_citation_umbrella(
             "source": "analyst",
             "pattern": "analyst_pending_citation",
             "citation_quality": CITATION_QUALITY_INSUFFICIENT,
+            "audience": "interno",
         },
+        preserve_status=JuntaQuestionStatus.EXCLUIDA,
     )
+
+
+def _resolve_bases_corpus(
+    session_id: str,
+    session_state: Dict[str, Any],
+    documents: Optional[Sequence[Dict[str, Any]]] = None,
+):
+    from app.services.junta_bases_corpus import build_bases_corpus
+
+    docs = list(documents or session_state.get("_junta_session_documents") or [])
+    return build_bases_corpus(session_id, docs, session_state=session_state)
 
 
 def _collect_from_analyst(
     analysis: Dict[str, Any],
     items: List[JuntaAclaracionesQuestionItem],
     seen: set,
+    *,
+    corpus: Optional[Any] = None,
 ) -> None:
+    from app.services.junta_citation_gate import (
+        alert_item_supported,
+        analyst_question_supported,
+        gap_item_supported,
+    )
+
     audit = analysis.get("audit_report") if isinstance(analysis.get("audit_report"), dict) else {}
     for idx, raw in enumerate(audit.get("preguntas_junta_aclaraciones") or [], start=1):
         p = str(raw or "").strip()
         if not p or _is_low_quality_question(p):
+            continue
+        if corpus is not None and not analyst_question_supported(p, corpus, analysis):
+            logger.info("junta_analyst_question_filtered", reason="citation_gate", idx=idx)
             continue
         if _already_junta_canonical(p):
             pregunta = p if p.endswith("?") else f"{p}?"
@@ -994,6 +1113,9 @@ def _collect_from_analyst(
     for idx, gap in enumerate(audit.get("gap_analysis") or [], start=1):
         if not isinstance(gap, dict):
             continue
+        if corpus is not None and not gap_item_supported(gap, corpus):
+            logger.info("junta_gap_filtered", reason="citation_gate", idx=idx)
+            continue
         sugerencia = str(gap.get("sugerencia") or gap.get("accion_requerida") or "").strip()
         req = str(gap.get("requisito") or "").strip()
         if not sugerencia and not req:
@@ -1008,7 +1130,13 @@ def _collect_from_analyst(
         seccion = str(gap.get("seccion") or "REQUISITOS DEL PARTICIPANTE")
         inciso = gap.get("inciso")
         evid = str(gap.get("evidence_snippet") or "").strip()
-        tema = _truncate_literal(req or "este requisito", 80)
+        if _ANALYST_SNIPPET_PLACEHOLDER_RE.search(evid):
+            evid = ""
+        if _ANALYST_SNIPPET_PLACEHOLDER_RE.search(req):
+            req = ""
+        if not req and not evid and not sugerencia:
+            continue
+        tema = _truncate_literal(req or evid or "este requisito", 80)
         cita_a = {
             "archivo": archivo or None,
             "pagina": pag or None,
@@ -1056,6 +1184,9 @@ def _collect_from_analyst(
 
     for idx, alert in enumerate(audit.get("alertas_descalificacion") or [], start=1):
         if not isinstance(alert, dict):
+            continue
+        if corpus is not None and not alert_item_supported(alert, corpus):
+            logger.info("junta_alert_filtered", reason="citation_gate", idx=idx)
             continue
         sug = str(alert.get("sugerencia") or "").strip()
         motivo = str(alert.get("motivo") or "").strip()
@@ -1372,27 +1503,52 @@ def _collect_from_mini_dictamen(
     mini = session_state.get("mini_dictamen_anexos") or {}
     if not tickets and isinstance(mini, dict):
         tickets = list(mini.get("clarification_tickets") or [])
+    active: List[Dict[str, Any]] = []
     for raw in tickets:
         if not isinstance(raw, dict):
             continue
         status = str(raw.get("status") or "").lower()
         if status not in ("open", "ready_for_junta"):
             continue
-        q = str(raw.get("question") or "").strip()
-        if not q:
-            continue
-        display = str(raw.get("display_name") or "anexo").strip()
-        cita = {
-            "archivo": raw.get("source_filename"),
-            "pagina": raw.get("page") or raw.get("pagina"),
-            "seccion": display,
-            "texto": q,
-        }
-        pregunta = _build_junta_from_free_text(
-            q,
-            cita=cita,
-            tema=f"el anexo «{display}»",
+        active.append(raw)
+
+    from app.services.clarification_ticket_copy import (
+        build_junta_question_from_clarification_ticket,
+        build_junta_question_grouped_missing_templates,
+    )
+
+    not_published = [
+        t
+        for t in active
+        if str(t.get("reason") or "") == "required_annex_not_published"
+    ]
+    other = [t for t in active if t not in not_published]
+
+    if len(not_published) >= 3:
+        names = [str(t.get("display_name") or "") for t in not_published]
+        pregunta = build_junta_question_grouped_missing_templates(names)
+        _append_item(
+            items,
+            seen,
+            pregunta=pregunta,
+            motivo="Agrupación de formatos citados en bases sin archivo suelto en expediente.",
+            source=JuntaQuestionSource.MINI_DICTAMEN,
+            source_ref="grouped_required_annex_not_published",
+            tipo=JuntaQuestionTipo.ADMINISTRATIVA,
+            prioridad=JuntaQuestionPrioridad.ALTA,
+            provenance_ui={
+                "source": "mini_dictamen_anexos",
+                "pattern": "grouped_missing_templates",
+                "ticket_count": len(not_published),
+            },
         )
+    else:
+        for raw in not_published:
+            other.append(raw)
+
+    for raw in other:
+        display = str(raw.get("display_name") or "anexo").strip()
+        pregunta = build_junta_question_from_clarification_ticket(raw)
         _append_item(
             items,
             seen,
@@ -1408,6 +1564,31 @@ def _collect_from_mini_dictamen(
             ),
             archivo_fuente=str(raw.get("source_filename") or "") or None,
             provenance_ui=raw.get("provenance_ui") if isinstance(raw.get("provenance_ui"), dict) else {},
+        )
+
+
+def _collect_from_thematic_discovery(
+    corpus: Any,
+    items: List[JuntaAclaracionesQuestionItem],
+    seen: set,
+) -> None:
+    from app.services.junta_thematic_discovery import discover_thematic_questions
+
+    for raw in discover_thematic_questions(corpus):
+        pregunta = str(raw.get("pregunta") or "").strip()
+        if not pregunta:
+            continue
+        prov = raw.get("provenance_ui") if isinstance(raw.get("provenance_ui"), dict) else {}
+        _append_item(
+            items,
+            seen,
+            pregunta=pregunta,
+            motivo=str(raw.get("motivo") or "thematic_bases"),
+            source=JuntaQuestionSource.THEMATIC_BASES,
+            source_ref=str(raw.get("source_ref") or "thematic"),
+            tipo=raw.get("tipo") or JuntaQuestionTipo.TECNICA,
+            prioridad=raw.get("prioridad") or JuntaQuestionPrioridad.ALTA,
+            provenance_ui=prov,
         )
 
 
@@ -1497,24 +1678,30 @@ def _build_summary(items: List[JuntaAclaracionesQuestionItem]) -> JuntaAclaracio
     por_prioridad: Dict[str, int] = {}
     por_fuente: Dict[str, int] = {}
     listas = 0
+    convocante = 0
     for it in items:
         por_tipo[it.tipo.value] = por_tipo.get(it.tipo.value, 0) + 1
         por_prioridad[it.prioridad.value] = por_prioridad.get(it.prioridad.value, 0) + 1
         por_fuente[it.source.value] = por_fuente.get(it.source.value, 0) + 1
         if it.status in (JuntaQuestionStatus.APROBADA, JuntaQuestionStatus.BORRADOR):
             listas += 1
+        if it.status != JuntaQuestionStatus.EXCLUIDA and not is_internal_junta_item(it):
+            convocante += 1
     return JuntaAclaracionesQuestionsSummary(
         total=len(items),
         por_tipo=por_tipo,
         por_prioridad=por_prioridad,
         por_fuente=por_fuente,
         listas_para_junta=listas,
+        para_convocante=convocante,
     )
 
 
 def build_junta_aclaraciones_questions(
     session_id: str,
     session_state: Dict[str, Any],
+    *,
+    documents: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> JuntaAclaracionesQuestionsBundle:
     """
     Arma el listado consolidado para la convocante (sin persistir).
@@ -1522,8 +1709,10 @@ def build_junta_aclaraciones_questions(
     items: List[JuntaAclaracionesQuestionItem] = []
     seen: set = set()
     analysis = _extract_analysis_from_session(session_state)
+    corpus = _resolve_bases_corpus(session_id, session_state, documents)
 
-    _collect_from_analyst(analysis, items, seen)
+    _collect_from_thematic_discovery(corpus, items, seen)
+    _collect_from_analyst(analysis, items, seen, corpus=corpus)
     _collect_from_evidence_conflicts(session_state, analysis, items, seen)
     _collect_from_mini_dictamen(session_state, items, seen)
     _collect_from_go_no_go(session_state, items, seen)
@@ -1560,6 +1749,7 @@ def format_junta_questions_plain_text(bundle: JuntaAclaracionesQuestionsBundle) 
         it
         for it in bundle.items
         if it.status not in (JuntaQuestionStatus.EXCLUIDA,)
+        and not is_internal_junta_item(it)
     ]
     for i, it in enumerate(active, start=1):
         lines.append(f"{i}. [{it.tipo.value.upper()}] {it.pregunta}")
@@ -1577,22 +1767,59 @@ async def build_and_persist_junta_aclaraciones_questions(
     *,
     session_state: Optional[Dict[str, Any]] = None,
     company_id: Optional[str] = None,
+    force_refresh: bool = False,
 ) -> JuntaAclaracionesQuestionsBundle:
-    """Calcula y persiste el bundle en la sesión."""
+    """Calcula y persiste el bundle en la sesión (mini dictamen + junta alineados)."""
     raw = session_state if isinstance(session_state, dict) else await memory.get_session(session_id)
     if not raw:
         raise ValueError("Sesión no encontrada.")
     state = await _enrich_session_for_junta(memory, session_id, raw, company_id=company_id)
-    bundle = build_junta_aclaraciones_questions(session_id, state)
+    try:
+        documents = await memory.get_documents(session_id)
+    except Exception:
+        documents = []
+    state["_junta_session_documents"] = documents
+
+    stored = state.get("junta_aclaraciones_questions")
+    need_junta = force_refresh or bundle_needs_regeneration(
+        stored if isinstance(stored, dict) else None,
+        session_state=state,
+    )
+    need_mini = force_refresh or mini_dictamen_needs_co_refresh(session_id, state, documents)
+
+    if need_mini:
+        from app.services.mini_dictamen_anexos_service import build_and_persist_mini_dictamen
+
+        await build_and_persist_mini_dictamen(memory, session_id)
+        state = await memory.get_session(session_id) or state
+        state = await _enrich_session_for_junta(memory, session_id, state, company_id=company_id)
+        state["_junta_session_documents"] = documents
+        need_junta = True
+
+    if need_junta:
+        bundle = build_junta_aclaraciones_questions(session_id, state, documents=documents)
+        await memory.save_session(
+            session_id,
+            {
+                **state,
+                "junta_aclaraciones_questions": bundle.model_dump(mode="json"),
+            },
+        )
+        logger.info(
+            "junta_aclaraciones_questions_persisted",
+            session_id=session_id,
+            total=bundle.summary.total,
+            listas=bundle.summary.listas_para_junta,
+            para_convocante=getattr(bundle.summary, "para_convocante", 0),
+        )
+        return bundle
+
+    if isinstance(stored, dict):
+        return JuntaAclaracionesQuestionsBundle.model_validate(stored)
+    bundle = build_junta_aclaraciones_questions(session_id, state, documents=documents)
     await memory.save_session(
         session_id,
-        {"junta_aclaraciones_questions": bundle.model_dump(mode="json")},
-    )
-    logger.info(
-        "junta_aclaraciones_questions_persisted",
-        session_id=session_id,
-        total=bundle.summary.total,
-        listas=bundle.summary.listas_para_junta,
+        {**state, "junta_aclaraciones_questions": bundle.model_dump(mode="json")},
     )
     return bundle
 
@@ -1629,5 +1856,5 @@ async def update_junta_question_status(
         raise ValueError(f"No existe question_id={question_id}")
     raw["items"] = items
     raw["generated_at"] = datetime.now(timezone.utc).isoformat()
-    await memory.save_session(session_id, {"junta_aclaraciones_questions": raw})
+    await memory.save_session(session_id, {**state, "junta_aclaraciones_questions": raw})
     return JuntaAclaracionesQuestionItem.model_validate(updated)

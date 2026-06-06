@@ -34,6 +34,8 @@ from app.services.structured_economic_price_mapper import (
     apply_structured_price_inputs,
     build_structured_price_slots,
 )
+from app.services.economic_tabular_ingest_sync import tech_requirements_from_tabular_pricing
+from app.services.tabular_line_item_extract import dedupe_tabular_line_items
 from app.config.settings import settings as app_settings
 
 logger = get_logger(__name__)
@@ -683,7 +685,9 @@ class EconomicAgent(BaseAgent):
         ]
         session_line_items_effective = apply_structured_price_inputs(session_line_items, concept_prices)
         structured_template_summary = _summarize_structured_template_rows(session_line_items)
-        pricing_line_items = self._filter_reliable_pricing_rows(session_line_items_effective)
+        pricing_line_items = dedupe_tabular_line_items(
+            self._filter_reliable_pricing_rows(session_line_items_effective)
+        )
         tabular_catalog = self._tabular_rows_to_catalog_entries(pricing_line_items)
 
         analisis_bases = self._extract_analisis_bases_from_session(session_state)
@@ -781,7 +785,20 @@ class EconomicAgent(BaseAgent):
             print(f"    [Económico] Excluidos {len(excluded_as_docs)} ítems documentales (no cotizables). Cotizables: {len(tech_requirements)}", flush=True)
 
         print(f"    [DEBUG] Técnico items count: {len(tech_requirements)} (de {len(tech_requirements_raw)} totales)", flush=True)
-        
+
+        if not tech_requirements and pricing_line_items:
+            tech_requirements = tech_requirements_from_tabular_pricing(pricing_line_items)
+            logger.info(
+                "economic_tabular_only_mode",
+                session_id=session_id,
+                tabular_count=len(tech_requirements),
+            )
+            print(
+                f"    [Económico] Sin ítems técnicos cotizables; uso {len(tech_requirements)} partida(s) "
+                "desde cotización/importe tabular.",
+                flush=True,
+            )
+
         if not tech_requirements:
             price_source_blocking = _build_price_source_blocking_items(excluded_as_docs)
             if price_source_blocking:
@@ -1101,7 +1118,7 @@ class EconomicAgent(BaseAgent):
                         correlation_id=correlation_id,
                     )
                 price_source_blocking = _build_price_source_blocking_items(excluded_as_docs)
-                if price_source_blocking:
+                if price_source_blocking and not pricing_line_items:
                     missing_fields = [_build_economic_price_source_question(price_source_blocking, structured_template_summary)]
                     await self._save_pending_questions(session_id, missing_fields)
                     return AgentOutput(
@@ -1234,6 +1251,18 @@ class EconomicAgent(BaseAgent):
                     self._proposal_from_session_line_items(pricing_line_items)
                 )
             )
+
+        if bool(quadrature_report.get("blocking")) and pricing_line_items:
+            # Cotización tabular: usar partidas de sesión solo si cierra la cuadratura.
+            _, _, _, _, quadrature_canonical = _recompute_from_current_draft(
+                self._proposal_from_session_line_items(pricing_line_items)
+            )
+            if not quadrature_canonical.get("blocking"):
+                proposal_draft, totals, total_base, grand_total, quadrature_report = (
+                    _recompute_from_current_draft(
+                        self._proposal_from_session_line_items(pricing_line_items)
+                    )
+                )
 
         calc_blocking_issues = list(totals.get("blocking_issues") or [])
         alertas_merged = (
@@ -1932,29 +1961,9 @@ class EconomicAgent(BaseAgent):
     @staticmethod
     def _is_reliable_pricing_row(row: Dict[str, Any]) -> bool:
         """Filtra filas tabulares que sí pueden usarse como evidencia económica."""
-        if not isinstance(row, dict):
-            return False
-        try:
-            price = float(row.get("precio_unitario") or 0.0)
-        except (TypeError, ValueError):
-            return False
-        if price <= 0:
-            return False
+        from app.services.economic_tabular_ingest_sync import is_reliable_pricing_row
 
-        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
-        if str(extra.get("layout") or "").strip().lower() == "raw_calculation":
-            return False
-
-        col_idx = extra.get("price_column_index")
-        if col_idx is None:
-            source_filename = str(extra.get("source_filename") or "").strip().lower()
-            if source_filename.endswith((".xlsx", ".xls")):
-                return False
-            return True
-        try:
-            return int(float(col_idx)) >= 0
-        except (TypeError, ValueError):
-            return False
+        return is_reliable_pricing_row(row)
 
     def _filter_reliable_pricing_rows(self, rows: List[Dict]) -> List[Dict]:
         """Conserva solo evidencia tabular que trae ancla de precio utilizable."""

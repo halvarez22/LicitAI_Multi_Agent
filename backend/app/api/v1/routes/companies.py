@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException, File, UploadFile, Form, BackgroundTasks
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+from datetime import datetime, timezone
+import asyncio
 import uuid
 import os
 import shutil
 import json
 import re
+import traceback
 
 from pydantic import BaseModel
 from app.api.v1.routes.sessions import get_repository
@@ -12,10 +15,15 @@ from app.services.ocr_service import OCRServiceClient
 from app.services.vector_service import VectorDbServiceClient
 from app.services.llm_service import LLMServiceClient
 from app.services.cif_profile_extract import extract_cif_company_profile_patch
+from app.services.fisica_profile_extract import (
+    is_ine_credential_text,
+    resolve_fisica_full_name,
+    resolve_rfc_persona_fisica,
+)
 from app.services.legal_representative_parser import (
-    detect_cif_contribuyente_name,
     detect_legal_representative,
     is_constancia_cif_text,
+    is_plausible_representative_name,
     resolve_rfc_persona_moral,
 )
 from app.utils.ocr_quality import looks_like_low_signal_ocr
@@ -30,8 +38,162 @@ class CompanyData(BaseModel):
     id: str | None = None
     name: str = "Unknown"
     type: str = "moral"
-    docs_metadata: Dict = {}
-    master_profile: Dict = {}
+    docs_metadata: Dict | None = None
+    master_profile: Dict | None = None
+
+ANALYSIS_STATUS_KEY = "_analysis_status"
+ANALYSIS_ERROR_KEY = "_analysis_error"
+ANALYSIS_UPDATED_KEY = "_analysis_updated_at"
+_company_analyze_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _set_analysis_status(
+    profile: Dict[str, Any],
+    status: str,
+    error: str | None = None,
+) -> Dict[str, Any]:
+    """Marca el estado del pipeline OCR+LLM en master_profile (metadatos internos)."""
+    updated = dict(profile or {})
+    updated[ANALYSIS_STATUS_KEY] = status
+    updated[ANALYSIS_UPDATED_KEY] = datetime.now(timezone.utc).isoformat()
+    if error:
+        updated[ANALYSIS_ERROR_KEY] = error
+    else:
+        updated.pop(ANALYSIS_ERROR_KEY, None)
+    return updated
+
+
+def _finalize_company_doc_statuses_after_analysis(company: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Promueve a ANALYZED los docs con OCR listo; devuelve parche para persistir."""
+    patch: Dict[str, Dict[str, Any]] = {}
+    for doc_title, doc_info in (company.get("docs") or {}).items():
+        if doc_title == "LOGOTIPO":
+            continue
+        if doc_info.get("status") != "PROCESSING":
+            continue
+        has_ocr = (
+            doc_info.get("ocr_chars") is not None
+            or doc_info.get("ocr_pages") is not None
+            or len((doc_info.get("ocr_extracted_text") or "").strip()) >= 40
+        )
+        if has_ocr:
+            doc_info["status"] = "ANALYZED"
+            patch[doc_title] = dict(doc_info)
+    return patch
+
+
+def _company_has_pending_uploads(company: Dict[str, Any]) -> bool:
+    for doc_title, doc_info in (company.get("docs") or {}).items():
+        if doc_title == "LOGOTIPO":
+            continue
+        if doc_info.get("status") == "UPLOADED":
+            return True
+    return False
+
+
+async def _schedule_company_analysis(company_id: str) -> None:
+    """Ejecuta análisis en background con lock por empresa y reintento si llegan nuevos uploads."""
+    lock = _company_analyze_locks.setdefault(company_id, asyncio.Lock())
+    async with lock:
+        while True:
+            try:
+                await _run_company_analysis(company_id, force_refresh=False)
+            except Exception as exc:
+                print(f"[COMPANY ANALYZE BG] Error en {company_id}: {exc}")
+                traceback.print_exc()
+                break
+
+            repo = await get_repository()
+            try:
+                company = await repo.get_company(company_id)
+                if not company or not _company_has_pending_uploads(company):
+                    break
+                print(f"[*] Re-analizando {company_id}: nuevos documentos detectados tras corrida previa.")
+            finally:
+                await repo.disconnect()
+
+
+async def _patch_company_doc(
+    repo: Any,
+    company_id: str,
+    doc_title: str,
+    doc_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persiste un solo documento fusionándolo con el expediente ya guardado."""
+    updated = await repo.patch_company_state(
+        company_id,
+        docs_patch={doc_title: doc_info},
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return updated
+
+
+async def _patch_company_profile(
+    repo: Any,
+    company_id: str,
+    profile_patch: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persiste parches del perfil maestro sin pisar otros campos ni docs."""
+    updated = await repo.patch_company_state(
+        company_id,
+        master_profile_patch=profile_patch,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return updated
+
+
+def _next_company_doc_pending_ocr(
+    company: Dict[str, Any],
+) -> Optional[tuple[str, Dict[str, Any]]]:
+    """Siguiente documento que aún no tiene texto OCR utilizable."""
+    for doc_title, doc_info in (company.get("docs") or {}).items():
+        if doc_title == "LOGOTIPO":
+            continue
+        status = (doc_info.get("status") or "").upper()
+        has_ocr = len((doc_info.get("ocr_extracted_text") or "").strip()) >= 40
+        if status == "UPLOADED":
+            return doc_title, dict(doc_info)
+        if status in ("PROCESSING", "LOW_TEXT_QUALITY", "OCR_FAILED") and not has_ocr:
+            return doc_title, dict(doc_info)
+    return None
+
+
+def _gather_cif_text_blobs(company: Dict[str, Any], runtime_blobs: List[str]) -> List[str]:
+    """Une texto CIF de la corrida actual con OCR persistido en docs de la empresa."""
+    merged: List[str] = []
+    seen: set[str] = set()
+    for blob in runtime_blobs or []:
+        text = (blob or "").strip()
+        if len(text) >= 40 and text not in seen:
+            seen.add(text)
+            merged.append(text)
+    for doc_title, doc_info in (company.get("docs") or {}).items():
+        if doc_title == "LOGOTIPO":
+            continue
+        text = (doc_info.get("ocr_extracted_text") or "").strip()
+        if len(text) < 40:
+            continue
+        if not (
+            _company_doc_title_suggests_cif(doc_title)
+            or is_constancia_cif_text(text)
+        ):
+            continue
+        if text not in seen:
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
+def _sanitize_representante_legal_field(profile_data: Dict[str, Any]) -> None:
+    """Descarta frases notariales o boilerplate que se cuelan como representante."""
+    rep = (profile_data.get("representante_legal") or "").strip()
+    if not rep or rep.lower() in {"no encontrado", "...", "no especificado"}:
+        return
+    if not is_plausible_representative_name(rep):
+        profile_data["representante_legal"] = "No encontrado"
+
 
 def _chunk_text(text: str, chunk_size: int = 4000, overlap: int = 400) -> List[str]:
     chunks = []
@@ -43,13 +205,15 @@ def _chunk_text(text: str, chunk_size: int = 4000, overlap: int = 400) -> List[s
     return [c for c in chunks if c.strip()]
 
 
-def _extraction_quality(ocr_ctx: Dict) -> Dict:
+def _extraction_quality(ocr_ctx: Dict, doc_title: Optional[str] = None) -> Dict:
     """Evalua calidad de extracción para decidir si un documento es analizable."""
     extracted_text = (ocr_ctx.get("extracted_text") or "").strip()
     pages = ocr_ctx.get("pages", []) or []
     pages_with_text = sum(1 for p in pages if (p.get("text") or "").strip())
     chars = len(extracted_text)
     min_chars = int(os.getenv("COMPANY_OCR_MIN_CHARS", "120"))
+    if doc_title and _company_doc_title_suggests_ine(doc_title):
+        min_chars = int(os.getenv("COMPANY_OCR_MIN_CHARS_ID", "80"))
     min_pages_with_text = int(os.getenv("COMPANY_OCR_MIN_PAGES_WITH_TEXT", "1"))
     low_signal = looks_like_low_signal_ocr(extracted_text)
     is_ok = chars >= min_chars and pages_with_text >= min_pages_with_text and not low_signal
@@ -62,6 +226,94 @@ def _extraction_quality(ocr_ctx: Dict) -> Dict:
         "low_signal": low_signal,
     }
 
+
+
+def _company_doc_title_suggests_ine(doc_title: str) -> bool:
+    """True si el título sugiere INE / identificación oficial."""
+    t = (doc_title or "").lower()
+    keys = (
+        "ine",
+        "identificacion",
+        "identificación",
+        "credencial",
+        "ife",
+        "identidad",
+    )
+    return any(k in t for k in keys)
+
+
+def _gather_ine_text_blobs(company: Dict[str, Any], runtime_blobs: List[str]) -> List[str]:
+    """Texto OCR de INE persistido + corrida actual."""
+    merged: List[str] = []
+    seen: set[str] = set()
+    for blob in runtime_blobs or []:
+        text = (blob or "").strip()
+        if len(text) >= 40 and text not in seen:
+            seen.add(text)
+            merged.append(text)
+    for doc_title, doc_info in (company.get("docs") or {}).items():
+        if doc_title == "LOGOTIPO":
+            continue
+        text = (doc_info.get("ocr_extracted_text") or "").strip()
+        if len(text) < 40:
+            continue
+        if not (_company_doc_title_suggests_ine(doc_title) or is_ine_credential_text(text)):
+            continue
+        if text not in seen:
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
+def _apply_fisica_identity_patch(
+    profile_data: Dict[str, Any],
+    *,
+    ine_blob: str,
+    cif_blob: str,
+    context_blob: str,
+    existing_profile: Dict[str, Any],
+    company_name: str,
+) -> Dict[str, Any]:
+    """Ancla nombre y RFC de persona física con precedencia INE > CIF > LLM > ficha."""
+    locked = set((existing_profile or {}).get("_manual_locked_fields", []))
+    weak = {"", "no encontrado", "no encontrado.", "n/a", "s/d", "sd", "...", "no especificado"}
+    meta: Dict[str, Any] = {}
+
+    identity_blob = "\n\n".join(b for b in (ine_blob, cif_blob, context_blob) if (b or "").strip())
+    rfc_resolution = resolve_rfc_persona_fisica(identity_blob, profile_data.get("rfc"))
+    meta["rfc_resolution"] = rfc_resolution
+    if "rfc" not in locked:
+        final_rfc = (rfc_resolution.get("value") or "").strip()
+        if final_rfc:
+            profile_data["rfc"] = final_rfc.upper()
+
+    name_hit = resolve_fisica_full_name(
+        ine_blob=ine_blob,
+        cif_blob=cif_blob,
+        fallback_blob=context_blob,
+    )
+    meta["name_resolution"] = name_hit
+    full_name = (name_hit.get("full_name") or "").strip()
+    if full_name:
+        for field in ("representante_legal", "razon_social"):
+            if field in locked and (existing_profile.get(field) or "").strip():
+                continue
+            cur = (profile_data.get(field) or "").strip()
+            invalid = bool(cur) and not is_plausible_representative_name(cur)
+            if not cur or cur.lower() in weak or invalid:
+                profile_data[field] = full_name
+
+    for field in ("representante_legal", "razon_social"):
+        cur = (profile_data.get(field) or "").strip()
+        if not cur or cur.lower() in weak:
+            fallback = (company_name or "").strip()
+            if fallback:
+                profile_data[field] = fallback
+
+    if not (profile_data.get("poderes") or "").strip() or str(profile_data.get("poderes")).lower() in weak:
+        profile_data["poderes"] = "Actuación en nombre propio"
+
+    return meta
 
 
 def _company_doc_title_suggests_cif(doc_title: str) -> bool:
@@ -185,6 +437,46 @@ def _sanitize_llm_profile_placeholders(profile_data: Dict[str, Any]) -> None:
             profile_data[k] = "No encontrado"
 
 
+def _coerce_profile_field_to_text(value: Any) -> str:
+    """Convierte listas/dict del LLM (p. ej. poderes[{facultad, fecha}]) a texto plano."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        lines = [_coerce_profile_field_to_text(item) for item in value]
+        return "\n".join(line for line in lines if line.strip())
+    if isinstance(value, dict):
+        facultad = value.get("facultad") or value.get("facultades") or value.get("descripcion") or value.get("poder")
+        fecha = value.get("fecha") or value.get("vigencia") or value.get("desde")
+        parts: List[str] = []
+        if facultad:
+            parts.append(str(facultad).strip())
+        if fecha:
+            parts.append(f"({str(fecha).strip()})")
+        if parts:
+            return " ".join(parts)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _normalize_profile_scalar_fields(profile_data: Dict[str, Any]) -> None:
+    """Asegura que campos de perfil expuestos a la UI sean texto, no JSON anidado."""
+    for field in (
+        "rfc",
+        "razon_social",
+        "representante_legal",
+        "domicilio_fiscal",
+        "objeto_social",
+        "poderes",
+    ):
+        if field not in profile_data:
+            continue
+        coerced = _coerce_profile_field_to_text(profile_data.get(field))
+        if coerced:
+            profile_data[field] = coerced
+
+
 def _merge_profile_with_hitl(existing_profile: Dict[str, Any], new_profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Merge con precedencia mínima HITL:
@@ -297,6 +589,10 @@ _MORAL_PARSER_TRIGGERS_OVERRIDE_LLM = frozenset(
         "presidente_asamblea_el_c",
         "presidente_mesa_directiva_el_c",
         "se_designa",
+        "admin_unico_recayendo_nombramiento",
+        "admin_unico_nombramiento_en_c",
+        "administrador_unico",
+        "representante_legal",
     }
 )
 
@@ -318,11 +614,12 @@ def _apply_moral_representante_from_parser(
         return
     llm_rep = (profile_data.get("representante_legal") or "").strip()
     parser_rep = (parser_result.get("representative") or "").strip()
-    if not parser_rep:
+    if not parser_rep or not is_plausible_representative_name(parser_rep):
         return
     trig = str(parser_result.get("trigger") or "")
     weak_llm = (not llm_rep) or llm_rep.lower() in {"no encontrado", "...", "no especificado"}
-    if weak_llm or trig in _MORAL_PARSER_TRIGGERS_OVERRIDE_LLM:
+    invalid_llm = bool(llm_rep) and not is_plausible_representative_name(llm_rep)
+    if weak_llm or invalid_llm or trig in _MORAL_PARSER_TRIGGERS_OVERRIDE_LLM:
         profile_data["representante_legal"] = parser_rep
 
 
@@ -440,33 +737,29 @@ async def upload_company_doc(
             "path": file_path,
             "date": "NOW",
             "preview": preview,
-            "status": "UPLOADED" # Marcar como cargado para que el analista lo tome
+            "status": "UPLOADED",
         }
 
-        # Update company object
-        if not company.get("docs"):
-            company["docs"] = {}
-        company["docs"][docTitle] = file_metadata
-        
-        # ── FIX LOGO: Inyectar ruta en master_profile inmediatamente al subir ──
-        # No esperar a analyze_company: si el usuario solo sube el logo sin otros
-        # documentos, analyze_company retorna antes de llegar al bloque de inyección.
+        profile_patch: Dict[str, Any] = {}
         if docTitle == "LOGOTIPO" and file_path:
-            if not company.get("master_profile"):
-                company["master_profile"] = {}
-            company["master_profile"]["logo"] = file_path
+            profile_patch["logo"] = file_path
+        elif docTitle != "LOGOTIPO":
+            profile_patch = _set_analysis_status(
+                company.get("master_profile") or {},
+                "processing",
+            )
 
-        # Guardar estado de la empresa
-        await repo.save_company(company_id, company)
-        
-        # Guardar estado de la empresa
-        await repo.save_company(company_id, company)
-        
-        # Lanzar análisis en segundo plano (Background Task)
-        background_tasks.add_task(analyze_company, company_id)
-        
-        # Retornar de inmediato para que el frontend no bloquee
-        return {"success": True, "data": company}
+        updated_company = await repo.patch_company_state(
+            company_id,
+            docs_patch={docTitle: file_metadata},
+            master_profile_patch=profile_patch or None,
+        )
+        if not updated_company:
+            raise HTTPException(status_code=404, detail="Company not found")
+
+        background_tasks.add_task(_schedule_company_analysis, company_id)
+
+        return {"success": True, "data": updated_company}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -476,111 +769,149 @@ async def upload_company_doc(
 
 @router.post("/{company_id}/analyze", response_model=Dict)
 async def analyze_company(company_id: str, force_refresh: bool = False):
+    return await _run_company_analysis(company_id, force_refresh=force_refresh)
+
+
+async def _run_company_analysis(company_id: str, force_refresh: bool = False):
     repo = await get_repository()
     try:
         company = await repo.get_company(company_id)
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # 1. Asegurar que todos los documentos nuevos tengan OCR e Indexación
-        docs_to_process = company.get("docs", {})
+        await _patch_company_profile(
+            repo,
+            company_id,
+            _set_analysis_status(company.get("master_profile") or {}, "processing"),
+        )
+
         ocr_client = OCRServiceClient()
         vector_client = VectorDbServiceClient()
         vector_session = f"company_{company_id}"
         cif_text_blobs: List[str] = []
-
+        ine_text_blobs: List[str] = []
         processing_report: List[Dict] = []
-        for doc_title, doc_info in docs_to_process.items():
-            if doc_title != 'LOGOTIPO' and doc_info.get("status") in ["UPLOADED", "PROCESSING"]:
-                print(f"[*] Procesando OCR diferido para: {doc_title} ({doc_info['name']})")
-                doc_info["status"] = "PROCESSING"
-                await repo.save_company(company_id, company) # Persistir estado intermedio
-                
-                file_path = doc_info["path"]
-                ocr_ctx = await ocr_client.scan_document(file_path)
 
-                if "error" in ocr_ctx or not ocr_ctx.get("success", False):
-                    doc_info["status"] = "OCR_FAILED"
-                    doc_info["ocr_error_type"] = "OCR_FAILED"
-                    doc_info["ocr_error_message"] = ocr_ctx.get("error", "Fallo en cadena OCR.")
-                    processing_report.append(
-                        {
-                            "doc_title": doc_title,
-                            "filename": doc_info.get("name"),
-                            "status": doc_info["status"],
-                            "reason": doc_info["ocr_error_message"],
-                            "method": ocr_ctx.get("method"),
-                        }
-                    )
-                    continue
+        while True:
+            company = await repo.get_company(company_id)
+            if not company:
+                raise HTTPException(status_code=404, detail="Company not found")
+            pending = _next_company_doc_pending_ocr(company)
+            if not pending:
+                break
 
-                quality = _extraction_quality(ocr_ctx)
-                if not quality["ok"]:
-                    doc_info["status"] = "LOW_TEXT_QUALITY"
-                    doc_info["ocr_error_type"] = "LOW_TEXT_QUALITY"
-                    doc_info["ocr_error_message"] = (
-                        "Extracción insuficiente. Sube un PDF más legible o reintenta OCR."
-                    )
-                    doc_info["ocr_chars"] = quality["chars"]
-                    doc_info["ocr_pages_with_text"] = quality["pages_with_text"]
-                    processing_report.append(
-                        {
-                            "doc_title": doc_title,
-                            "filename": doc_info.get("name"),
-                            "status": doc_info["status"],
-                            "reason": doc_info["ocr_error_message"],
-                            "method": ocr_ctx.get("method"),
-                            "chars": quality["chars"],
-                            "pages_with_text": quality["pages_with_text"],
-                        }
-                    )
-                    continue
+            doc_title, doc_info = pending
+            print(f"[*] Procesando OCR diferido para: {doc_title} ({doc_info.get('name')})")
+            doc_info["status"] = "PROCESSING"
+            await _patch_company_doc(repo, company_id, doc_title, doc_info)
 
-                pages = ocr_ctx.get("pages", [])
-                full_doc_text = (ocr_ctx.get("extracted_text") or "").strip()
-                if not full_doc_text:
-                    full_doc_text = "\n".join(
-                        (p.get("text") or "").strip()
-                        for p in pages
-                        if (p.get("text") or "").strip()
-                    )
-                if (
-                    _company_doc_title_suggests_cif(doc_title)
-                    or is_constancia_cif_text(full_doc_text)
-                ) and len(full_doc_text) >= 40:
-                    cif_text_blobs.append(full_doc_text[:80000])
+            file_path = doc_info["path"]
+            ocr_ctx = await ocr_client.scan_document(file_path)
 
-                for page in pages:
-                    p_text = page.get("text", "")
-                    if p_text:
-                        chunks = _chunk_text(p_text, 1500, 200)
-                        metadatas = [
-                            {
-                                "source": doc_info["name"],
-                                "company": company_id,
-                                "doc_type": doc_title,
-                                "method": ocr_ctx.get("method", "unknown"),
-                            }
-                            for _ in chunks
-                        ]
-                        vector_client.add_texts(vector_session, chunks, metadatas)
-                doc_info["status"] = "ANALYZED"
-                doc_info["ocr_pages"] = len(pages)
-                doc_info["ocr_chars"] = quality["chars"]
-                doc_info["ocr_pages_with_text"] = quality["pages_with_text"]
+            if "error" in ocr_ctx or not ocr_ctx.get("success", False):
+                doc_info["status"] = "OCR_FAILED"
+                doc_info["ocr_error_type"] = "OCR_FAILED"
+                doc_info["ocr_error_message"] = ocr_ctx.get("error", "Fallo en cadena OCR.")
                 processing_report.append(
                     {
                         "doc_title": doc_title,
                         "filename": doc_info.get("name"),
                         "status": doc_info["status"],
+                        "reason": doc_info["ocr_error_message"],
+                        "method": ocr_ctx.get("method"),
+                    }
+                )
+                await _patch_company_doc(repo, company_id, doc_title, doc_info)
+                continue
+
+            quality = _extraction_quality(ocr_ctx, doc_title=doc_title)
+            if not quality["ok"]:
+                pages = ocr_ctx.get("pages", []) or []
+                partial_text = (ocr_ctx.get("extracted_text") or "").strip()
+                if not partial_text:
+                    partial_text = "\n".join(
+                        (p.get("text") or "").strip()
+                        for p in pages
+                        if (p.get("text") or "").strip()
+                    )
+                doc_info["status"] = "LOW_TEXT_QUALITY"
+                doc_info["ocr_error_type"] = "LOW_TEXT_QUALITY"
+                doc_info["ocr_error_message"] = (
+                    "Extracción insuficiente. Sube un PDF más legible o reintenta OCR."
+                )
+                doc_info["ocr_chars"] = quality["chars"]
+                doc_info["ocr_pages_with_text"] = quality["pages_with_text"]
+                if partial_text:
+                    doc_info["ocr_extracted_text"] = partial_text[:80000]
+                    doc_info["ocr_pages"] = len(pages)
+                processing_report.append(
+                    {
+                        "doc_title": doc_title,
+                        "filename": doc_info.get("name"),
+                        "status": doc_info["status"],
+                        "reason": doc_info["ocr_error_message"],
                         "method": ocr_ctx.get("method"),
                         "chars": quality["chars"],
                         "pages_with_text": quality["pages_with_text"],
                     }
                 )
-        
-        # Guardar estados de procesamiento
-        await repo.save_company(company_id, company)
+                await _patch_company_doc(repo, company_id, doc_title, doc_info)
+                continue
+
+            pages = ocr_ctx.get("pages", [])
+            full_doc_text = (ocr_ctx.get("extracted_text") or "").strip()
+            if not full_doc_text:
+                full_doc_text = "\n".join(
+                    (p.get("text") or "").strip()
+                    for p in pages
+                    if (p.get("text") or "").strip()
+                )
+            if (
+                _company_doc_title_suggests_cif(doc_title)
+                or is_constancia_cif_text(full_doc_text)
+            ) and len(full_doc_text) >= 40:
+                cif_text_blobs.append(full_doc_text[:80000])
+            if (
+                _company_doc_title_suggests_ine(doc_title)
+                or is_ine_credential_text(full_doc_text)
+            ) and len(full_doc_text) >= 40:
+                ine_text_blobs.append(full_doc_text[:80000])
+
+            for page in pages:
+                p_text = page.get("text", "")
+                if p_text:
+                    chunks = _chunk_text(p_text, 1500, 200)
+                    metadatas = [
+                        {
+                            "source": doc_info["name"],
+                            "company": company_id,
+                            "doc_type": doc_title,
+                            "method": ocr_ctx.get("method", "unknown"),
+                        }
+                        for _ in chunks
+                    ]
+                    vector_client.add_texts(vector_session, chunks, metadatas)
+
+            doc_info["status"] = "PROCESSING"
+            doc_info["ocr_pages"] = len(pages)
+            doc_info["ocr_chars"] = quality["chars"]
+            doc_info["ocr_pages_with_text"] = quality["pages_with_text"]
+            doc_info["ocr_extracted_text"] = full_doc_text[:80000]
+            processing_report.append(
+                {
+                    "doc_title": doc_title,
+                    "filename": doc_info.get("name"),
+                    "status": "PROCESSING",
+                    "method": ocr_ctx.get("method"),
+                    "chars": quality["chars"],
+                    "pages_with_text": quality["pages_with_text"],
+                }
+            )
+            await _patch_company_doc(repo, company_id, doc_title, doc_info)
+
+        company = await repo.get_company(company_id)
+        if not company:
+            raise HTTPException(status_code=404, detail="Company not found")
 
         # Diferenciar búsqueda según tipo de empresa
         is_fisica = company.get("type") == "fisica"
@@ -608,13 +939,27 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
             metadatas = [p[1] for p in pairs]
 
         if not docs:
-            await repo.save_company(company_id, company)
+            failure_msg = (
+                "No hay contexto textual suficiente para extraer perfil corporativo. "
+                "Verifica calidad OCR de documentos."
+            )
+            company = await repo.get_company(company_id) or company
+            docs_status_patch = _finalize_company_doc_statuses_after_analysis(company)
+            await repo.patch_company_state(
+                company_id,
+                docs_patch=docs_status_patch or None,
+                master_profile_patch=_set_analysis_status(
+                    company.get("master_profile") or {},
+                    "failed",
+                    failure_msg,
+                ),
+            )
             updated_company = await repo.get_company(company_id)
             return {
                 "success": False,
-                "message": "No hay contexto textual suficiente para extraer perfil corporativo. Verifica calidad OCR de documentos.",
+                "message": failure_msg,
                 "data": updated_company,
-                "profile": company.get("master_profile", {}),
+                "profile": updated_company.get("master_profile", {}),
                 "processing_report": processing_report,
             }
         if docs:
@@ -692,9 +1037,14 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
 
         if isinstance(profile_data, dict) and "raw_llm_output" not in profile_data:
             _sanitize_llm_profile_placeholders(profile_data)
+            _normalize_profile_scalar_fields(profile_data)
 
         existing_profile = company.get("master_profile", {}) or {}
-        cif_blob = "\n\n---CIF---\n\n".join(cif_text_blobs)
+        company = await repo.get_company(company_id) or company
+        cif_blobs_merged = _gather_cif_text_blobs(company, cif_text_blobs)
+        ine_blobs_merged = _gather_ine_text_blobs(company, ine_text_blobs)
+        cif_blob = "\n\n---CIF---\n\n".join(cif_blobs_merged)
+        ine_blob = "\n\n---INE---\n\n".join(ine_blobs_merged)
         if cif_blob.strip():
             _apply_cif_constancia_patch(
                 profile_data,
@@ -703,33 +1053,29 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
                 existing_profile=existing_profile,
             )
 
-        # Persona física: ancla desde CIF/constancia (etiquetas SAT) antes del nombre genérico de la empresa
+        fisica_identity_meta: Dict[str, Any] = {}
         if is_fisica:
-            cif_name = detect_cif_contribuyente_name(context)
-            if cif_name.get("found"):
-                fn = (cif_name.get("full_name") or "").strip()
-                if fn:
-                    rep = (profile_data.get("representante_legal") or "").strip()
-                    rz = (profile_data.get("razon_social") or "").strip()
-                    if not rep or rep.lower() == "no encontrado":
-                        profile_data["representante_legal"] = fn
-                    if not rz or rz.lower() == "no encontrado":
-                        profile_data["razon_social"] = fn
-
-        # Persona física: último recurso, nombre registrado en la ficha de empresa
-        if is_fisica:
-            rep = (profile_data.get("representante_legal") or "").strip()
-            rz = (profile_data.get("razon_social") or "").strip()
-            if not rep or rep.lower() == "no encontrado":
-                profile_data["representante_legal"] = company.get("name")
-            if not rz or rz.lower() == "no encontrado":
-                profile_data["razon_social"] = company.get("name") or profile_data.get(
-                    "representante_legal"
-                )
+            fisica_identity_meta = _apply_fisica_identity_patch(
+                profile_data,
+                ine_blob=ine_blob,
+                cif_blob=cif_blob,
+                context_blob=context,
+                existing_profile=existing_profile,
+                company_name=company.get("name", ""),
+            )
 
         # Parser determinista: persona moral prioriza asamblea / delegado sobre salida del LLM.
         if not is_fisica:
             _apply_moral_representante_from_parser(profile_data, parser_result, existing_profile)
+
+        _sanitize_representante_legal_field(profile_data)
+        if (
+            not is_fisica
+            and (profile_data.get("representante_legal") or "").strip().lower() in {"", "no encontrado"}
+            and parser_result.get("found")
+            and is_plausible_representative_name(parser_result.get("representative") or "")
+        ):
+            profile_data["representante_legal"] = parser_result["representative"]
 
         # Persona moral: sanea razón social para evitar contaminación por OCR de INE.
         if not is_fisica:
@@ -740,7 +1086,9 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
             )
 
         rfc_resolution: Dict[str, Any] = {}
-        if not is_fisica:
+        if is_fisica:
+            rfc_resolution = fisica_identity_meta.get("rfc_resolution") or {}
+        elif not is_fisica:
             rfc_resolution = resolve_rfc_persona_moral(context, profile_data.get("rfc"))
             locked_fields = set((existing_profile or {}).get("_manual_locked_fields", []))
             if "rfc" not in locked_fields:
@@ -748,7 +1096,6 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
                 if final_rfc:
                     profile_data["rfc"] = final_rfc.upper()
             elif existing_profile.get("rfc"):
-                # Coherencia de procedencia: no sustituir valor bloqueado por HITL.
                 profile_data["rfc"] = existing_profile.get("rfc")
 
         # Preservar campos de dirección si ya existían (adicionados manualmente)
@@ -777,6 +1124,7 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
         if rfc_value and metadatas:
             rfc_meta = sorted(metadatas, key=lambda m: _meta_priority(m), reverse=True)[0]
 
+        name_resolution = fisica_identity_meta.get("name_resolution") if is_fisica else None
         provenance_ui: Dict[str, Any] = {
             "representante_legal": {
                 "field": "representante_legal",
@@ -784,23 +1132,38 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
                 "source_doc": representative_meta.get("source"),
                 "page": representative_meta.get("page"),
                 "method": representative_meta.get("method"),
-                "confidence": parser_result.get("confidence", 0.0) if parser_result.get("found") else 0.6,
-                "evidence_snippet": parser_result.get("evidence", "") if parser_result.get("found") else (docs[0][:280] if docs else ""),
-                "strategy": parser_result.get("strategy", "llm") if parser_result.get("found") else "llm",
+                "confidence": (
+                    name_resolution.get("confidence", 0.0)
+                    if is_fisica and name_resolution and name_resolution.get("found")
+                    else parser_result.get("confidence", 0.0) if parser_result.get("found") else 0.6
+                ),
+                "evidence_snippet": (
+                    (name_resolution.get("evidence") or "")[:320]
+                    if is_fisica and name_resolution and name_resolution.get("found")
+                    else parser_result.get("evidence", "") if parser_result.get("found") else (docs[0][:280] if docs else "")
+                ),
+                "strategy": (
+                    name_resolution.get("strategy", "llm")
+                    if is_fisica and name_resolution and name_resolution.get("found")
+                    else parser_result.get("strategy", "llm") if parser_result.get("found") else "llm"
+                ),
             }
         }
-        if not is_fisica and rfc_resolution:
+        if rfc_resolution:
             prev_llm = rfc_resolution.get("previous_llm")
+            resolved_val = str(rfc_resolution.get("value") or "").strip().upper()
+            saved_val = str(rfc_value or "").strip().upper()
+            correction_applied = bool(resolved_val and saved_val == resolved_val)
             provenance_ui["rfc"] = {
                 "field": "rfc",
                 "value": rfc_value,
                 "source_doc": rfc_meta.get("source"),
                 "page": rfc_meta.get("page"),
                 "method": rfc_meta.get("method"),
-                "confidence": 0.92 if rfc_resolution.get("strategy", "").startswith("deterministic") else 0.72,
+                "confidence": 0.92 if str(rfc_resolution.get("strategy", "")).startswith("deterministic") else 0.72,
                 "evidence_snippet": (rfc_resolution.get("evidence_snippet") or "")[:320],
                 "strategy": rfc_resolution.get("strategy", "llm"),
-                "previous_llm_value": prev_llm if rfc_resolution.get("changed") else None,
+                "previous_llm_value": prev_llm if rfc_resolution.get("changed") and correction_applied else None,
             }
         elif rfc_value:
             provenance_ui["rfc"] = {
@@ -817,10 +1180,15 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
 
         profile_data["provenance_ui"] = provenance_ui
 
+        company = await repo.get_company(company_id) or company
+        docs_status_patch = _finalize_company_doc_statuses_after_analysis(company)
         merged_profile = _merge_profile_with_hitl(existing_profile, profile_data)
-        company["master_profile"] = merged_profile
-        await repo.save_company(company_id, company)
-        updated_company = await repo.get_company(company_id)
+        merged_profile = _set_analysis_status(merged_profile, "ready")
+        updated_company = await repo.patch_company_state(
+            company_id,
+            docs_patch=docs_status_patch or None,
+            master_profile_patch=merged_profile,
+        )
 
         out: Dict[str, Any] = {
             "success": True,
@@ -828,7 +1196,7 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
             "profile": merged_profile,
             "processing_report": processing_report,
         }
-        if not is_fisica and rfc_resolution:
+        if rfc_resolution:
             resolved_val = str(rfc_resolution.get("value") or "").strip().upper()
             saved_val = str(merged_profile.get("rfc") or "").strip().upper()
             correction_applied = bool(resolved_val and saved_val == resolved_val)
@@ -844,8 +1212,24 @@ async def analyze_company(company_id: str, force_refresh: bool = False):
                 ),
             }
         return out
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
+        try:
+            company = await repo.get_company(company_id)
+            if company:
+                docs_status_patch = _finalize_company_doc_statuses_after_analysis(company)
+                await repo.patch_company_state(
+                    company_id,
+                    docs_patch=docs_status_patch or None,
+                    master_profile_patch=_set_analysis_status(
+                        company.get("master_profile") or {},
+                        "failed",
+                        str(e)[:240],
+                    ),
+                )
+        except Exception:
+            pass
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:

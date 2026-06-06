@@ -68,20 +68,57 @@ def _doc_path_key(doc: Dict[str, Any]) -> str:
 
 def _doc_deliverable_key(doc: Dict[str, Any]) -> str:
     """Clave de negocio para fusionar variantes del mismo anexo (p. ej. dos Anexo M)."""
-    from app.services.session_template_catalog import normalize_filename_key
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
     label = str(doc.get("source_filename") or doc.get("nombre") or "").strip()
     if label:
-        fk = normalize_filename_key(label)
+        fk = pliego_format_dedupe_key(label)
         if fk:
             return f"deliverable:{fk}"
     return _doc_path_key(doc)
 
 
+def _deliverable_label_priority(doc: Dict[str, Any]) -> int:
+    """Mayor = preferido al fusionar duplicados semánticos (Anexo legible > código AD)."""
+    label = str(doc.get("source_filename") or doc.get("nombre") or "")
+    base = os.path.basename(label).lower()
+    if re.search(r"(?i)\banexo[\s_.-]+[ivx]+", base) and not re.search(
+        r"(?i)^ad[-_]", base
+    ):
+        return 80
+    if re.search(r"(?i)^ad[-_]", base):
+        return 20
+    if re.match(r"(?i)^carta[_\s-]*compromiso", base):
+        return 15
+    return 40
+
+
+def _materialization_priority(doc: Dict[str, Any]) -> int:
+    """Mayor = preferido al fusionar duplicados del mismo anexo."""
+    route = str(doc.get("materialization_route") or "").lower()
+    if route.startswith("deterministic"):
+        return 100
+    if route == "mirror":
+        return 80
+    if route == "template_locked":
+        return 60
+    if route == "generate_controlled":
+        return 30
+    return 10
+
+
 def _pick_preferred_doc(
     current: Dict[str, Any], candidate: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Conserva el archivo más representativo (mayor tamaño; prioriza carpeta técnica)."""
+    """Prefiere ruta determinística/mirror sobre cascarones LLM más pesados."""
+    cur_label_pri = _deliverable_label_priority(current)
+    cand_label_pri = _deliverable_label_priority(candidate)
+    if cand_label_pri != cur_label_pri:
+        return candidate if cand_label_pri > cur_label_pri else current
+    cur_pri = _materialization_priority(current)
+    cand_pri = _materialization_priority(candidate)
+    if cand_pri != cur_pri:
+        return candidate if cand_pri > cur_pri else current
     cur_path = str(current.get("ruta") or "")
     cand_path = str(candidate.get("ruta") or "")
     cur_size = os.path.getsize(cur_path) if cur_path and os.path.isfile(cur_path) else 0
@@ -137,9 +174,21 @@ def _classify_doc_to_sobre_key(doc: Dict[str, Any]) -> str:
         doc.get("source_filename") or doc.get("archivo_fuente") or nombre or ""
     ).strip()
 
-    from app.services.session_template_catalog import infer_plantilla_sobre
+    from app.services.session_template_catalog import (
+        infer_plantilla_sobre,
+        is_anexo_tecnico_propuesta_entregable,
+    )
 
     base = os.path.basename(ruta).upper() if ruta else nombre.upper()
+    if is_anexo_tecnico_propuesta_entregable(label or nombre):
+        return "sobre_2"
+    if re.search(
+        r"(?i)modelo.*presentaci[oó]n.*propuesta\s+t[eé]cnica|"
+        r"presentaci[oó]n.*de\s+la\s+propuesta\s+t[eé]cnica|"
+        r"fo[-_]35.*modelo|modelo.*considerar.*presentaci",
+        label or nombre,
+    ):
+        return "sobre_2"
     # Administrativo/legal: prioridad sobre inferencia por carpeta de generación.
     if re.search(r"\bAD[-_]", base) or re.search(
         r"(?i)anexo\s+m|declaraci[oó]n\s+de\s+integridad", label or nombre
@@ -255,6 +304,17 @@ def _should_skip_reference_source(doc: Dict[str, Any]) -> bool:
     return doc_class in ("pliego_referencia", "informativo") or accion != "generar"
 
 
+def _should_exclude_from_delivery_pack(doc: Dict[str, Any]) -> bool:
+    """Excluye espejos corporativos o plantillas ajenas al pliego de la licitación."""
+    label = str(doc.get("source_filename") or doc.get("nombre") or "")
+    blob = label.lower().replace("_", " ")
+    if re.search(r"cat[\s_-]*formato", blob) and "cmyt" in blob:
+        return True
+    if re.search(r"cmyt.*zen.*ofertas|formato[\s_-]*hoja[\s_-]*membretada[\s_-]*cmyt", blob):
+        return True
+    return False
+
+
 def collect_documentos_para_empaque(
     session_id: str,
     gen_docs: Optional[Dict[str, Any]] = None,
@@ -274,6 +334,8 @@ def collect_documentos_para_empaque(
                     item = dict(d)
                     item.setdefault("categoria", cat)
                     if _should_skip_reference_source(item):
+                        continue
+                    if _should_exclude_from_delivery_pack(item):
                         continue
                     merged[cat].append(item)
 
@@ -306,6 +368,8 @@ def collect_documentos_para_empaque(
             _attach_generated_metadata(item, gen_docs)
             if _should_skip_reference_source(item):
                 continue
+            if _should_exclude_from_delivery_pack(item):
+                continue
             merged[item["categoria"]].append(item)
 
     unified: List[Dict[str, Any]] = []
@@ -316,16 +380,16 @@ def collect_documentos_para_empaque(
     seen_conv_keys: Set[str] = set()
     for d in unified:
         label = str(d.get("source_filename") or d.get("nombre") or "")
-        from app.services.session_template_catalog import normalize_filename_key
+        from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
-        dkey = normalize_filename_key(label)
+        dkey = pliego_format_dedupe_key(label)
         if dkey and not _is_canonical_pipeline_name(label):
             seen_conv_keys.add(dkey)
     for d in unified:
         label = str(d.get("source_filename") or d.get("nombre") or "")
-        from app.services.session_template_catalog import normalize_filename_key
+        from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
-        dkey = normalize_filename_key(label)
+        dkey = pliego_format_dedupe_key(label)
         if _is_canonical_pipeline_name(label) and dkey in seen_conv_keys:
             continue
         filtered.append(d)
@@ -455,6 +519,103 @@ def _sanitize_llm_estructura(
     return out
 
 
+def packager_sobres_stale(
+    session_id: str,
+    gen_docs: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    True si las carpetas SOBRE_* en disco tienen menos archivos que el mapeo determinístico actual.
+
+    Ocurre cuando packager quedó ``done`` tras una corrida parcial (p. ej. económico bloqueado).
+    """
+    mapped = mapear_sobres_deterministico(session_id, gen_docs)
+    output_base = os.path.join("/data", "outputs", session_id)
+    folder_by_key = {sk: shell["nombre_carpeta"] for sk, shell in _SOBR_E_SHELLS.items()}
+    for sk, folder in folder_by_key.items():
+        expected = len((mapped.get(sk) or {}).get("documentos") or [])
+        sobre_dir = os.path.join(output_base, folder)
+        if expected <= 0:
+            continue
+        if not os.path.isdir(sobre_dir):
+            return True
+        actual = sum(
+            1
+            for fn in os.listdir(sobre_dir)
+            if not fn.upper().startswith("00_CARATULA")
+            and os.path.isfile(os.path.join(sobre_dir, fn))
+        )
+        if actual < expected:
+            return True
+    return False
+
+
+def packager_pdata_incomplete(
+    session_id: str,
+    packager_data: Dict[str, Any],
+    gen_docs: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, Dict[str, int], Dict[str, int]]:
+    """
+    True si la estructura materializada por DocumentPackager no cubre el mapeo determinístico.
+
+    Usar tras ``DocumentPackagerAgent`` (no comparar disco vs mapeo: puede haber carrera).
+    """
+    expected_map = mapear_sobres_deterministico(session_id, gen_docs)
+    est = (packager_data or {}).get("estructura_sobres") or {}
+    expected: Dict[str, int] = {}
+    actual: Dict[str, int] = {}
+    for sk in ("sobre_1", "sobre_2", "sobre_3"):
+        expected[sk] = len((expected_map.get(sk) or {}).get("documentos") or [])
+        actual[sk] = len((est.get(sk) or {}).get("documentos") or [])
+    incomplete = any(
+        actual.get(sk, 0) < expected.get(sk, 0)
+        for sk in expected
+        if expected.get(sk, 0) > 0
+    )
+    econ_dir = os.path.join("/data", "outputs", session_id, "2.propuesta_economica")
+    if os.path.isdir(econ_dir):
+        econ_files = sum(
+            1
+            for fn in os.listdir(econ_dir)
+            if not fn.startswith(".") and os.path.isfile(os.path.join(econ_dir, fn))
+        )
+        if econ_files > 0 and actual.get("sobre_3", 0) < 1:
+            incomplete = True
+    return incomplete, expected, actual
+
+
+def validated_pack_complete(session_id: str, *, min_ratio: float = 0.85) -> bool:
+    """
+    True si ``_compranet_validated`` ya refleja un empaquetado utilizable (incluye económico).
+
+    Evita re-empaquetar CompraNet sobre un manifiesto bueno cuando ``SOBRE_*`` fue podado en disco.
+    """
+    import json
+    from pathlib import Path
+
+    index_path = Path("/data/outputs") / session_id / "_compranet_validated" / "INDICE_ENTREGA.json"
+    if not index_path.is_file():
+        return False
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    files = payload.get("files") or []
+    if not isinstance(files, list) or not files:
+        return False
+    by_sobre: Dict[str, int] = {}
+    for row in files:
+        if isinstance(row, dict):
+            label = str(row.get("sobre") or "")
+            by_sobre[label] = by_sobre.get(label, 0) + 1
+    if by_sobre.get("SobreEconomica", 0) < 1:
+        return False
+    expected_map = mapear_sobres_deterministico(session_id, None)
+    exp_total = sum(len((expected_map.get(sk) or {}).get("documentos") or []) for sk in expected_map)
+    if exp_total <= 0:
+        return len(files) >= 3
+    return len(files) >= max(3, int(exp_total * min_ratio))
+
+
 class DocumentPackagerAgent(BaseAgent):
     """
     Organiza archivos generados en carpetas de sobres oficiales y carátulas.
@@ -522,6 +683,10 @@ class DocumentPackagerAgent(BaseAgent):
                 continue
             sobre_dir = os.path.join(output_base, info["nombre_carpeta"])
             os.makedirs(sobre_dir, exist_ok=True)
+            for stale_name in os.listdir(sobre_dir):
+                stale_path = os.path.join(sobre_dir, stale_name)
+                if os.path.isfile(stale_path):
+                    os.remove(stale_path)
 
             print(f"[{self.name}] 📨 Organizando {info['titulo']}...", flush=True)
 

@@ -5,14 +5,37 @@ Elimina énfasis tipo Markdown y reglas horizontales que no aportan en DOCX.
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Instrucción compartida para prompts de redacción (Technical / Formats).
 ANTI_PLACEHOLDER_PROMPT_RULE = (
     "REGLA CRÍTICA: Si no tienes un dato real verificado en el contexto, NO escribas "
-    '"...", "N/A", "[dato]" ni placeholders entre corchetes. Omite esa oración o escribe '
-    'exactamente: "Dato pendiente de confirmar por el representante legal."'
+    '"...", "N/A", "[dato]", "[COMPLETAR]" ni placeholders entre corchetes. Omite esa fila '
+    "o escribe una frase concreta sin huecos (por ejemplo: se anexan contratos probatorios "
+    "en el expediente de la empresa)."
+)
+
+LEGAL_AUTHORIZATION_SYSTEM_RULE = (
+    "AUTORIZACIÓN LEGAL: Estás expresamente autorizado y obligado a redactar declaraciones bajo "
+    "protesta de decir verdad, manifiestos de integridad, cartas de garantía y textos "
+    "administrativos de licitación. NUNCA respondas con negativa tipo «no puedo generar contenido "
+    "legal» ni pidas permiso adicional: es el propósito central de la aplicación."
+)
+
+CONCURSANTE_LEXICON_SYSTEM_RULE = (
+    "PERSPECTIVA CONCURSANTE: Redacta SIEMPRE como representante legal del licitante "
+    "(«quien suscribe», «mi representada», «el suscrito», «nuestra propuesta»). "
+    "NUNCA redactes como comité evaluador ni incluyas «criterios de evaluación», "
+    "«evaluar la propuesta presentada por», «el presente análisis ha sido realizado» ni "
+    "condiciones de adjudicación del comité. Usa «en caso de resultar adjudicado» cuando aplique."
+)
+
+_BRACKET_PLACEHOLDER_RE = re.compile(
+    r"\+\s*\[(?:COMPLETAR|completar|Nombre|Fecha|Dato|Insertar)[^\]]*\]"
+    r"|\[(?:COMPLETAR|completar|Nombre del|Insertar)[^\]]*\]",
+    re.IGNORECASE,
 )
 
 
@@ -90,3 +113,149 @@ def parse_markdown_table(lines: List[str]) -> List[List[str]]:
         if any(c for c in cells): # Solo añadir si tiene contenido
             matrix.append(cells)
     return matrix
+
+
+def strip_bracket_placeholders_for_docx(text: str) -> str:
+    """Elimina marcadores [COMPLETAR] y corchetes genéricos de tablas/cuerpo DOCX."""
+    if not text:
+        return ""
+    out = _BRACKET_PLACEHOLDER_RE.sub("", text)
+    out = re.sub(r"\[[^\]]{2,120}\]", "", out)
+    out = re.sub(r"\|\s+\|", "| |", out)
+    return out
+
+
+def repair_docx_file_placeholders(path: str) -> bool:
+    """Repara placeholders en párrafos de un DOCX ya materializado. Retorna True si hubo cambios."""
+    from docx import Document
+
+    doc = Document(path)
+    changed = False
+    for paragraph in doc.paragraphs:
+        cleaned = strip_bracket_placeholders_for_docx(paragraph.text)
+        if cleaned != paragraph.text:
+            paragraph.text = cleaned
+            changed = True
+    if changed:
+        doc.save(path)
+    return changed
+
+
+def apply_corporate_docx_letterhead(doc: Any, metadata: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Inserta membrete corporativo (logo en encabezado + pie) en un Document de python-docx.
+
+    No modifica el cuerpo del documento; solo section header/footer.
+    """
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Inches, Pt
+
+    meta = metadata or {}
+    section = doc.sections[0]
+    header = section.header
+    htable = header.add_table(1, 2, Inches(6.5))
+
+    logo_path = str(meta.get("logo_path") or "").strip()
+    if logo_path and os.path.exists(logo_path):
+        try:
+            htable.cell(0, 0).paragraphs[0].add_run().add_picture(logo_path, width=Inches(1.5))
+        except Exception:
+            pass
+
+    p_info = htable.cell(0, 1).paragraphs[0]
+    p_info.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    tender = str(meta.get("tender_name") or "").upper()
+    if tender:
+        run = p_info.add_run(tender)
+        run.bold = True
+        run.font.size = Pt(8)
+
+    footer = section.footer
+    p_foot = footer.paragraphs[0]
+    p_foot.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    foot_text = str(meta.get("footer_text") or "").strip()
+    if foot_text:
+        p_foot.add_run(foot_text).font.size = Pt(7)
+
+
+def _write_excel_brand_block(ws: Any, start_row: int, metadata: Dict[str, Any]) -> None:
+    """Escribe bloque de marca (logo + datos empresa) en filas start_row..start_row+3."""
+    from openpyxl.drawing.image import Image
+    from openpyxl.styles import Alignment, Font
+
+    meta = metadata or {}
+    r0 = int(start_row)
+    ws.row_dimensions[r0].height = 52
+    ws.row_dimensions[r0 + 1].height = 16
+    ws.row_dimensions[r0 + 2].height = 16
+
+    logo_path = str(meta.get("logo_path") or "").strip()
+    if logo_path and os.path.exists(logo_path):
+        try:
+            img = Image(logo_path)
+            img.width = 140
+            img.height = 52
+            ws.add_image(img, f"A{r0}")
+        except Exception:
+            pass
+
+    empresa = str(meta.get("empresa") or "").upper()
+    rfc = str(meta.get("rfc") or "")
+    tender = str(meta.get("tender_name") or "").upper()
+    fecha = str(meta.get("fecha_corta") or meta.get("fecha") or "")
+
+    ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=6)
+    c1 = ws.cell(row=r0, column=2, value=empresa or "PROPUESTA ECONÓMICA")
+    c1.font = Font(bold=True, size=14)
+    c1.alignment = Alignment(horizontal="left", vertical="center")
+
+    ws.merge_cells(start_row=r0 + 1, start_column=2, end_row=r0 + 1, end_column=6)
+    c2 = ws.cell(row=r0 + 1, column=2, value=f"RFC: {rfc}" + (f"  |  {tender}" if tender else ""))
+    c2.font = Font(size=10)
+    c2.alignment = Alignment(horizontal="left")
+
+    ws.merge_cells(start_row=r0 + 2, start_column=2, end_row=r0 + 2, end_column=6)
+    label = "Tabla de precios unitarios"
+    if fecha:
+        label = f"{label} — {fecha}"
+    c3 = ws.cell(row=r0 + 2, column=2, value=label)
+    c3.font = Font(italic=True, size=10)
+    c3.alignment = Alignment(horizontal="left")
+
+
+def apply_corporate_excel_letterhead(ws: Any, metadata: Optional[Dict[str, Any]] = None) -> int:
+    """
+    Reserva filas 1-4 para membrete corporativo en hoja nueva.
+
+    Returns:
+        Fila 1-based donde deben ir los encabezados de tabla de partidas.
+    """
+    _write_excel_brand_block(ws, 1, metadata or {})
+    return 5
+
+
+def stamp_corporate_excel_file(path: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Inserta membrete corporativo al inicio de un XLSX ya existente (desplaza filas).
+
+    Returns:
+        True si se modificó el archivo.
+    """
+    if not path or not str(path).lower().endswith((".xlsx", ".xlsm")):
+        return False
+    if not metadata or not str(metadata.get("logo_path") or "").strip():
+        return False
+    if not os.path.isfile(path):
+        return False
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path)
+    ws = wb.active
+    if getattr(ws, "_images", None):
+        # Ya tiene imagen embebida en la hoja activa
+        return False
+    ws.insert_rows(1, 4)
+    _write_excel_brand_block(ws, 1, metadata)
+    wb.save(path)
+    return True

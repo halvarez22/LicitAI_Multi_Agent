@@ -685,9 +685,10 @@ class AnalystAgent(BaseAgent):
                 "2. FILTRO DE SUPERVIVENCIA: Tu prioridad absoluta son las 'Causas de Descalificación'. Si detectas una, repórtala con urgencia.\n"
                 "3. ANÁLISIS DE BRECHA (GAP ANALYSIS): Compara requisitos contra el 'PERFIL DE LA EMPRESA' proporcionado. Marca lo que falta o está vencido.\n"
                 "4. TRAZABILIDAD TOTAL: Para cada requisito, gap o alerta, DEBES citar el número de página y nombre del archivo (ej: 'Pág. 12, bases.pdf'). Si no lo haces, tu análisis no es auditable.\n"
-                "5. PROHIBIDO usar '...', 'punto X' o texto genérico en texto_literal, evidence_snippet o preguntas_junta_aclaraciones. Copia el fragmento literal de los extractos.\n"
-                "6. SI NO ESTÁ, NO EXISTE: Mantén la precisión técnica absoluta.\n"
-                "7. Responde ÚNICAMENTE en JSON válido."
+                "5. PROHIBIDO usar '...', 'punto X', placeholders del esquema JSON o texto genérico en texto_literal, evidence_snippet o preguntas_junta_aclaraciones. Copia el fragmento literal de los extractos; si no hay extracto verificable, deja la lista vacía.\n"
+                "6. PROHIBIDO inventar números de página, cláusulas o años de experiencia que no aparezcan en EXTRACTOS TÉCNICOS.\n"
+                "7. SI NO ESTÁ, NO EXISTE: Mantén la precisión técnica absoluta.\n"
+                "8. Responde ÚNICAMENTE en JSON válido."
             )
             
             # --- INYECCIÓN DE TRIAGE ---
@@ -730,9 +731,7 @@ Responde con este JSON:
     "gap_analysis": [
       {{"requisito": "...", "estado_empresa": "FALTANTE/VENCIDO/OK", "accion_requerida": "...", "pagina": "...", "archivo_fuente": "...", "evidence_snippet": "..."}}
     ],
-    "preguntas_junta_aclaraciones": [
-      "Con respecto a la cláusula 4.2, página 18, apartado REQUISITOS DEL PARTICIPANTE, donde se exige al menos 12 años de experiencia y en el anexo técnico se mencionan 3 años, ¿a cuál de estos dos plazos debemos apegarnos para acreditar experiencia?"
-    ]
+    "preguntas_junta_aclaraciones": []
   }},
   "cronograma": {{
     "publicacion_convocatoria": "...",
@@ -742,7 +741,7 @@ Responde con este JSON:
     "fallo": "...",
     "firma_contrato": "..."
   }},
-  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "Texto literal copiado de las bases sin abreviar.", "pagina": "18", "archivo_fuente": "bases_convocatoria.pdf", "evidence_snippet": "Fragmento idéntico al párrafo citado."}}],
+  "requisitos_participacion": [{{"inciso": "a", "texto_literal": "<copiar palabra por palabra del extracto>", "pagina": "<número si consta en el extracto>", "archivo_fuente": "<nombre exacto del archivo en EXTRACTOS TÉCNICOS>", "evidence_snippet": "<mismo texto literal del extracto, sin abreviar ni inventar>"}}],
   "requisitos_filtro": ["causa de exclusión 1"],
   "garantias": {{"seriedad_oferta": "...", "cumplimiento": "..."}},
   "criterios_evaluacion": "...",

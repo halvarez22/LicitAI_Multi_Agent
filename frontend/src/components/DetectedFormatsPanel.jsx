@@ -1,16 +1,54 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import { API_BASE } from '../apiBase.js';
 import {
-    FileText, AlertCircle, HelpCircle, ChevronRight, Search, FileCheck, Sparkles,
+    FileText, AlertCircle, HelpCircle, ChevronRight, Search, FileCheck, Sparkles, Loader2,
 } from 'lucide-react';
 import { countActionableDeliverables } from '../utils/auditSummary';
 
 /**
- * Inventario previo a la generación: formatos y anexos del pliego detectados en bases,
- * organizados por sobre técnico y económico.
+ * Inventario previo a la generación: formatos y anexos del pliego (GET /pliego-formats-panel).
  */
-const DetectedFormatsPanel = ({ formats: rawFormats, onAskExpert }) => {
+const DetectedFormatsPanel = ({ formats: rawFormatsProp, onAskExpert, sessionId, active = true }) => {
     const [filter, setFilter] = useState('');
     const [expandedKey, setExpandedKey] = useState(null);
+    const [fetched, setFetched] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [fetchError, setFetchError] = useState(null);
+
+    useEffect(() => {
+        if (!active || !sessionId) return undefined;
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            setFetchError(null);
+            try {
+                const res = await axios.get(
+                    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/pliego-formats-panel`,
+                    { timeout: 30000 }
+                );
+                if (cancelled) return;
+                if (res.data?.success && res.data?.data?.pliego_formats_panel) {
+                    setFetched(res.data.data.pliego_formats_panel);
+                } else {
+                    setFetched(null);
+                    setFetchError(res.data?.message || 'Sin formatos detectados.');
+                }
+            } catch (e) {
+                if (!cancelled) {
+                    setFetched(null);
+                    setFetchError(e?.response?.data?.detail || e?.message || 'Error de red');
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [active, sessionId]);
+
+    const rawFormats = fetched ?? rawFormatsProp;
 
     const isConsolidated =
         rawFormats
@@ -22,13 +60,23 @@ const DetectedFormatsPanel = ({ formats: rawFormats, onAskExpert }) => {
         ? rawFormats
         : (rawFormats?.candidate_document_list || []);
 
+    if (loading) {
+        return (
+            <div style={{ padding: '40px', textAlign: 'center', opacity: 0.7 }}>
+                <Loader2 size={32} style={{ margin: '0 auto 12px', animation: 'spin 1s linear infinite' }} />
+                <p style={{ fontSize: '13px' }}>Cargando formatos detectados…</p>
+            </div>
+        );
+    }
+
     if (!isConsolidated && !candidatesArray.length) {
         return (
             <div style={{ padding: '40px', textAlign: 'center', opacity: 0.5 }}>
                 <FileText size={48} style={{ marginBottom: '16px', margin: '0 auto' }} />
                 <p style={{ fontSize: '14px' }}>
-                    Aún no hay formatos ni anexos detectados. Ejecuta <strong>Analizar bases</strong> para
-                    construir el inventario del expediente.
+                    {fetchError
+                        ? fetchError
+                        : 'Aún no hay formatos ni anexos detectados. Ejecuta Analizar bases para construir el inventario del expediente.'}
                 </p>
             </div>
         );

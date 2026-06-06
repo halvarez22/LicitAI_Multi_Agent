@@ -351,22 +351,32 @@ async def process_document(
         filename_check = doc_data.get("content", {}).get("filename", "")
         if filename_check.lower().endswith((".xlsx", ".xls")):
             from app.services.document_excel_ingest import process_excel_document
-            existing = await memory.get_line_items_for_session(session_id)
-            if not existing:
-                file_path_check = doc_data["content"]["file_path"]
-                try:
-                    await process_excel_document(memory, session_id, doc_id, file_path_check, filename_check)
-                except Exception as e:
-                    print(f"WARN: re-ingest Excel line_items failed: {e}")
+            from app.services.economic_tabular_ingest_sync import (
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            file_path_check = doc_data["content"]["file_path"]
+            try:
+                await process_excel_document(
+                    memory, session_id, doc_id, file_path_check, filename_check
+                )
+                await sync_economic_pending_after_tabular_ingest(memory, session_id)
+            except Exception as e:
+                print(f"WARN: re-ingest Excel line_items failed: {e}")
         elif filename_check.lower().endswith(".docx"):
             from app.services.document_docx_ingest import process_docx_document
-            existing = await memory.get_line_items_for_session(session_id)
-            if not existing:
-                file_path_check = doc_data["content"]["file_path"]
-                try:
-                    await process_docx_document(memory, session_id, doc_id, file_path_check, filename_check)
-                except Exception as e:
-                    print(f"WARN: re-ingest DOCX line_items failed: {e}")
+            from app.services.economic_tabular_ingest_sync import (
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            file_path_check = doc_data["content"]["file_path"]
+            try:
+                await process_docx_document(
+                    memory, session_id, doc_id, file_path_check, filename_check
+                )
+                await sync_economic_pending_after_tabular_ingest(memory, session_id)
+            except Exception as e:
+                print(f"WARN: re-ingest DOCX line_items failed: {e}")
         sync = await _sync_pending_after_analysis(memory, session_id, company_id)
         await memory.disconnect()
         filename_check = doc_data.get("content", {}).get("filename", "")
@@ -462,9 +472,107 @@ async def process_document(
     updated_content = doc_data["content"]
     updated_content["status"] = "ANALYZED"
     updated_content["total_pages"] = ocr_result.get("total_pages", 1)
-    updated_content["extracted_text"] = raw_text # Persistir el texto completo para los agentes
-    
+    updated_content["extracted_text"] = raw_text  # Persistir el texto completo para los agentes
+    if pages:
+        updated_content["pages"] = pages
+    if ocr_result.get("method"):
+        updated_content["extraction_method"] = ocr_result.get("method")
+    if isinstance(ocr_result.get("stats"), dict):
+        updated_content["extraction_stats"] = ocr_result.get("stats")
+
     await memory.save_document(doc_id, session_id, updated_content, {"status": "ANALYZED", "filename": filename})
+
+    # ── DocumentCatalogHook: clasificar fuente para agentes y UI ──
+    try:
+        from app.services.document_catalog_service import classify_and_persist_catalog_entry
+
+        await classify_and_persist_catalog_entry(
+            memory, session_id, doc_id, updated_content
+        )
+        try:
+            from app.services.session_bases_analysis_invalidation import (
+                is_bases_pliego_document,
+                sync_bases_analysis_state,
+            )
+
+            st_cat = await memory.get_session(session_id) or {}
+            _bases_sync: Dict[str, Any] = {"invalidated": False}
+            if is_bases_pliego_document(
+                {"id": doc_id, "content": updated_content, "metadata": {"filename": filename}},
+                st_cat,
+            ):
+                docs_all = await memory.get_documents(session_id) or []
+                _, _bases_sync = await sync_bases_analysis_state(
+                    memory,
+                    session_id,
+                    st_cat,
+                    docs_all,
+                    persist=True,
+                    reason="bases_document_processed",
+                )
+        except Exception as inv_exc:
+            logger.warning(
+                "bases_analysis_invalidation_hook_failed session=%s err=%s",
+                session_id,
+                inv_exc,
+            )
+        else:
+            try:
+                if not _bases_sync.get("invalidated"):
+                    st_post = await memory.get_session(session_id) or {}
+                    cml = st_post.get("compliance_master_list")
+                    has_cml = isinstance(cml, dict) and any(
+                        cml.get(z) for z in ("administrativo", "tecnico", "formatos")
+                    )
+                    junta_n = len(
+                        (st_post.get("junta_aclaraciones_questions") or {}).get("items") or []
+                    )
+                    snap = st_post.get("bases_analysis_snapshot") or {}
+                    needs_rehydrate = has_cml and (
+                        junta_n == 0 or snap.get("pending_reanalysis")
+                    )
+                    if needs_rehydrate:
+                        from app.services.analysis_artifacts_rehydrate_service import (
+                            rehydrate_after_analysis_pipeline,
+                        )
+
+                        await rehydrate_after_analysis_pipeline(
+                            memory,
+                            session_id,
+                            company_id=company_id,
+                            commit_snapshot=bool(has_cml),
+                        )
+            except Exception as reh_exc:
+                logger.warning(
+                    "upload_post_bases_rehydrate_skipped session=%s err=%s",
+                    session_id,
+                    str(reh_exc)[:200],
+                )
+    except Exception as catalog_exc:
+        logger.warning(
+            "document_catalog_hook_failed session=%s doc=%s err=%s",
+            session_id,
+            doc_id,
+            catalog_exc,
+        )
+
+    # ── TabularEconomicHook: cerrar price_source si el archivo trae precios ──
+    tabular_eco_sync: Dict[str, Any] = {}
+    if ext in ("xlsx", "xls", "docx"):
+        try:
+            from app.services.economic_tabular_ingest_sync import (
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            tabular_eco_sync = await sync_economic_pending_after_tabular_ingest(
+                memory, session_id
+            )
+        except Exception as tab_exc:
+            logger.warning(
+                "[TabularEconomic] sync falló sesión %s: %s",
+                session_id,
+                tab_exc,
+            )
 
     # ── AutoResolveHook: intentar resolver pendiente activo desde el doc recién indexado ──
     try:
@@ -538,12 +646,19 @@ async def list_documents(session_id: str):
     
     try:
         docs = await memory.get_documents(session_id)
+        session_state = await memory.get_session(session_id) or {}
+        from app.services.document_catalog_service import get_catalog_ui_by_doc_id
+
+        catalog_ui = get_catalog_ui_by_doc_id(session_state)
         formatted_docs = []
         for d in docs:
+            doc_id = d["id"]
+            cat = catalog_ui.get(doc_id) or {}
             formatted_docs.append({
-                "id": d["id"],
+                "id": doc_id,
                 "name": d["content"].get("filename", "Sin nombre"),
-                "status": d["content"].get("status", "UPLOADED")
+                "status": d["content"].get("status", "UPLOADED"),
+                "catalog": cat or None,
             })
         
         return GenericResponse(
@@ -592,14 +707,23 @@ async def get_economic_normalized(session_id: str):
 
 
 @router.delete("/{doc_id}", response_model=GenericResponse)
-async def delete_document(doc_id: str, session_id: str = Form(...)):
+async def delete_document(
+    doc_id: str,
+    session_id: str = Query(..., description="ID de sesión dueña del documento"),
+):
     """Elimina una fuente del sistema (Archivo, DB y Vectores)."""
     memory = await get_connected_memory()
-    
-    doc_data = await memory.get_document(doc_id)
+
+    session_docs = await memory.get_documents(session_id)
+    doc_data = next((d for d in session_docs if str(d.get("id")) == doc_id), None)
     if not doc_data:
+        doc_data = await memory.get_document(doc_id)
+    if not doc_data or not any(str(d.get("id")) == doc_id for d in session_docs):
         await memory.disconnect()
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
+        raise HTTPException(
+            status_code=404,
+            detail="Documento no encontrado en esta licitación",
+        )
 
     # 1. Borrar archivo físico
     file_path = doc_data["content"].get("file_path")

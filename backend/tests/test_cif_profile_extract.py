@@ -45,6 +45,32 @@ def test_extract_legacy_domicilio_fiscal_bloque():
     assert "EJEMPLO" in (out.get("razon_social") or "")
 
 
+def test_extract_manavil_cif_tabla_markdown():
+    """Regresión: constancia SAT con filas markdown y pipes (OCR Manavil)."""
+    blob = """
+    Datos de Identificación del Contribuyente:
+    RFC: | SPI060200AG5
+    Denominación/Razón Social: | SEGURIDAD PRIVADA INTEGRAL MANAVIL
+    Datos de Ubicación:
+    Código Postal:37550 | Tipo de Vialidad: BLVD
+    Nombre de Vialidad: BLVD LAS PALMAS | Número Exterior: 513
+    Número Interior:A | Nombre de la Colonia: ARBIDE
+    Nombre del Municipio o Demarcación Territorial: LEON
+    Nombre de la Entidad Federativa: GUANAJUATO
+    CONSTANCIA DE SITUACIÓN FISCAL
+    """
+    out = extract_cif_company_profile_patch(blob, is_fisica=False)
+    assert "SEGURIDAD PRIVADA INTEGRAL MANAVIL" in (out.get("razon_social") or "")
+    dom = out.get("domicilio_fiscal") or ""
+    assert "BLVD LAS PALMAS" in dom
+    assert "513" in dom
+    assert "ARBIDE" in dom
+    assert "37550" in dom
+    assert "LEON" in dom
+    assert "GUANAJUATO" in dom
+    assert "idCIF" not in dom
+
+
 def test_extract_domicilio_persona_fisica_sin_razon_moral():
     blob = """
     Constancia de situación fiscal

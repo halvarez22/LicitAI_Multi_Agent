@@ -64,6 +64,29 @@ def test_sanitize_legal_content_reemplaza_placeholders():
     assert "Av Reforma 123, CDMX" in out
     assert "Ana Pérez" in out
     assert "DEM010101ABC" in out
+    assert "Dato pendiente de confirmar" not in out
+
+
+def test_sanitize_legal_content_pagina_y_meses_sin_dato_pendiente():
+    raw = (
+        "Página [1 de 10]\n"
+        "Garantía por un período de [12 meses] desde la entrega.\n"
+        "Fecha: [Fecha] Hora: [Hora]\n"
+    )
+    md = {
+        "empresa": "Demo SA",
+        "representante": "Ana Pérez",
+        "rfc": "DEM010101ABC",
+        "fecha": "2 de junio de 2026",
+        "hora": "10:30",
+        "domicilio": "Av Reforma 1, CDMX",
+        "footer_text": "Demo | RFC: DEM | Domicilio: Av Reforma 1, CDMX",
+    }
+    out = _sanitize_legal_content(raw, session_id="licit_demo_001", metadata=md)
+    assert "Dato pendiente de confirmar" not in out
+    assert "12 (doce) meses" in out
+    assert "2 de junio de 2026" in out
+    assert "10:30" in out
 
 
 def test_mirror_source_has_cross_tender_marker_detecta_fuente_contaminada():

@@ -13,7 +13,7 @@ from app.services.document_fill_quality_gate import (
     detect_cross_tender_marker,
     validate_generated_documents_fill,
 )
-from app.services.validation_service import validation_mapping_service
+from app.services.document_fill_ux_messages import build_fill_validation_event
 from app.services.excel_filling_service import ExcelFillingService
 from app.services.structured_economic_price_mapper import apply_structured_price_inputs
 from app.services.document_traceability import (
@@ -22,6 +22,14 @@ from app.services.document_traceability import (
     safe_file_sha256,
 )
 from app.config.settings import settings
+from app.services.document_date_resolver import resolve_document_date
+from app.services.apu_document_builder import build_apu_markdown
+from app.services.economic_document_reapply import build_economic_doc_metadata
+from app.utils.doc_formatting import (
+    apply_corporate_docx_letterhead,
+    apply_corporate_excel_letterhead,
+    stamp_corporate_excel_file,
+)
 
 
 def _has_valid_excel_locator(item: Dict[str, Any]) -> bool:
@@ -255,12 +263,14 @@ class EconomicWriterAgent(BaseAgent):
             else {}
         )
         perfil_usado = str(validation_result.get("perfil_usado") or "generic")
+        _date_info = resolve_document_date(session_state)
         resumen = {
             "subtotal": round(subtotal, 2),
             "iva": iva,
             "total": total,
             "moneda": economic_data.get("currency", "MXN"),
-            "fecha": datetime.now().strftime("%d/%m/%Y"),
+            "fecha": _date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
+            "fecha_es": _date_info.get("fecha_es") or "",
             "perfil_usado": perfil_usado,
         }
         
@@ -269,6 +279,13 @@ class EconomicWriterAgent(BaseAgent):
         os.makedirs(output_base_dir, exist_ok=True)
         billing_spec = self._resolve_proportional_billing_spec(economic_data, mapeo_items)
         excel_lineage: Dict[str, Any] = {}
+        econ_doc_meta = build_economic_doc_metadata(
+            session_id=session_id,
+            session_state=session_state,
+            master_profile=master_profile,
+            resumen=resumen,
+            company_data=company_data,
+        )
 
         mirrored_documents: List[Dict[str, Any]] = []
         if bool(getattr(settings, "TEMPLATE_MIRROR_ENABLED", True)):
@@ -329,22 +346,52 @@ class EconomicWriterAgent(BaseAgent):
                         flush=True,
                     )
                     self._generate_price_excel(
-                        excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+                        excel_path,
+                        mapeo_items,
+                        master_profile,
+                        resumen,
+                        billing_spec=billing_spec,
+                        doc_metadata=econ_doc_meta,
                     )
                     excel_lineage = {"materialization_route": "deterministic"}
             else:
                 self._generate_price_excel(
-                    excel_path, mapeo_items, master_profile, resumen, billing_spec=billing_spec
+                    excel_path,
+                    mapeo_items,
+                    master_profile,
+                    resumen,
+                    billing_spec=billing_spec,
+                    doc_metadata=econ_doc_meta,
                 )
                 excel_lineage = {"materialization_route": "deterministic"}
 
+            if os.path.isfile(excel_path):
+                stamp_corporate_excel_file(excel_path, econ_doc_meta)
+
             word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
             self._generate_anexo_ae(
-                word_path, mapeo_items, resumen, master_profile, billing_spec=billing_spec
+                word_path,
+                mapeo_items,
+                resumen,
+                master_profile,
+                billing_spec=billing_spec,
+                doc_metadata=econ_doc_meta,
             )
 
             carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
-            self._generate_carta_compromiso(carta_path, resumen, master_profile)
+            self._generate_carta_compromiso(
+                carta_path, resumen, master_profile, doc_metadata=econ_doc_meta
+            )
+
+            apu_path = os.path.join(output_base_dir, "ANALISIS_PRECIOS_UNITARIOS.docx")
+            self._generate_apu_document(
+                apu_path,
+                resumen=resumen,
+                master_profile=master_profile,
+                mapeo_items=mapeo_items,
+                session_id=session_id,
+                session_state=session_state,
+            )
 
             generated_documents = [
                 attach_traceability(
@@ -384,6 +431,21 @@ class EconomicWriterAgent(BaseAgent):
                     materialization_route="deterministic",
                     output_hash=safe_file_sha256(carta_path),
                 ),
+                attach_traceability(
+                    {
+                        "nombre": "Análisis de Precios Unitarios",
+                        "ruta": apu_path,
+                        "tipo": "analisis_precios_unitarios",
+                        "template_id": "apu",
+                    },
+                    template_id="apu",
+                    materialization_route="deterministic_apu",
+                    output_hash=safe_file_sha256(apu_path),
+                    provenance_ui={
+                        "source": "deterministic_economic",
+                        "confidence": 0.98,
+                    },
+                ),
             ]
         else:
             generated_documents = list(mirrored_documents)
@@ -413,30 +475,34 @@ class EconomicWriterAgent(BaseAgent):
                 "source": "economic_writer",
                 "confidence": 0.95,
                 "session_hint": f"{session_id} {session_state.get('name', '')}",
+                "fecha_es": resumen.get("fecha_es"),
+                "deadline_dt_iso": _date_info.get("deadline_dt"),
+                "economic_resumen": {
+                    "subtotal": resumen.get("subtotal"),
+                    "iva": resumen.get("iva"),
+                    "total": resumen.get("total"),
+                },
             },
         )
         validation_events = [
-            validation_mapping_service.build_event(
-                error_type=it.get("error_type"),
-                context={
-                    "document_id": it.get("document_id"),
-                    "field_key": it.get("field_key"),
-                    "detected_value": it.get("detected_value"),
-                    "expected_rule": it.get("expected_rule"),
-                },
-                raw_message=f"Validación en {it.get('document_id')}: {it.get('field_key')}"
-            )
+            build_fill_validation_event(it, stage="economic")
             for it in (fill_gate.get("issues") or [])
+            if isinstance(it, dict)
         ]
         if not bool(fill_gate.get("validation_passed", True)):
+            from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+            company_name = str(master_profile.get("razon_social") or "").strip()
+            human_question = build_fill_blocking_question(
+                "economic",
+                fill_gate.get("issues") or [],
+                company_name=company_name,
+            )
             return AgentOutput(
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message=(
-                    "Pausa por calidad de llenado documental económico: se detectaron "
-                    "campos obligatorios faltantes o inconsistentes en los archivos generados."
-                ),
+                message=human_question,
                 data={
                     "documentos": generated_documents,
                     "resumen_economico": resumen,
@@ -450,11 +516,13 @@ class EconomicWriterAgent(BaseAgent):
                     "missing": [
                         {
                             "field": "document_fill_quality_gate",
-                            "label": "Corregir llenado documental económico",
+                            "label": "Completar datos de la cotización",
+                            "question": human_question,
                             "type": "document_fill_quality_gate_blocking",
                             "blocking_items": fill_gate.get("issues") or [],
                         }
                     ],
+                    "stage": "economic",
                 },
                 correlation_id=correlation_id,
             )
@@ -794,6 +862,7 @@ class EconomicWriterAgent(BaseAgent):
         profile: Dict,
         resumen: Dict,
         billing_spec: Optional[Dict[str, Any]] = None,
+        doc_metadata: Optional[Dict[str, Any]] = None,
     ):
         """Crea un Excel profesional con fórmulas y formato."""
         wb = Workbook()
@@ -806,23 +875,28 @@ class EconomicWriterAgent(BaseAgent):
         center_align = Alignment(horizontal="center", vertical="center")
         border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
         
-        # Encabezado Empresa
-        ws.merge_cells('A1:F1')
-        ws['A1'] = profile.get("razon_social", "EMPRESA LICITANTE").upper()
-        ws['A1'].font = Font(bold=True, size=14)
-        ws['A1'].alignment = center_align
+        header_row = (
+            apply_corporate_excel_letterhead(ws, doc_metadata)
+            if doc_metadata
+            else 3
+        )
+        if not doc_metadata:
+            ws.merge_cells("A1:F1")
+            ws["A1"] = profile.get("razon_social", "EMPRESA LICITANTE").upper()
+            ws["A1"].font = Font(bold=True, size=14)
+            ws["A1"].alignment = center_align
         
         # Títulos de Columnas
         headers = ["Partida", "Descripción", "Unidad", "Cantidad", "P. Unitario", "Importe"]
         for col, text in enumerate(headers, 1):
-            cell = ws.cell(row=3, column=col, value=text)
+            cell = ws.cell(row=header_row, column=col, value=text)
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = center_align
             cell.border = border
             
         # Datos
-        current_row = 4
+        current_row = header_row + 1
         first_p1_row: Optional[int] = None
         for item in items:
             ws.cell(row=current_row, column=1, value=item.get("partida")).border = border
@@ -868,10 +942,13 @@ class EconomicWriterAgent(BaseAgent):
         resumen: Dict,
         profile: Dict,
         billing_spec: Optional[Dict[str, Any]] = None,
+        doc_metadata: Optional[Dict[str, Any]] = None,
     ):
         """Genera el Word del Anexo AE (Propuesta Económica Detallada)."""
         doc = Document()
-        
+        if doc_metadata:
+            apply_corporate_docx_letterhead(doc, doc_metadata)
+
         doc.add_heading('ANEXO AE: PROPUESTA ECONÓMICA', 0)
         
         p = doc.add_paragraph()
@@ -933,9 +1010,57 @@ class EconomicWriterAgent(BaseAgent):
 
         doc.save(path)
 
-    def _generate_carta_compromiso(self, path: str, resumen: Dict, profile: Dict):
+    def _generate_apu_document(
+        self,
+        path: str,
+        *,
+        resumen: Dict[str, Any],
+        master_profile: Dict[str, Any],
+        mapeo_items: List[Dict[str, Any]],
+        session_id: str,
+        session_state: Dict[str, Any],
+    ) -> None:
+        """APU en perspectiva concursante con montos del motor económico."""
+        dom = str(
+            master_profile.get("domicilio_fiscal")
+            or master_profile.get("domicilio")
+            or ""
+        ).strip()
+        ciudad = dom.split(",")[0].strip() if dom else "México"
+        content = build_apu_markdown(
+            razon_social=str(master_profile.get("razon_social") or ""),
+            rfc=str(master_profile.get("rfc") or ""),
+            representante=str(master_profile.get("representante_legal") or ""),
+            domicilio=dom,
+            fecha_es=str(resumen.get("fecha_es") or resumen.get("fecha") or ""),
+            procedimiento=session_id.replace("_", " "),
+            subtotal=float(resumen.get("subtotal") or 0),
+            iva=float(resumen.get("iva") or 0),
+            total=float(resumen.get("total") or 0),
+            line_items=mapeo_items,
+            ciudad=ciudad,
+        )
+        from app.agents.formats import _save_docx
+
+        metadata = build_economic_doc_metadata(
+            session_id=session_id,
+            session_state=session_state,
+            master_profile=master_profile,
+            resumen=resumen,
+        )
+        _save_docx("ANÁLISIS DE PRECIOS UNITARIOS", content, path, metadata)
+
+    def _generate_carta_compromiso(
+        self,
+        path: str,
+        resumen: Dict,
+        profile: Dict,
+        doc_metadata: Optional[Dict[str, Any]] = None,
+    ):
         """Genera la carta formal de compromiso de precios."""
         doc = Document()
+        if doc_metadata:
+            apply_corporate_docx_letterhead(doc, doc_metadata)
         doc.add_heading('CARTA COMPROMISO DE PRECIOS', 1)
         
         p = doc.add_paragraph(f"\nMéxico, a {resumen['fecha']}\n")
@@ -945,11 +1070,11 @@ class EconomicWriterAgent(BaseAgent):
         
         body = f"""
         Quien suscribe, C. {profile.get('representante_legal', '...')}, en mi carácter de Representante Legal 
-        de la empresa {profile.get('razon_social', '...')}, manifiesto bajo protesta de decir verdad que:
+        de la empresa {profile.get('razon_social', '...')}, con RFC {profile.get('rfc', '...')}, manifiesto bajo protesta de decir verdad que:
         
         Los precios presentados en nuestra propuesta económica de fecha {resumen['fecha']} por un total de 
         ${resumen['total']:,.2f} ({resumen['moneda']}), permanecerán firmes y vigentes durante la totalidad 
-        del proceso de adjudicación y, en caso de resultar ganadores, durante la vigencia del contrato respectivo.
+        del proceso de adjudicación y, en caso de resultar adjudicado, durante la vigencia del contrato respectivo.
         
         Asimismo, garantizamos que los precios no están sujetos a variaciones por fluctuaciones de mercado o 
         costos de insumos durante el periodo mencionado.

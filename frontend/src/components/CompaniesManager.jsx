@@ -4,6 +4,23 @@ import axios from 'axios';
 import { Plus, Search, Loader2, Building2, Trash2, FileText, Upload, CheckCircle2, User, Info, PlayCircle, Pencil, X } from 'lucide-react';
 
 import { API_BASE } from '../apiBase.js';
+import {
+    formatProfileFieldValue,
+    hasMeaningfulMasterProfile,
+    normalizeMasterProfileForUi,
+} from '../utils/masterProfileDisplay.js';
+
+const formatCompanyFromApi = (company) => ({
+    id: company.id,
+    name: company.name,
+    type: company.type,
+    updated_at: company.updated_at,
+    docs: Object.keys(company.docs || {}).filter((key) => key !== 'LOGOTIPO').length,
+    uploadedDocs: company.docs || {},
+    master_profile: normalizeMasterProfileForUi(company.master_profile || {}),
+});
+
+const isProfileAnalysisProcessing = (profile) => profile?._analysis_status === 'processing';
 
 const CompaniesManager = () => {
     const [companies, setCompanies] = useState([]);
@@ -23,23 +40,115 @@ const CompaniesManager = () => {
     const uploadingForRef = React.useRef(null);
     const uploadAbortRef = React.useRef(null);   // AbortController para uploads
     const analyzeAbortRef = React.useRef(null);  // AbortController para análisis
+    const profileAnalysisNotifiedRef = React.useRef(null);
+    const uploadQueueRef = React.useRef([]);
+    const uploadWorkerActiveRef = React.useRef(false);
+    const selectedCompanyIdRef = React.useRef(null);
+
+    useEffect(() => {
+        selectedCompanyIdRef.current = selectedCompany?.id || null;
+    }, [selectedCompany?.id]);
+
+    const refreshCompanyFromApi = async (companyId) => {
+        const res = await axios.get(`${API_BASE}/companies/${companyId}`);
+        if (!res.data.success) {
+            throw new Error(res.data.message || 'No se pudo refrescar la empresa');
+        }
+        const formatted = formatCompanyFromApi(res.data.data);
+        setSelectedCompany((prev) => (prev?.id === formatted.id ? formatted : prev));
+        setCompanies((prev) => prev.map((company) => (company.id === formatted.id ? formatted : company)));
+        return formatted;
+    };
+
+    const runUploadWorker = async () => {
+        if (uploadWorkerActiveRef.current) return;
+        uploadWorkerActiveRef.current = true;
+
+        while (uploadQueueRef.current.length > 0) {
+            const job = uploadQueueRef.current[0];
+            const companyId = selectedCompanyIdRef.current;
+            if (!companyId || companyId !== job.companyId) {
+                uploadQueueRef.current.shift();
+                continue;
+            }
+
+            const { docTitle, file, previewBase64 } = job;
+            const controller = new AbortController();
+            uploadAbortRef.current = controller;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('docTitle', docTitle);
+            if (previewBase64) {
+                formData.append('preview', previewBase64);
+            }
+
+            try {
+                await axios.post(`${API_BASE}/companies/${companyId}/upload`, formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                    signal: controller.signal,
+                    onUploadProgress: (progressEvent) => {
+                        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                        setUploadingStatus((prev) => ({ ...prev, [docTitle]: percentCompleted }));
+                    },
+                });
+
+                setUploadingStatus((prev) => ({ ...prev, [docTitle]: 100 }));
+                await refreshCompanyFromApi(companyId);
+                console.log(`✅ [CORP-UPLOAD] ${file.name} cargado para ${docTitle}`);
+
+                setNotification({
+                    message: docTitle === 'LOGOTIPO'
+                        ? `¡${docTitle} cargado correctamente!`
+                        : `¡${docTitle} encolado y registrado! Extrayendo expediente en segundo plano…`,
+                    type: 'success',
+                });
+                setTimeout(() => setNotification(null), 5000);
+            } catch (error) {
+                if (axios.isCancel(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
+                    uploadQueueRef.current = [];
+                    setNotification({ type: 'info', message: 'Cola de cargas cancelada.' });
+                    setTimeout(() => setNotification(null), 3000);
+                } else {
+                    console.error('Upload error', error);
+                    setNotification({
+                        type: 'warning',
+                        message: `Error al subir "${docTitle}". Puedes reintentarlo.`,
+                    });
+                    setTimeout(() => setNotification(null), 6000);
+                }
+            } finally {
+                uploadQueueRef.current.shift();
+                setUploadingStatus((prev) => {
+                    const next = { ...prev };
+                    delete next[docTitle];
+                    return next;
+                });
+                uploadAbortRef.current = null;
+            }
+        }
+
+        uploadWorkerActiveRef.current = false;
+    };
+
+    const enqueueCompanyUpload = (docTitle, file, previewBase64 = null) => {
+        if (!selectedCompanyIdRef.current) return;
+        uploadQueueRef.current.push({
+            companyId: selectedCompanyIdRef.current,
+            docTitle,
+            file,
+            previewBase64,
+        });
+        setUploadingStatus((prev) => ({ ...prev, [docTitle]: prev[docTitle] ?? 0 }));
+        runUploadWorker();
+    };
 
     const fetchCompanies = async () => {
         setLoading(true);
         try {
             const res = await axios.get(`${API_BASE}/companies/`);
             if (res.data.success) {
-                // Map the DB schema to UI state
-                const formatted = res.data.data.map(c => ({
-                    id: c.id,
-                    name: c.name,
-                    type: c.type,
-                    updated_at: c.updated_at,
-                    docs: Object.keys(c.docs || {}).filter(k => k !== 'LOGOTIPO').length,
-                    uploadedDocs: c.docs || {},
-                    master_profile: c.master_profile || {}
-                }));
-                setCompanies(formatted);
+                setCompanies(res.data.data.map(formatCompanyFromApi));
             }
         } catch (e) {
             console.error("Error fetching companies", e);
@@ -52,49 +161,85 @@ const CompaniesManager = () => {
         fetchCompanies();
     }, []);
 
-    const isUploaded = (title) => {
-        const doc = selectedCompany?.uploadedDocs?.[title];
-        return doc && (doc.status === 'ANALYZED' || doc.status === 'UPLOADED' || doc.status === 'PROCESSING');
+    const getCompanyDoc = (title) => selectedCompany?.uploadedDocs?.[title];
+
+    const isDocRegistered = (title) => {
+        const doc = getCompanyDoc(title);
+        return Boolean(doc?.path || doc?.name);
     };
 
-    const isProcessing = (title) => {
-        const doc = selectedCompany?.uploadedDocs?.[title];
-        return doc && (doc.status === 'UPLOADED' || doc.status === 'PROCESSING');
+    /** Estado UX del documento: missing | processing | ready | weak_ocr | ocr_failed */
+    const getDocOcrState = (title) => {
+        const doc = getCompanyDoc(title);
+        if (!doc?.path && !doc?.name) return 'missing';
+        const status = doc.status || '';
+        if (status === 'UPLOADED' || status === 'PROCESSING') return 'processing';
+        if (status === 'ANALYZED') return 'ready';
+        if (status === 'LOW_TEXT_QUALITY') return 'weak_ocr';
+        if (status === 'OCR_FAILED') return 'ocr_failed';
+        return 'registered';
     };
 
-    // Polling effect: Si hay documentos procesándose en background, refrescar cada 5s
+    const isUploaded = (title) => isDocRegistered(title);
+
+    const isProcessing = (title) => getDocOcrState(title) === 'processing';
+
+    // Polling: documentos en cola OCR o extracción LLM de perfil maestro en background
     useEffect(() => {
         let interval;
-        const hasPending = selectedCompany && Object.values(selectedCompany.uploadedDocs || {}).some(d => d.status === 'PROCESSING' || d.status === 'UPLOADED');
-        
-        if (hasPending && !isExtracting) {
-            console.log("🔄 [POLLING] Detectados docs en proceso, activando refresco cada 5s...");
+        const docTerminalStatuses = new Set(['ANALYZED', 'LOW_TEXT_QUALITY', 'OCR_FAILED']);
+        const hasPendingDocs = selectedCompany && Object.entries(selectedCompany.uploadedDocs || {}).some(
+            ([title, doc]) => title !== 'LOGOTIPO' && (doc?.path || doc?.name) && !docTerminalStatuses.has(doc.status)
+        );
+        const analysisProcessing = selectedCompany && isProfileAnalysisProcessing(selectedCompany.master_profile);
+        const shouldPoll = selectedCompany && (hasPendingDocs || analysisProcessing) && !isExtracting;
+
+        if (shouldPoll) {
+            console.log("🔄 [POLLING] Expediente en proceso (OCR o extracción de perfil), refresco cada 3s...");
             interval = setInterval(async () => {
                 try {
                     const res = await axios.get(`${API_BASE}/companies/${selectedCompany.id}`);
                     if (res.data.success) {
-                        const updatedCo = res.data.data;
-                        const formatted = {
-                            id: updatedCo.id,
-                            name: updatedCo.name,
-                            type: updatedCo.type,
-                            updated_at: updatedCo.updated_at,
-                            docs: Object.keys(updatedCo.docs || {}).filter(k => k !== 'LOGOTIPO').length,
-                            uploadedDocs: updatedCo.docs || {},
-                            master_profile: updatedCo.master_profile || {}
-                        };
-                        
-                        // Solo actualizar si algo cambió para evitar re-renders infinitos
-                        if (JSON.stringify(formatted.uploadedDocs) !== JSON.stringify(selectedCompany.uploadedDocs) || 
-                            JSON.stringify(formatted.master_profile) !== JSON.stringify(selectedCompany.master_profile)) {
+                        const formatted = formatCompanyFromApi(res.data.data);
+                        const docsChanged = JSON.stringify(formatted.uploadedDocs) !== JSON.stringify(selectedCompany.uploadedDocs);
+                        const profileChanged = JSON.stringify(formatted.master_profile) !== JSON.stringify(selectedCompany.master_profile);
+
+                        if (docsChanged || profileChanged) {
+                            const wasProcessing = isProfileAnalysisProcessing(selectedCompany.master_profile);
+                            const nowReady = formatted.master_profile?._analysis_status === 'ready';
+                            const nowFailed = formatted.master_profile?._analysis_status === 'failed';
+
                             setSelectedCompany(formatted);
-                            setCompanies(prev => prev.map(c => c.id === formatted.id ? formatted : c));
+                            setCompanies((prev) => prev.map((company) => (company.id === formatted.id ? formatted : company)));
+
+                            if (wasProcessing && nowReady && hasMeaningfulMasterProfile(formatted.master_profile)) {
+                                const notifyKey = `${formatted.id}:ready:${formatted.updated_at || ''}`;
+                                if (profileAnalysisNotifiedRef.current !== notifyKey) {
+                                    profileAnalysisNotifiedRef.current = notifyKey;
+                                    setNotification({
+                                        type: 'success',
+                                        message: '¡Expediente Maestro extraído automáticamente!',
+                                    });
+                                    setTimeout(() => setNotification(null), 5000);
+                                }
+                            } else if (wasProcessing && nowFailed) {
+                                const notifyKey = `${formatted.id}:failed:${formatted.updated_at || ''}`;
+                                if (profileAnalysisNotifiedRef.current !== notifyKey) {
+                                    profileAnalysisNotifiedRef.current = notifyKey;
+                                    setNotification({
+                                        type: 'warning',
+                                        message: formatted.master_profile?._analysis_error
+                                            || 'No se pudo extraer el perfil maestro. Usa «RE-ANALIZAR EXPEDIENTE».',
+                                    });
+                                    setTimeout(() => setNotification(null), 7000);
+                                }
+                            }
                         }
                     }
                 } catch (e) {
                     console.error("Error en polling", e);
                 }
-            }, 5000);
+            }, 3000);
         }
 
         return () => {
@@ -106,16 +251,21 @@ const CompaniesManager = () => {
         try {
             if (isDelete) {
                 await axios.delete(`${API_BASE}/companies/${newCo.id}`);
-            } else {
-                await axios.post(`${API_BASE}/companies/`, {
-                    id: newCo.id,
-                    name: newCo.name,
-                    type: newCo.type,
-                    docs_metadata: newCo.uploadedDocs || {},
-                    master_profile: newCo.master_profile || {}
-                });
+                fetchCompanies();
+                return;
             }
-            fetchCompanies();
+            const res = await axios.post(`${API_BASE}/companies/`, {
+                id: newCo.id,
+                name: newCo.name,
+                type: newCo.type,
+            });
+            if (res.data.success && res.data.data) {
+                const formatted = formatCompanyFromApi(res.data.data);
+                setSelectedCompany(formatted);
+                setCompanies((prev) => [formatted, ...prev.filter((c) => c.id !== formatted.id)]);
+            } else {
+                fetchCompanies();
+            }
         } catch (e) {
             console.error("Error saving company", e);
         }
@@ -130,8 +280,6 @@ const CompaniesManager = () => {
                 id: updated.id,
                 name: trimmed,
                 type: updated.type,
-                docs_metadata: updated.uploadedDocs || {},
-                master_profile: updated.master_profile || {}
             });
             setSelectedCompany(prev => ({ ...prev, name: trimmed }));
             setCompanies(prev => prev.map(c => c.id === selectedCompany.id ? { ...c, name: trimmed } : c));
@@ -172,95 +320,22 @@ const CompaniesManager = () => {
         uploadingForRef.current = docTitle;
         fileInputRef.current.click();
     };
-    const handleFileChange = async (e) => {
+    const handleFileChange = (e) => {
         const file = e.target.files[0];
         if (!file || !selectedCompany) return;
 
         const target = uploadingForRef.current;
-        setUploadingStatus(prev => ({ ...prev, [target]: 0 }));
-
-        const processUpload = async (previewBase64 = null) => {
-            const controller = new AbortController();
-            uploadAbortRef.current = controller;
-
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('docTitle', target);
-            if (previewBase64) {
-                formData.append('preview', previewBase64);
-            }
-
-            try {
-                const res = await axios.post(`${API_BASE}/companies/${selectedCompany.id}/upload`, formData, {
-                    headers: { 'Content-Type': 'multipart/form-data' },
-                    signal: controller.signal,
-                    onUploadProgress: (progressEvent) => {
-                        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                        setUploadingStatus(prev => ({ ...prev, [target]: percentCompleted }));
-                    }
-                });
-
-                if (res.data.success) {
-                    setUploadingStatus(prev => ({ ...prev, [target]: 100 }));
-                    setTimeout(() => {
-                        const updatedCo = res.data.data;
-                        const formatted = {
-                            id: updatedCo.id,
-                            name: updatedCo.name,
-                            type: updatedCo.type,
-                            updated_at: updatedCo.updated_at,
-                            docs: Object.keys(updatedCo.docs || {}).filter(k => k !== 'LOGOTIPO').length,
-                            uploadedDocs: updatedCo.docs || {},
-                            master_profile: updatedCo.master_profile || {}
-                        };
-                        setSelectedCompany(formatted);
-                        setCompanies(prev => prev.map(c => c.id === formatted.id ? formatted : c));
-                        setUploadingStatus(prev => {
-                            const newStatus = { ...prev };
-                            delete newStatus[target];
-                            return newStatus;
-                        });
-                        console.log(`✅ [CORP-UPLOAD] ${file.name} cargado físicamente para ${target}`);
-                        
-                        // Notificación de éxito
-                        setNotification({
-                            message: `¡${target} cargado y procesado con éxito!`,
-                            type: 'success'
-                        });
-                        setTimeout(() => setNotification(null), 4000);
-                    }, 500);
-                } else {
-                    throw new Error(res.data.message);
-                }
-            } catch (error) {
-                if (axios.isCancel(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
-                    console.log(`⛔ Upload cancelado por usuario: ${target}`);
-                    setNotification({ type: 'info', message: `Carga de "${target}" cancelada.` });
-                    setTimeout(() => setNotification(null), 3000);
-                } else {
-                    console.error("Upload error", error);
-                    alert("Error al subir el archivo.");
-                }
-                setUploadingStatus(prev => {
-                    const newStatus = { ...prev };
-                    delete newStatus[target];
-                    return newStatus;
-                });
-                uploadAbortRef.current = null;
-            }
-        };
-
         if (target === 'LOGOTIPO') {
             const reader = new FileReader();
             reader.onload = (event) => {
-                processUpload(event.target.result);
+                enqueueCompanyUpload(target, file, event.target.result);
             };
             reader.readAsDataURL(file);
         } else {
-            await processUpload();
+            enqueueCompanyUpload(target, file);
         }
-        
-        e.target.value = null; // Reset input
+
+        e.target.value = null;
     };
 
     const filtered = companies.filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()));
@@ -270,8 +345,28 @@ const CompaniesManager = () => {
             ? ['Acta Constitutiva', 'CIF (SAT)'] 
             : ['INE / Identificación', 'CIF (SAT)'];
             
-        const uploadedRequiredCount = requiredDocTitles.filter(title => isUploaded(title)).length;
+        const uploadedRequiredCount = requiredDocTitles.filter(title => isDocRegistered(title)).length;
         const totalRequired = requiredDocTitles.length;
+        const allRequiredAnalyzed = requiredDocTitles.every(title => getDocOcrState(title) === 'ready');
+        const anyRequiredOcrIssue = requiredDocTitles.some(title => {
+            const st = getDocOcrState(title);
+            return st === 'weak_ocr' || st === 'ocr_failed';
+        });
+        const isMoral = (selectedCompany.type || 'moral') === 'moral';
+        const profileFields = isMoral ? [
+            { label: 'RFC', value: selectedCompany.master_profile.rfc },
+            { label: 'RAZÓN SOCIAL', value: selectedCompany.master_profile.razon_social },
+            { label: 'REPRESENTANTE LEGAL', value: selectedCompany.master_profile.representante_legal },
+            { label: 'PODERES', value: selectedCompany.master_profile.poderes },
+            { label: 'DIRECCIÓN FISCAL', value: selectedCompany.master_profile.domicilio_fiscal, span: 2 },
+            { label: 'OBJETO SOCIAL', value: selectedCompany.master_profile.objeto_social, span: 2 },
+        ] : [
+            { label: 'RFC', value: selectedCompany.master_profile.rfc },
+            { label: 'NOMBRE COMPLETO', value: selectedCompany.master_profile.razon_social },
+            { label: 'TITULAR', value: selectedCompany.master_profile.representante_legal },
+            { label: 'DIRECCIÓN FISCAL', value: selectedCompany.master_profile.domicilio_fiscal, span: 2 },
+            { label: 'ACTIVIDAD ECONÓMICA', value: selectedCompany.master_profile.objeto_social, span: 2 },
+        ];
 
         return (
             <div style={{ padding: '0 40px 100px 40px', maxWidth: '1200px', margin: '0 auto', animation: 'fadeIn 0.3s' }}>
@@ -416,11 +511,23 @@ const CompaniesManager = () => {
                         <div style={{ padding: '20px', background: 'rgba(255,255,255,0.03)', borderRadius: '16px', border: '1px solid var(--border-glass)', textAlign: 'right' }}>
                             <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>ESTADO DEL EXPEDIENTE</div>
                             <div style={{ 
-                                color: uploadedRequiredCount >= totalRequired ? 'var(--success)' : 'var(--warning)', 
+                                color: uploadedRequiredCount < totalRequired
+                                    ? 'var(--warning)'
+                                    : allRequiredAnalyzed
+                                        ? 'var(--success)'
+                                        : anyRequiredOcrIssue
+                                            ? '#f59e0b'
+                                            : 'var(--success)', 
                                 fontWeight: 800, 
                                 fontSize: '14px' 
                             }}>
-                                {uploadedRequiredCount >= totalRequired ? 'VERIFICADO' : 'INCOMPLETO'} ({uploadedRequiredCount}/{totalRequired})
+                                {uploadedRequiredCount < totalRequired
+                                    ? 'INCOMPLETO'
+                                    : allRequiredAnalyzed
+                                        ? 'VERIFICADO'
+                                        : anyRequiredOcrIssue
+                                            ? 'COMPLETO — REVISAR OCR'
+                                            : 'COMPLETO'} ({uploadedRequiredCount}/{totalRequired})
                             </div>
                         </div>
                     </div>
@@ -439,7 +546,45 @@ const CompaniesManager = () => {
                             { title: 'INE / Identificación', icon: <User className="text-primary" />, required: true },
                             { title: 'CIF (SAT)', icon: <CheckCircle2 className="text-success" />, required: true },
                         ]).map((card, i) => {
-                            const fileInfo = isUploaded(card.title);
+                            const docState = getDocOcrState(card.title);
+                            const fileInfo = isDocRegistered(card.title);
+                            const doc = getCompanyDoc(card.title);
+                            const isWarningDoc = docState === 'weak_ocr' || docState === 'ocr_failed';
+                            const accentColor = docState === 'processing'
+                                ? 'var(--primary)'
+                                : isWarningDoc
+                                    ? (docState === 'ocr_failed' ? '#ef4444' : '#f59e0b')
+                                    : fileInfo
+                                        ? 'var(--success)'
+                                        : 'inherit';
+                            const cardBorder = !fileInfo
+                                ? '1px solid var(--border-glass)'
+                                : isWarningDoc
+                                    ? `1px solid ${docState === 'ocr_failed' ? 'rgba(239, 68, 68, 0.5)' : 'rgba(245, 158, 11, 0.5)'}`
+                                    : '1px solid var(--success)';
+                            const cardBg = !fileInfo
+                                ? 'rgba(255,255,255,0.01)'
+                                : isWarningDoc
+                                    ? (docState === 'ocr_failed' ? 'rgba(239, 68, 68, 0.05)' : 'rgba(245, 158, 11, 0.05)')
+                                    : 'rgba(16, 185, 129, 0.03)';
+                            const statusBadge = docState === 'processing'
+                                ? 'PROCESANDO...'
+                                : docState === 'weak_ocr'
+                                    ? 'OCR DÉBIL'
+                                    : docState === 'ocr_failed'
+                                        ? 'ERROR OCR'
+                                        : 'CARGADO';
+                            const statusSubtitle = docState === 'ready'
+                                ? 'Documento Listo'
+                                : docState === 'processing'
+                                    ? 'Analizando...'
+                                    : docState === 'weak_ocr'
+                                        ? 'Revisar legibilidad'
+                                        : docState === 'ocr_failed'
+                                            ? 'Reintentar subida'
+                                            : fileInfo
+                                                ? 'Registrado'
+                                                : 'Pendiente';
                             return (
                                 <div key={i} className="audit-widget" style={{ 
                                     padding: '24px', 
@@ -448,23 +593,23 @@ const CompaniesManager = () => {
                                     alignItems: 'center', 
                                     gap: '16px', 
                                     position: 'relative',
-                                    border: fileInfo ? '1px solid var(--success)' : '1px solid var(--border-glass)',
-                                    background: fileInfo ? 'rgba(16, 185, 129, 0.03)' : 'rgba(255,255,255,0.01)',
+                                    border: cardBorder,
+                                    background: cardBg,
                                     transition: 'all 0.3s ease',
                                     cursor: 'pointer'
                                 }}
                                 onClick={() => handleFileUploadRequest(card.title)}
                                 onMouseOver={(e) => {
                                     e.currentTarget.style.transform = 'translateY(-8px)';
-                                    e.currentTarget.style.borderColor = fileInfo ? 'var(--success)' : 'var(--primary)';
+                                    e.currentTarget.style.borderColor = fileInfo ? accentColor : 'var(--primary)';
                                     e.currentTarget.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
-                                    e.currentTarget.style.background = fileInfo ? 'rgba(16, 185, 129, 0.08)' : 'rgba(255,255,255,0.05)';
+                                    e.currentTarget.style.background = fileInfo ? cardBg.replace('0.03', '0.08').replace('0.05', '0.1') : 'rgba(255,255,255,0.05)';
                                 }}
                                 onMouseOut={(e) => {
                                     e.currentTarget.style.transform = 'translateY(0)';
-                                    e.currentTarget.style.borderColor = fileInfo ? 'var(--success)' : 'var(--border-glass)';
+                                    e.currentTarget.style.borderColor = fileInfo ? accentColor : 'var(--border-glass)';
                                     e.currentTarget.style.boxShadow = 'none';
-                                    e.currentTarget.style.background = fileInfo ? 'rgba(16, 185, 129, 0.03)' : 'rgba(255,255,255,0.01)';
+                                    e.currentTarget.style.background = cardBg;
                                 }}
                                 >
                                     {card.required && !fileInfo && (
@@ -476,14 +621,22 @@ const CompaniesManager = () => {
                                             top: '10px', 
                                             right: '10px', 
                                             fontSize: '9px', 
-                                            background: isProcessing(card.title) ? 'rgba(59, 130, 246, 0.1)' : 'rgba(16, 185, 129, 0.1)', 
-                                            color: isProcessing(card.title) ? 'var(--primary)' : 'var(--success)', 
+                                            background: docState === 'processing'
+                                                ? 'rgba(59, 130, 246, 0.1)'
+                                                : isWarningDoc
+                                                    ? (docState === 'ocr_failed' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)')
+                                                    : 'rgba(16, 185, 129, 0.1)', 
+                                            color: accentColor, 
                                             padding: '2px 6px', 
                                             borderRadius: '4px', 
                                             fontWeight: 900, 
-                                            border: isProcessing(card.title) ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(16, 185, 129, 0.2)' 
+                                            border: `1px solid ${docState === 'processing'
+                                                ? 'rgba(59, 130, 246, 0.2)'
+                                                : isWarningDoc
+                                                    ? (docState === 'ocr_failed' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)')
+                                                    : 'rgba(16, 185, 129, 0.2)'}`
                                         }}>
-                                            {isProcessing(card.title) ? 'PROCESANDO...' : 'CARGADO'}
+                                            {statusBadge}
                                         </span>
                                     )}
                                     {uploadingStatus[card.title] !== undefined ? (
@@ -499,6 +652,7 @@ const CompaniesManager = () => {
                                                         uploadAbortRef.current.abort();
                                                         uploadAbortRef.current = null;
                                                     }
+                                                    uploadQueueRef.current = [];
                                                     setUploadingStatus(prev => {
                                                         const s = { ...prev };
                                                         delete s[card.title];
@@ -525,16 +679,16 @@ const CompaniesManager = () => {
                                                 display: 'flex', 
                                                 alignItems: 'center', 
                                                 justifyContent: 'center',
-                                                color: fileInfo ? 'var(--success)' : 'inherit'
+                                                color: fileInfo ? accentColor : 'inherit'
                                             }}>
                                                 {card.icon}
                                             </div>
                                             <div style={{ textAlign: 'center' }}>
                                                 <div style={{ fontWeight: 800, fontSize: '14px' }}>{card.title}</div>
-                                                <div style={{ fontSize: '11px', color: fileInfo ? 'var(--success)' : 'var(--warning)', marginTop: '4px', textTransform: 'uppercase' }}>
-                                                    {fileInfo ? 'Documento Listo' : 'Pendiente'}
+                                                <div style={{ fontSize: '11px', color: fileInfo ? accentColor : 'var(--warning)', marginTop: '4px', textTransform: 'uppercase' }}>
+                                                    {statusSubtitle}
                                                 </div>
-                                                {fileInfo && <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>{fileInfo.name}</div>}
+                                                {fileInfo && doc?.name && <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>{doc.name}</div>}
                                                 {card.note && !fileInfo && <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '6px', fontStyle: 'italic' }}>{card.note}</div>}
                                             </div>
                                             <button 
@@ -572,13 +726,38 @@ const CompaniesManager = () => {
                             <div style={{ textAlign: 'center' }}>
                                 <h3 style={{ fontSize: '20px', fontWeight: 800, color: '#fff', marginBottom: '8px' }}>Expediente Maestro</h3>
                                 <p style={{ color: 'var(--text-muted)', fontSize: '14px', maxWidth: '600px' }}>
-                                    {selectedCompany.master_profile && Object.keys(selectedCompany.master_profile).length > 0 
+                                    {hasMeaningfulMasterProfile(selectedCompany.master_profile)
                                       ? "Información extraída y validada por la IA."
-                                      : "Nuestros Agentes procesarán esta documentación para extraer automáticamente tu **Identidad Fiscal, Poderes y Solvencia Legal**."}
+                                      : isProfileAnalysisProcessing(selectedCompany.master_profile)
+                                        ? (isMoral
+                                            ? "Extrayendo RFC, representante legal y objeto social del expediente. Esto puede tardar uno o dos minutos."
+                                            : "Extrayendo RFC, nombre completo y domicilio fiscal desde INE/CIF. Esto puede tardar uno o dos minutos.")
+                                        : (isMoral
+                                            ? "Nuestros Agentes procesarán esta documentación para extraer automáticamente tu **Identidad Fiscal, Poderes y Solvencia Legal**."
+                                            : "Nuestros Agentes procesarán INE y CIF para extraer automáticamente tu **RFC, Nombre Completo y Domicilio Fiscal**.")}
                                 </p>
                             </div>
+
+                            {isProfileAnalysisProcessing(selectedCompany.master_profile) && !isExtracting && (
+                                <div style={{
+                                    width: '100%',
+                                    padding: '16px 20px',
+                                    borderRadius: '12px',
+                                    border: '1px solid rgba(59, 130, 246, 0.25)',
+                                    background: 'rgba(59, 130, 246, 0.08)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '12px',
+                                    color: '#dbeafe',
+                                    fontSize: '13px',
+                                    fontWeight: 600,
+                                }}>
+                                    <Loader2 size={18} style={{ animation: 'spin 2s linear infinite' }} />
+                                    Analizando expediente maestro en segundo plano…
+                                </div>
+                            )}
                             
-                            {selectedCompany.master_profile && Object.keys(selectedCompany.master_profile).length > 0 && (
+                            {hasMeaningfulMasterProfile(selectedCompany.master_profile) && (
                                 <div style={{ 
                                     width: '100%', 
                                     display: 'grid', 
@@ -586,14 +765,7 @@ const CompaniesManager = () => {
                                     gap: '16px',
                                     textAlign: 'left'
                                 }}>
-                                    {[
-                                        { label: 'RFC', value: selectedCompany.master_profile.rfc },
-                                        { label: 'RAZÓN SOCIAL', value: selectedCompany.master_profile.razon_social },
-                                        { label: 'REPRESENTANTE LEGAL', value: selectedCompany.master_profile.representante_legal },
-                                        { label: 'PODERES', value: selectedCompany.master_profile.poderes },
-                                        { label: 'DIRECCIÓN FISCAL', value: selectedCompany.master_profile.domicilio_fiscal, span: 2 },
-                                        { label: 'OBJETO SOCIAL', value: selectedCompany.master_profile.objeto_social, span: 2 }
-                                    ].map((item, idx) => (
+                                    {profileFields.map((item, idx) => (
                                         <div key={idx} style={{ 
                                             background: 'rgba(255,255,255,0.03)', 
                                             padding: '16px', 
@@ -602,7 +774,9 @@ const CompaniesManager = () => {
                                             gridColumn: item.span ? `span ${item.span}` : 'auto'
                                         }}>
                                             <div style={{ fontSize: '9px', fontWeight: 900, color: 'var(--primary)', letterSpacing: '1px', marginBottom: '4px' }}>{item.label}</div>
-                                            <div style={{ fontSize: '13px', color: '#fff', fontWeight: 600 }}>{item.value || 'No detectado'}</div>
+                                            <div style={{ fontSize: '13px', color: '#fff', fontWeight: 600, whiteSpace: 'pre-wrap' }}>
+                                                {formatProfileFieldValue(item.value)}
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
@@ -610,7 +784,7 @@ const CompaniesManager = () => {
 
                             <button 
                                 className="btn-primary glow-active"
-                                disabled={isExtracting}
+                                disabled={isExtracting || isProfileAnalysisProcessing(selectedCompany.master_profile)}
                                 style={{ 
                                     padding: '16px 48px', 
                                     fontSize: '18px', 
@@ -620,7 +794,7 @@ const CompaniesManager = () => {
                                     paddingLeft: '30px', paddingRight: '30px'
                                 }}
                                 onClick={async () => {
-                                    if (selectedCompany.master_profile && Object.keys(selectedCompany.master_profile).length > 0) {
+                                    if (hasMeaningfulMasterProfile(selectedCompany.master_profile)) {
                                         if (!window.confirm("⚠️ ATENCIÓN: Esta empresa ya tiene un Expediente Maestro extraído y validado.\n\nSi continúas, la Inteligencia Artificial volverá a leer los documentos y REESCRIBIRÁ todos los datos actuales.\n\n¿Estás completamente seguro de que deseas reescribir el expediente?")) {
                                             return;
                                         }
@@ -644,16 +818,7 @@ const CompaniesManager = () => {
 
                                         if (res.data.success) {
                                             setTimeout(() => {
-                                                const updatedCo = res.data.data;
-                                                const formatted = {
-                                                    id: updatedCo.id,
-                                                    name: updatedCo.name,
-                                                    type: updatedCo.type,
-                                                    updated_at: updatedCo.updated_at,
-                                                    docs: Object.keys(updatedCo.docs || {}).filter(k => k !== 'LOGOTIPO').length,
-                                                    uploadedDocs: updatedCo.docs || {},
-                                                    master_profile: updatedCo.master_profile || {}
-                                                };
+                                                const formatted = formatCompanyFromApi(res.data.data);
                                                 setSelectedCompany(formatted);
                                                 setCompanies(prev => prev.map(c => c.id === formatted.id ? formatted : c));
                                                 setIsExtracting(false);
@@ -661,8 +826,8 @@ const CompaniesManager = () => {
                                                 const rr = res.data.rfc_resolution;
                                                 let msg = '¡Perfil Maestro Actualizado!';
                                                 if (rr && rr.changed_from_llm) {
-                                                    msg = `RFC de persona moral corregido automáticamente: ${String(rr.previous_llm_rfc || '—')} → ${String(rr.final_rfc || '')}. Si subes o sustituyes documentos, vuelve a pulsar «RE-ANALIZAR EXPEDIENTE».`;
-                                                } else if (updatedCo.type === 'moral' && formatted.master_profile?.rfc) {
+                                                    msg = `RFC corregido automáticamente: ${String(rr.previous_llm_rfc || '—')} → ${String(rr.final_rfc || '')}. Si subes o sustituyes documentos, vuelve a pulsar «RE-ANALIZAR EXPEDIENTE».`;
+                                                } else if (formatted.type === 'moral' && formatted.master_profile?.rfc) {
                                                     msg = '¡Perfil Maestro actualizado! Si cambias el expediente (nuevos PDF), usa de nuevo «RE-ANALIZAR EXPEDIENTE» para refrescar OCR y perfil.';
                                                 }
                                                 setNotification({ type: 'success', message: msg });
@@ -695,7 +860,7 @@ const CompaniesManager = () => {
                                 ) : (
                                     <>
                                         <PlayCircle size={24} style={{ marginRight: '12px' }} />
-                                        {selectedCompany.master_profile && Object.keys(selectedCompany.master_profile).length > 0 ? 'RE-ANALIZAR EXPEDIENTE' : 'ANALIZAR EXPEDIENTE MAESTRO'}
+                                        {hasMeaningfulMasterProfile(selectedCompany.master_profile) ? 'RE-ANALIZAR EXPEDIENTE' : 'ANALIZAR EXPEDIENTE MAESTRO'}
                                     </>
                                 )}
                             </button>
@@ -806,11 +971,22 @@ const CompaniesManager = () => {
                     <div 
                         key={company.id} 
                         className="glass-panel"
-                        onClick={() => {
-                            setSelectedCompany(company);
+                        onClick={async () => {
+                            profileAnalysisNotifiedRef.current = null;
                             setIsExtracting(false);
                             setExtractionProgress(0);
                             setUploadingStatus({});
+                            try {
+                                const res = await axios.get(`${API_BASE}/companies/${company.id}`);
+                                if (res.data.success) {
+                                    setSelectedCompany(formatCompanyFromApi(res.data.data));
+                                } else {
+                                    setSelectedCompany(company);
+                                }
+                            } catch (error) {
+                                console.error('Error cargando empresa', error);
+                                setSelectedCompany(company);
+                            }
                         }}
                         style={{ 
                             padding: '24px', 

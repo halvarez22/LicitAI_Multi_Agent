@@ -3,12 +3,17 @@ from app.api.v1.routes.companies import (
     _apply_moral_representante_from_parser,
     _build_company_queries,
     _company_doc_title_suggests_cif,
+    _company_has_pending_uploads,
+    _coerce_profile_field_to_text,
     _extraction_quality,
+    _finalize_company_doc_statuses_after_analysis,
     _is_llm_placeholder_profile_value,
     _looks_like_valid_corporate_name,
     _meta_priority,
     _merge_profile_with_hitl,
     _sanitize_llm_profile_placeholders,
+    _set_analysis_status,
+    _next_company_doc_pending_ocr,
 )
 from app.services.legal_representative_parser import resolve_rfc_persona_moral
 from app.utils.ocr_quality import looks_like_low_signal_ocr
@@ -35,6 +40,34 @@ def test_extraction_quality_low_text(monkeypatch):
     }
     quality = _extraction_quality(ocr_ctx)
     assert quality["ok"] is False
+
+
+def test_extraction_quality_ine_uses_lower_threshold(monkeypatch):
+    monkeypatch.setenv("COMPANY_OCR_MIN_CHARS", "120")
+    monkeypatch.setenv("COMPANY_OCR_MIN_CHARS_ID", "80")
+    monkeypatch.setenv("COMPANY_OCR_MIN_PAGES_WITH_TEXT", "1")
+    ocr_ctx = {
+        "extracted_text": "A" * 95,
+        "pages": [{"page": 1, "text": "A" * 95}],
+    }
+    assert _extraction_quality(ocr_ctx, doc_title="INE / Identificación")["ok"] is True
+    assert _extraction_quality(ocr_ctx, doc_title="CIF (SAT)")["ok"] is False
+
+
+def test_next_company_doc_pending_ocr_retries_low_text_quality_without_text():
+    company = {
+        "docs": {
+            "INE / Identificación": {
+                "status": "LOW_TEXT_QUALITY",
+                "name": "ine.pdf",
+                "ocr_chars": 50,
+            },
+            "CIF (SAT)": {"status": "ANALYZED", "ocr_extracted_text": "x" * 80},
+        }
+    }
+    title, info = _next_company_doc_pending_ocr(company)
+    assert title == "INE / Identificación"
+    assert info["name"] == "ine.pdf"
 
 
 def test_extraction_quality_detects_low_signal_ocr(monkeypatch):
@@ -213,3 +246,98 @@ def test_resolve_rfc_persona_moral_falls_back_when_only_fisica_in_text():
     out = resolve_rfc_persona_moral(ctx, "TODE820602FR4")
     assert out["value"] == "TODE820602FR4"
     assert out["strategy"] == "llm_no_moral_rfc_pattern_in_text"
+
+
+def test_set_analysis_status_tracks_processing_and_ready():
+    profile = {"rfc": "ABC123456XYZ"}
+    processing = _set_analysis_status(profile, "processing")
+    assert processing["_analysis_status"] == "processing"
+    assert "_analysis_updated_at" in processing
+    assert "rfc" in processing
+
+    ready = _set_analysis_status(processing, "ready")
+    assert ready["_analysis_status"] == "ready"
+    assert "_analysis_error" not in ready
+
+
+def test_finalize_company_doc_statuses_after_analysis():
+    company = {
+        "docs": {
+            "Acta Constitutiva": {"status": "PROCESSING", "ocr_chars": 1200},
+            "CIF (SAT)": {"status": "UPLOADED"},
+            "LOGOTIPO": {"status": "ANALYZED"},
+        }
+    }
+    patch = _finalize_company_doc_statuses_after_analysis(company)
+    assert company["docs"]["Acta Constitutiva"]["status"] == "ANALYZED"
+    assert company["docs"]["CIF (SAT)"]["status"] == "UPLOADED"
+    assert company["docs"]["LOGOTIPO"]["status"] == "ANALYZED"
+    assert "Acta Constitutiva" in patch
+
+
+def test_company_has_pending_uploads():
+    company = {
+        "docs": {
+            "Acta Constitutiva": {"status": "ANALYZED"},
+            "CIF (SAT)": {"status": "UPLOADED"},
+        }
+    }
+    assert _company_has_pending_uploads(company) is True
+    company["docs"]["CIF (SAT)"]["status"] = "ANALYZED"
+    assert _company_has_pending_uploads(company) is False
+
+
+def test_next_company_doc_pending_ocr_skips_logo_and_analyzed():
+    company = {
+        "docs": {
+            "LOGOTIPO": {"status": "ANALYZED"},
+            "Acta Constitutiva": {"status": "ANALYZED"},
+            "CIF (SAT)": {"status": "UPLOADED", "name": "cif.pdf"},
+        }
+    }
+    title, info = _next_company_doc_pending_ocr(company)
+    assert title == "CIF (SAT)"
+    assert info["name"] == "cif.pdf"
+
+
+def test_finalize_company_doc_statuses_promotes_processing_with_ocr():
+    company = {
+        "docs": {
+            "CIF (SAT)": {
+                "status": "PROCESSING",
+                "ocr_chars": 1200,
+                "ocr_extracted_text": "CONSTANCIA DE SITUACIÓN FISCAL " * 3,
+            },
+            "INE / Identificación": {"status": "UPLOADED"},
+        }
+    }
+    patch = _finalize_company_doc_statuses_after_analysis(company)
+    assert company["docs"]["CIF (SAT)"]["status"] == "ANALYZED"
+    assert "CIF (SAT)" in patch
+    assert "INE / Identificación" not in patch
+
+
+def test_next_company_doc_pending_ocr_skips_processing_with_ocr_text():
+    """Evita re-OCR infinito cuando el doc ya tiene texto persistido."""
+    company = {
+        "docs": {
+            "CIF (SAT)": {
+                "status": "PROCESSING",
+                "ocr_extracted_text": "CONSTANCIA DE SITUACIÓN FISCAL\n" * 5,
+            },
+            "Acta Constitutiva": {"status": "ANALYZED"},
+        }
+    }
+    assert _next_company_doc_pending_ocr(company) is None
+
+
+def test_coerce_profile_field_to_text_from_poderes_list():
+    raw = [
+        {
+            "facultad": "Representar a la Sociedad ante autoridades.",
+            "fecha": "20/04/2006",
+        }
+    ]
+    text = _coerce_profile_field_to_text(raw)
+    assert "Representar a la Sociedad" in text
+    assert "20/04/2006" in text

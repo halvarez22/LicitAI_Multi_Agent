@@ -28,12 +28,17 @@ class PostgresMemoryAdapter(MemoryRepository):
         self.async_session = None
         self._tables_created = False
 
-    async def connect(self) -> bool:
+    def _reset_factory_if_singleton(self) -> None:
+        """Solo invalida el singleton global si este adaptador es el activo."""
         from app.memory.factory import MemoryAdapterFactory
 
+        if MemoryAdapterFactory._instance is self:
+            MemoryAdapterFactory.reset_instance()
+
+    async def connect(self) -> bool:
         if not self.connection_string:
             print("PostgresMemoryAdapter: DATABASE_URL vacía o no definida.")
-            MemoryAdapterFactory.reset_instance()
+            self._reset_factory_if_singleton()
             return False
         try:
             if not self.engine:
@@ -51,7 +56,7 @@ class PostgresMemoryAdapter(MemoryRepository):
             print(f"Error conectando a Postgres: {e}")
             self.engine = None
             self.async_session = None
-            MemoryAdapterFactory.reset_instance()
+            self._reset_factory_if_singleton()
             return False
 
     async def disconnect(self) -> bool:
@@ -243,8 +248,23 @@ class PostgresMemoryAdapter(MemoryRepository):
                 db_obj.name = data.get('name', db_obj.name)
                 db_obj.type = data.get('type', db_obj.type)
             
-            db_obj.docs = data.get('docs') or data.get('docs_metadata') or db_obj.docs or {}
-            db_obj.master_profile = data.get('master_profile', db_obj.master_profile)
+            incoming_docs = data.get('docs')
+            if incoming_docs is None:
+                incoming_docs = data.get('docs_metadata')
+            if incoming_docs is not None:
+                if db_obj.docs:
+                    merged_docs = dict(db_obj.docs or {})
+                    for title, meta in (incoming_docs or {}).items():
+                        if isinstance(meta, dict) and meta:
+                            merged_docs[title] = meta
+                    db_obj.docs = merged_docs
+                else:
+                    db_obj.docs = incoming_docs or {}
+            
+            if 'master_profile' in data and data.get('master_profile') is not None:
+                incoming_profile = data.get('master_profile') or {}
+                if incoming_profile or not db_obj.master_profile:
+                    db_obj.master_profile = incoming_profile
             
             # Hito 1: Gestión de catálogo (no sobrescribir si no viene en el payload)
             if 'catalog' in data:
@@ -253,6 +273,45 @@ class PostgresMemoryAdapter(MemoryRepository):
             db_session.add(db_obj)
             await db_session.commit()
             return True
+
+    async def patch_company_state(
+        self,
+        company_id: str,
+        *,
+        docs_patch: Optional[Dict[str, Dict]] = None,
+        master_profile_patch: Optional[Dict] = None,
+    ) -> Optional[Dict]:
+        """Fusiona documentos y/o master_profile sobre la fila actual (merge, no replace)."""
+        async with self.async_session() as db_session:
+            result = await db_session.execute(select(Company).filter_by(id=company_id))
+            db_obj = result.scalars().first()
+            if not db_obj:
+                return None
+
+            if docs_patch:
+                merged_docs = dict(db_obj.docs or {})
+                for title, meta in docs_patch.items():
+                    merged_docs[title] = dict(meta) if isinstance(meta, dict) else meta
+                db_obj.docs = merged_docs
+
+            if master_profile_patch is not None:
+                merged_profile = dict(db_obj.master_profile or {})
+                merged_profile.update(master_profile_patch)
+                db_obj.master_profile = merged_profile
+
+            db_session.add(db_obj)
+            await db_session.commit()
+            await db_session.refresh(db_obj)
+            return {
+                "id": db_obj.id,
+                "name": db_obj.name,
+                "type": db_obj.type,
+                "docs": db_obj.docs,
+                "master_profile": db_obj.master_profile,
+                "catalog": db_obj.catalog if db_obj.catalog is not None else [],
+                "created_at": db_obj.created_at.isoformat() if db_obj.created_at else None,
+                "updated_at": db_obj.updated_at.isoformat() if db_obj.updated_at else None,
+            }
 
     async def get_companies(self) -> List[Dict]:
         async with self.async_session() as db_session:

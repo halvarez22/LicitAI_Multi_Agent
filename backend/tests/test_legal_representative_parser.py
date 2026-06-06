@@ -104,3 +104,9 @@ def test_detect_cif_sin_marcador_sat():
     text = "Nombre (s): Ana Lopez Primer Apellido: Ruiz Segundo Apellido: Soto"
     r = detect_cif_contribuyente_name(text)
     assert r["found"] is False
+
+
+def test_rechaza_delegado_especial_para_que_ocurra_ante_notario():
+    text = "Delegado Especial para que ocurra ante Notario Publico"
+    result = detect_legal_representative(text)
+    assert result["found"] is False

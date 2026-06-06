@@ -215,6 +215,175 @@ def merge_fast_track_actions_into_consolidated(
     return result
 
 
+def _formats_panel_tipo_for_item(item: Dict[str, Any]) -> Optional[str]:
+    """
+    Tipo para panel Formatos/Anexos: generar, informativo, o None si es credencial física.
+    """
+    from app.services.document_deliverable_filter import (
+        enforce_deterministic_tipo_accion,
+        formats_panel_should_generar,
+        has_admin_format_template_evidence,
+        is_corporate_physical_credential_for_panel,
+        is_economic_writer_domain,
+        is_formats_panel_noise,
+        is_generable_tipo_accion,
+        should_exclude_from_formats_panel,
+    )
+
+    nombre = str(item.get("nombre_canonico") or item.get("nombre") or "")
+    snippet = str(item.get("snippet_representativo") or item.get("snippet") or "")
+    if is_corporate_physical_credential_for_panel(nombre, "", snippet):
+        return None
+    if is_formats_panel_noise(nombre, "", snippet):
+        return None
+    if should_exclude_from_formats_panel(nombre, "", snippet):
+        return None
+    if formats_panel_should_generar(nombre, "", snippet):
+        return "generar"
+    enforced = enforce_deterministic_tipo_accion(
+        {
+            "nombre": nombre,
+            "descripcion": item.get("descripcion") or "",
+            "snippet": snippet,
+            "tipo_accion": item.get("tipo_accion_final") or item.get("tipo") or "",
+        }
+    )
+    t = str(enforced.get("tipo_accion") or "").lower()
+    if is_generable_tipo_accion(t):
+        return t
+    if t == "requiere_datos_licitante" and (
+        has_admin_format_template_evidence(enforced)
+        or is_economic_writer_domain(nombre, "", snippet)
+    ):
+        return "generar"
+    if has_admin_format_template_evidence(enforced) or is_economic_writer_domain(
+        nombre, "", snippet
+    ):
+        return "generar"
+    if formats_panel_should_generar(nombre, "", snippet):
+        return "generar"
+    if t == "presentar_fisico":
+        return t
+    if t == "informativo":
+        return None
+    return "generar" if has_admin_format_template_evidence(item) else None
+
+
+async def build_formats_panel_consolidated(
+    memory: Any,
+    session_id: str,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Inventario para «Formatos/Anexos detectados»: pliego generable, sin credenciales físicas.
+    """
+    from app.services.compliance_consolidation_service import classify_deliverable_sobre
+    from app.services.document_deliverable_filter import (
+        filter_consolidated_document_candidates,
+        is_corporate_physical_credential_for_panel,
+        is_formats_panel_noise,
+        pliego_format_anchor_in_corpus,
+    )
+    from app.services.junta_bases_corpus import build_bases_corpus, extract_template_codes
+    from app.services.pliego_formats_enrichment_service import (
+        extract_pliego_generables_from_bases_corpus,
+        pliego_format_dedupe_key,
+    )
+
+    state = session_state if isinstance(session_state, dict) else await memory.get_session(session_id)
+    if not isinstance(state, dict):
+        return {
+            "sobre_1_tecnico": [],
+            "sobre_2_economico": [],
+            "requisitos_legales": [],
+            "otros_requisitos_criticos": [],
+            "_meta": {"filtered_pliego_formats_only": True, "total": 0},
+        }
+
+    base = state.get("document_candidates_consolidated")
+    if not isinstance(base, dict) or base.get("sobre_1_tecnico") is None:
+        rebuilt = await ensure_session_document_candidates(memory, session_id, state)
+        if isinstance(rebuilt, dict):
+            base = rebuilt
+            state = await memory.get_session(session_id) or state
+            base = state.get("document_candidates_consolidated") or base
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "sobre_1_tecnico": [],
+        "sobre_2_economico": [],
+        "requisitos_legales": [],
+        "otros_requisitos_criticos": [],
+    }
+    seen: set[str] = set()
+    corpus_text = ""
+
+    try:
+        docs = await memory.get_documents(session_id)
+    except Exception:
+        docs = state.get("_junta_session_documents") or []
+    corpus = build_bases_corpus(session_id, docs, session_state=state)
+    corpus_text = str(getattr(corpus, "combined", "") or "")
+
+    def _append(
+        item: Dict[str, Any],
+        bucket: Optional[str] = None,
+        *,
+        require_corpus_anchor: bool = False,
+    ) -> None:
+        nombre = str(item.get("nombre_canonico") or item.get("nombre") or "")
+        snippet = str(item.get("snippet_representativo") or item.get("snippet") or "")
+        if is_corporate_physical_credential_for_panel(nombre, "", snippet):
+            return
+        if is_formats_panel_noise(nombre, "", snippet):
+            return
+        if require_corpus_anchor and corpus_text.strip():
+            if not (
+                item.get("from_document_inventory")
+                or extract_template_codes(nombre)
+                or pliego_format_anchor_in_corpus(nombre, snippet, corpus_text)
+            ):
+                return
+        tipo = _formats_panel_tipo_for_item(item)
+        if tipo is None:
+            return
+        key = pliego_format_dedupe_key(nombre)
+        if key in seen:
+            return
+        seen.add(key)
+        row = dict(item)
+        row["tipo"] = tipo
+        row["tipo_accion_final"] = tipo
+        row["tipo_accion_propuesto"] = tipo
+        bk = bucket or str(row.get("sobre_clasificado") or "") or classify_deliverable_sobre(
+            nombre, snippet
+        )
+        if bk not in buckets:
+            bk = "otros_requisitos_criticos"
+        buckets[bk].append(row)
+
+    for row in extract_pliego_generables_from_bases_corpus(corpus):
+        _append(row)
+
+    if isinstance(base, dict):
+        for bk in buckets:
+            for raw in base.get(bk) or []:
+                if isinstance(raw, dict):
+                    _append(
+                        raw,
+                        bk if bk != "requisitos_legales" else None,
+                        require_corpus_anchor=True,
+                    )
+
+    filtered = filter_consolidated_document_candidates(
+        {**buckets, "_meta": {"enriched_from_bases_corpus": True}}
+    )
+    meta = filtered.get("_meta") if isinstance(filtered.get("_meta"), dict) else {}
+    meta["filtered_pliego_formats_only"] = True
+    meta["excluded_corporate_physical"] = True
+    filtered["_meta"] = meta
+    return filtered
+
+
 async def build_corporate_physical_panel_list(
     memory: Any,
     session_id: str,
@@ -227,11 +396,16 @@ async def build_corporate_physical_panel_list(
     """
     from app.services.corporate_physical_enrichment_service import (
         extract_corporate_physical_from_bases_rag,
+        extract_corporate_physical_from_session_documents,
     )
     from app.services.document_deliverable_filter import (
+        corporate_physical_anchor_in_corpus,
         filter_corporate_physical_consolidated,
         filter_corporate_physical_from_compliance_list,
+        is_corporate_physical_credential_for_panel,
+        physical_credential_dedupe_key,
     )
+    from app.services.junta_bases_corpus import build_bases_corpus
 
     state = session_state if isinstance(session_state, dict) else await memory.get_session(session_id)
     if not isinstance(state, dict):
@@ -239,17 +413,55 @@ async def build_corporate_physical_panel_list(
 
     merged: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    corpus_text = ""
 
-    def _add_rows(rows: List[Dict[str, Any]]) -> None:
+    try:
+        docs_for_corpus = await memory.get_documents(session_id)
+    except Exception:
+        docs_for_corpus = state.get("_junta_session_documents") or []
+    if docs_for_corpus:
+        corpus_text = build_bases_corpus(session_id, docs_for_corpus, session_state=state).combined or ""
+
+    def _add_rows(
+        rows: List[Dict[str, Any]],
+        *,
+        require_corpus_anchor: bool = False,
+    ) -> None:
         for row in rows:
             if not isinstance(row, dict):
                 continue
             name = str(row.get("nombre") or row.get("nombre_canonico") or "")
-            key = normalize_deliverable_key(name, str(row.get("categoria") or ""))
-            if not name or key in seen:
+            snippet = str(row.get("evidence_snippet") or row.get("snippet") or "")
+            if not name or not is_corporate_physical_credential_for_panel(
+                name, "", snippet, "presentar_fisico"
+            ):
+                continue
+            if require_corpus_anchor and not corporate_physical_anchor_in_corpus(
+                name, snippet, corpus_text
+            ):
+                continue
+            key = physical_credential_dedupe_key(name)
+            if key in seen:
                 continue
             seen.add(key)
             merged.append(row)
+
+    docs = docs_for_corpus
+    _add_rows(
+        extract_corporate_physical_from_session_documents(
+            session_id, docs, session_state=state
+        ),
+        require_corpus_anchor=False,
+    )
+    if not merged and docs:
+        _add_rows(
+            extract_corporate_physical_from_bases_rag(
+                session_id,
+                session_state=state,
+                documents=docs,
+            ),
+            require_corpus_anchor=False,
+        )
 
     cml = state.get("compliance_master_list")
     if isinstance(cml, dict):
@@ -270,16 +482,17 @@ async def build_corporate_physical_panel_list(
                                 "reason": "corporate_physical_credential",
                             },
                         }
-                    ]
+                    ],
+                    require_corpus_anchor=True,
                 )
 
     consolidated = state.get("document_candidates_consolidated")
     if isinstance(consolidated, dict):
         filtered = filter_corporate_physical_consolidated(consolidated)
-        _add_rows(filtered.get("candidate_document_list") or [])
-
-    if len(merged) < 3:
-        _add_rows(extract_corporate_physical_from_bases_rag(session_id))
+        _add_rows(
+            filtered.get("candidate_document_list") or [],
+            require_corpus_anchor=True,
+        )
 
     return {
         "candidate_document_list": merged,

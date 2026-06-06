@@ -115,9 +115,17 @@ _LEGAL_FISICO_RE = re.compile(
 _FISCAL_PHYSICAL_RE = re.compile(
     r"(?i)\b("
     r"declaraci[oó]n\s+anual|declaraci[oó]n\s+fiscal|"
-    r"opini[oó]n\s+del\s+cumplimiento|opini[oó]n\s+positiva|"
-    r"constancia\s+de\s+situaci[oó]n\s+fiscal"
+    r"opini[oó]n\s+(del\s+|de\s+)?cumplimiento|opini[oó]n\s+positiva|"
+    r"constancia\s+de\s+situaci[oó]n\s+fiscal|"
+    r"servicio\s+de\s+administraci[oó]n\s+tributaria|\bsat\b"
     r")\b"
+)
+
+# Requisito numerado de bases que describe un documento a aportar (no una causal autónoma).
+_NUMBERED_PHYSICAL_REQ_HEAD_RE = re.compile(
+    r"(?i)^\s*\d+(?:\.\d+)+\s*[\.\-]?\s*(?:constancia|opini[oó]n|identificaci[oó]n|"
+    r"comprobante|recibo|padr[oó]n|escrito\s+donde|garant[ií]a|c[eé]dula|"
+    r"acta\s+constitutiva|p[oó]liza|certificaci[oó]n|carta\s+compromiso)"
 )
 
 _COMPANY_CREDENTIAL_ONLY_RE = re.compile(
@@ -127,10 +135,13 @@ _COMPANY_CREDENTIAL_ONLY_RE = re.compile(
     r"opini[oó]n\s+(del\s+)?cumplimiento\s+de\s+obligaciones\s+fiscales|opini[oó]n\s+positiva\s+del\s+sat|"
     r"constancia\s+infonavit|constancia\s+imss|\bimss\b|\binfonavit\b|registro\s+patronal|"
     r"declaraci[oó]n\s+anual|declaraci[oó]n\s+de\s+impuestos|recibo\s+de\s+n[oó]mina|comprobante\s+de\s+n[oó]mina|"
-    r"comprobante\s+fiscal\s+digital|\bcfdi\b|comprobante\s+de\s+domicilio|"
+    r"constancia\s+de\s+situaci[oó]n\s+fiscal|comprobante\s+de\s+domicilio|"
     r"acta\s+constitutiva|poder\s+notarial|instrumento\s+notarial|"
     r"comprobante\s+de\s+inscripci[oó]n\s+en\s+el\s+sat|curp\s+oficial|"
-    r"recibo\s+de\s+honorarios|constancia\s+de\s+no\s+inhabilitaci[oó]n"
+    r"recibo\s+de\s+honorarios|constancia\s+de\s+no\s+inhabilitaci[oó]n|"
+    r"constancia\s+de\s+no\s+adeudo|padr[oó]n\s+[uú]nico\s+de\s+proveedores|"
+    r"recibo.*costo\s+de\s+participaci[oó]n|comprobante\s+bancario|"
+    r"seguridad\s+social.*imss|opini[oó]n.*imss|imss.*seguridad\s+social"
     r")\b"
 )
 
@@ -139,6 +150,7 @@ _CONVOCANTE_FILLIN_EXEMPT_RE = re.compile(
     r"(?i)\b("
     r"declaraci[oó]n\s+de\s+integridad|declaraci[oó]n\s+bajo\s+protesta|"
     r"carta\s+de\s+(declaraci[oó]n|compromiso|presentaci[oó]n|protesta)|"
+    r"carta\s+en\s+papel|carta.*bajo\s+protesta|"
     r"manifestaci[oó]n\s+de\s+integridad|formato\s+(dd|fo|dc)\b|\bfo[-_]\d|"
     r"relaci[oó]n\s+de\s+anexos|manifiesto\s+de\s+entrega"
     r")\b"
@@ -147,9 +159,45 @@ _CONVOCANTE_FILLIN_EXEMPT_RE = re.compile(
 # Entregables que EconomicWriter materializa; no deben duplicarse en FormatsAgent.
 _ECONOMIC_WRITER_DOMAIN_RE = re.compile(
     r"(?i)\b("
-    r"propuesta\s+econ[oó]mica|forma\s+ae\b|anexo\s+ae\b|tabla\s+de\s+precios|"
-    r"cat[aá]logo\s+de\s+conceptos.*precios|carta\s+de\s+compromiso\s+de\s+precios|"
-    r"oferta\s+econ[oó]mica|an[aá]lisis\s+de\s+precios\s+unitarios"
+    r"propuesta\s+econ[oó]mica|proposici[oó]n\s+econ[oó]mica|forma\s+ae\b|anexo\s+ae\b|tabla\s+de\s+precios|"
+    r"cat[aá]logo\s+de\s+conceptos|carta\s+compromiso\s+de\s+seriedad|"
+    r"carta\s+de\s+compromiso\s+de\s+precios|oferta\s+econ[oó]mica|"
+    r"an[aá]lisis\s+de\s+precios\s+unitarios|listado\s+de\s+insumos"
+    r")\b"
+)
+
+# Panel Formatos/Anexos: reglas de sobre (no credencial ni trámite de portal).
+_FORMATS_PANEL_EXCLUDE_RE = re.compile(
+    r"(?i)\b("
+    r"presentar\s+documentos\s+de\s+la\s+propuesta\s+econ[oó]mica\s+dentro\s+del\s+sobre|"
+    r"escrito\s+de\s+solicitud\s+de\s+inscripci[oó]n,?\s+revalidaci[oó]n|"
+    r"sobres?\s+(?:cerrados|identificados)|"
+    r"documentos?\s+que\s+deber[aá]n\s+ser\s+presentados\s+dentro\s+del\s+sobre|"
+    r"manifestaci[oó]n\s+expresa\s+y\s+por\s+escrito\s+de\s+la|"
+    r"manifestaci[oó]n\s+de\s+la\s+(?:universidad|convocante|dependencia)|"
+    r"fianza\s+de\s+cumplimiento|fianza\s+vigente\s+durante|fianza\s+con\s+cl[aá]usulas|"
+    r"garant[ií]a\s+mediante\s+fianza|instituci[oó]n\s+afianzadora|"
+    r"declaraciones?\s+expresas\s+de\s+la\s+afianzadora|"
+    r"declaraci[oó]n\s+de\s+la\s+instituci[oó]n\s+afianzadora|"
+    r"aceptaci[oó]n\s+a\s+procedimientos\s+de\s+ejecuci[oó]n|"
+    r"ley\s+federal\s+de\s+instituciones\s+de\s+fianzas|"
+    r"formato\s+para\s+anexar\s+documentos|"
+    r"comit[eé]\s+analizar[aá]|revisando\s+la\s+documentaci[oó]n\s+t[eé]cnica|"
+    r"propuesta\s+t[eé]cnica\s+describiendo\s+especificaciones|"
+    r"desempe[nñ]a\s+cargo\s+o\s+comisi[oó]n\s+en\s+el\s+servicio\s+p[uú]blico"
+    r")\b"
+)
+
+# Anexos de ejecución contractual (post-adjudicación), no del expediente de proposición.
+_PLIEGO_POST_ADJUDICATION_ANEXO_RE = re.compile(
+    r"(?i)\banexo\s+(XIII|XIV|XV)\b"
+)
+
+_FORMATS_PANEL_FORCE_GENERAR_RE = re.compile(
+    r"(?i)\b("
+    r"cat[aá]logo\s+de\s+conceptos|carta\s+compromiso\s+de\s+seriedad|"
+    r"forma\s+ae[- ]?\d|propuesta\s+econ[oó]mica|proposici[oó]n\s+econ[oó]mica|listado\s+de\s+insumos|"
+    r"relaci[oó]n\s+y\s+an[aá]lisis\s+de\s+los\s+costos|programa\s+de\s+suministro"
     r")\b"
 )
 
@@ -159,7 +207,7 @@ _ADMIN_FORMAT_TEMPLATE_RE = re.compile(
     r"\b(dd|fo|dc)[-_]\d{1,2}\b|\[\s*anexo\s+|formato\s+[a-z]{1,4}\]|"
     r"carta\s+(de\s+)?(declaraci[oó]n|compromiso|presentaci[oó]n|protesta)|"
     r"declaraci[oó]n\s+(de\s+)?(integridad|bajo\s+protesta)|"
-    r"manifestaci[oó]n|relaci[oó]n\s+de\s+anexos|"
+    r"manifestaci[oó]n\s+(de|expresa)|manifiesto\s+(de|firmado)|relaci[oó]n\s+de\s+anexos|"
     r"integraci[oó]n\s+del\s+costo|formato\s+entrega"
     r")\b"
 )
@@ -174,6 +222,30 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", t)
 
 
+def _is_numbered_physical_requirement_not_causal(blob: str) -> bool:
+    """
+    True si el texto es un requisito numerado de expediente (§6.x, §7.x, etc.),
+    aunque incluya notas tipo «de no presentar este documento afecta la solvencia».
+    """
+    text = re.sub(r"\s+", " ", str(blob or "").strip())
+    if len(text) < 20:
+        return False
+    if not _NUMBERED_PHYSICAL_REQ_HEAD_RE.search(text):
+        return False
+    head = text[:280]
+    if is_company_credential_present_only(head, "", head):
+        return True
+    if _FISCAL_PHYSICAL_RE.search(head):
+        return True
+    if re.search(
+        r"(?i)\b(imss|infonavit|padr[oó]n\s+[uú]nico|comprobante\s+bancario|"
+        r"recibo.*participaci[oó]n|garant[ií]a\s+de\s+seriedad)\b",
+        head,
+    ):
+        return True
+    return False
+
+
 def is_pliego_causal_or_prohibition(
     nombre: str, descripcion: str = "", snippet: str = ""
 ) -> bool:
@@ -183,10 +255,20 @@ def is_pliego_causal_or_prohibition(
     blob = " ".join((nombre, descripcion, snippet)).strip()
     if not blob:
         return False
+    if _is_numbered_physical_requirement_not_causal(blob):
+        return False
+    if _is_numbered_physical_requirement_not_causal(snippet):
+        return False
     norm_name = _normalize_text(nombre)
     if _PROCEDURAL_ONLY_RE.search(norm_name):
         return True
     if _CAUSAL_RE.search(blob):
+        head = blob[:360]
+        if re.search(r"(?i)\bde\s+no\s+presentar\s+(?:este\s+)?documento\b", blob):
+            if _FISCAL_PHYSICAL_RE.search(head) or is_company_credential_present_only(
+                head, "", head
+            ):
+                return False
         return True
     if norm_name.startswith("no presentar") or norm_name.startswith("no debera presentar"):
         return True
@@ -195,11 +277,24 @@ def is_pliego_causal_or_prohibition(
     return False
 
 
+def _is_canonical_anexo_inventory_label(nombre: str) -> bool:
+    """True si el nombre proviene del inventario «Anexo N: …» extraído de bases."""
+    return bool(
+        re.search(
+            r"(?i)^anexo\s+"
+            r"(XIII|XIV|XV|XII|XI|IX|VIII|VII|VI|IV|III|II|I|X|V|\d{1,2})\s*:",
+            str(nombre or "").strip(),
+        )
+    )
+
+
 def is_procedural_noise_not_deliverable(
     nombre: str, descripcion: str = "", snippet: str = ""
 ) -> bool:
     """True si el texto es procedimiento/cronograma/regla, no un documento a elaborar o presentar."""
-    blob = " ".join((nombre, descripcion, snippet)).strip()
+    if _is_canonical_anexo_inventory_label(nombre):
+        return False
+    blob = " ".join((nombre, descripcion, str(snippet or "")[:360])).strip()
     if not blob:
         return True
     if is_pliego_causal_or_prohibition(nombre, descripcion, snippet):
@@ -216,6 +311,8 @@ def looks_like_actionable_deliverable(
     """
     True si el ítem parece un entregable real (formato, anexo, carta, opinión, etc.).
     """
+    if _is_canonical_anexo_inventory_label(nombre):
+        return True
     if is_procedural_noise_not_deliverable(nombre, descripcion, snippet):
         return False
     blob = " ".join((nombre, descripcion, snippet)).strip()
@@ -242,14 +339,57 @@ _PLIEGO_FORMAT_ANEXO_RE = re.compile(
     r"(?i)^(\d+\.\s*)?(anexo\s+[a-z]{1,4}[\-\s]|formato\s+(de\s+)?|modelo\s+contrato|anexo\s+t[eé]cnico)"
 )
 
-# Pólizas, garantías, certificaciones bancarias (presentación física del expediente).
+# Garantías de participación y respaldo bancario (no fianzas de ejecución contractual).
 _CORPORATE_EXTENDED_PHYSICAL_RE = re.compile(
     r"(?i)\b("
-    r"p[oó]liza|fianza|garant[ií]a\s+(de\s+)?(cumplimiento|seriedad|anticipo|vicios|laboral)|"
-    r"certificaci[oó]n|certificado\s+(iso|de\s+calidad|de\s+cumplimiento)|"
+    r"garant[ií]a\s+de\s+seriedad|fianza\s+de\s+seriedad|seriedad\s+de\s+la\s+oferta|"
+    r"padr[oó]n\s+de\s+proveedores|"
+    r"relaci[oó]n\s+de\s+clientes|carta\s+poder\s+simple|"
+    r"modificaci[oó]n\s+a\s+los\s+estatutos|"
     r"carta\s+bancaria|estado\s+de\s+cuenta|l[ií]nea\s+de\s+cr[eé]dito|"
-    r"afianzadora|cartas?\s+de\s+cr[eé]dito|comprobante\s+bancario"
+    r"cartas?\s+de\s+cr[eé]dito|comprobante\s+bancario|"
+    r"p[oó]liza\s+de\s+seguro\s+de\s+responsabilidad|responsabilidad\s+civil"
     r")\b"
+)
+
+# No son credenciales del expediente en propuesta (económico, post-adjudicación o formatos).
+_CORPORATE_PHYSICAL_EXCLUDE_RE = re.compile(
+    r"(?i)\b("
+    r"presentaci[oó]n\s+de\s+(cfdi|factura)|factura\s+electr[oó]nica|correcci[oó]n\s+de\s+errores|"
+    r"impuesto\s+desglosado|comprobante\s+fiscal\s+digital\s+por\s+concepto|"
+    r"mano\s+de\s+obra|factor\s+del\s+salario|integraci[oó]n\s+del\s+precio|"
+    r"an[aá]lisis\s+de\s+precios\s+unitarios|propuesta\s+econ[oó]mica|cotizaci[oó]n\s+mensual|"
+    r"licitante\s+ganador|proveedor\s+adjudicado|durante\s+la\s+vigencia\s+del\s+contrato|"
+    r"devoluci[oó]n\s+de\s+la\s+garant|cancelar\s+la\s+fianza|"
+    r"garant[ií]a\s+de\s+(cumplimiento|vicios\s+ocultos|anticipo)|"
+    r"fianza\s+de\s+(cumplimiento|vicios|anticipo)|"
+    r"garant[ií]a\s+de\s+calidad\s+de\s+los\s+servicios|"
+    r"modelo\s+de\s+(p[oó]liza|contrato|fianza)|"
+    r"compa[ñn][ií]a\s+afianzadora\s+mexicana|"
+    r"presentar\s+el\s+formato\s+de|formato\s+de\s+opini[oó]n|"
+    r"certificado\s+digital|identificaci[oó]n\s+electr[oó]nica|"
+    r"sobres?\s+ser[aá]n\s+generados|compranet|"
+    r"en\s+caso\s+de\s+resultar\s+ganador|"
+    r"cuips|primer\s+respondiente|"
+    r"nombre\s+y\s+domicilio\s+de\s+las\s+personas\s+integrantes|"
+    r"fianza\s+se\s+otorga\s+para|"
+    r"identificar\s+cada\s+una\s+de\s+las\s+p[aá]ginas|"
+    r"manifiesto\s+bajo\s+protesta.*impuestos\s+federales|"
+    r"carta\s+en\s+papel|preferentemente\s+membretado"
+    r")\b"
+)
+
+_CORPORATE_PHYSICAL_EXCLUDE_NAME_RE = re.compile(
+    r"(?i)^(?:anexo|formato)\s+(?:\d{1,3}[a-z]?|x{3,})\s*$"
+)
+
+# Plantilla de fianza embebida en PDF (p. ej. «Texto FIANZA… Por _____»), no ítem de expediente aparte.
+_EMBEDDED_FIANZA_TEMPLATE_RE = re.compile(
+    r"(?i)texto\s+fianza|por\s+_{2,}|a\s+favor\s+de\s+la\s+(?:universidad|instituto|dependencia|convocante)"
+)
+
+_FORMATO_ANEXAR_PANEL_RE = re.compile(
+    r"(?i)formato\s+para\s+anexar|anexar\s+documentos?\s*$"
 )
 
 # Anexos operativos del procedimiento, no expediente corporativo.
@@ -263,6 +403,130 @@ _NON_CORPORATE_PLIEGO_RE = re.compile(
 )
 
 
+def is_corporate_physical_panel_noise(
+    nombre: str, descripcion: str = "", snippet: str = ""
+) -> bool:
+    """
+    Ruido universal en panel físico: plantillas embebidas, formatos meta o etiquetas CML sin ancla.
+    """
+    name = str(nombre or "").strip()
+    blob = " ".join((nombre, descripcion, snippet)).strip()
+    if not name and not blob:
+        return True
+    if _FORMATO_ANEXAR_PANEL_RE.search(name) or _FORMATO_ANEXAR_PANEL_RE.search(blob):
+        return True
+    n = _normalize_text(name)
+    if "fianza" in n and "seriedad" in n:
+        if _EMBEDDED_FIANZA_TEMPLATE_RE.search(blob):
+            return True
+    if _EMBEDDED_FIANZA_TEMPLATE_RE.search(blob) and not re.search(
+        r"(?i)\bgarant[ií]a\s+de\s+seriedad\b", blob
+    ):
+        if re.search(r"(?i)\bfianza\b", name):
+            return True
+    return False
+
+
+def corporate_physical_anchor_in_corpus(
+    nombre: str,
+    snippet: str,
+    corpus_text: str,
+    *,
+    min_token_hits: int = 1,
+) -> bool:
+    """
+    True si el ítem tiene ancla verificable en el texto de bases (anti-etiquetas CML huérfanas).
+    """
+    corpus = str(corpus_text or "")
+    if not corpus.strip():
+        return True
+    low = corpus.lower()
+    sn = re.sub(r"\s+", " ", str(snippet or "").strip())
+    if len(sn) >= 20:
+        probe = sn[: min(80, len(sn))].lower()
+        if probe in low:
+            return True
+    name_norm = _normalize_text(nombre)
+    tokens = [
+        t
+        for t in name_norm.split()
+        if len(t) >= 5 and t not in _STOPWORDS
+    ]
+    if not tokens:
+        return False
+    hits = sum(1 for t in tokens if t in low)
+    need = min(min_token_hits, len(tokens))
+    return hits >= need
+
+
+def is_corporate_physical_excluded(
+    nombre: str, descripcion: str = "", snippet: str = ""
+) -> bool:
+    """True si el texto es económico, post-adjudicación o formato de pliego (no expediente corporativo)."""
+    if is_corporate_physical_panel_noise(nombre, descripcion, snippet):
+        return True
+    blob = " ".join((nombre, descripcion, snippet)).strip()
+    if not blob:
+        return False
+    if is_economic_writer_domain(nombre, descripcion, snippet):
+        return True
+    if _CORPORATE_PHYSICAL_EXCLUDE_RE.search(blob):
+        return True
+    norm_name = _normalize_text(str(nombre or "").strip())
+    if _CORPORATE_PHYSICAL_EXCLUDE_NAME_RE.match(norm_name):
+        return True
+    return False
+
+
+def is_bases_admin_physical_credential_line(line: str) -> bool:
+    """
+    True si un requisito numerado de bases es credencial externa (no plantilla DD/FO a rellenar).
+    Complementa is_corporate_physical_credential_for_panel para extracción directa del corpus.
+    """
+    text = re.sub(r"\s+", " ", str(line or "").strip())
+    if len(text) < 15:
+        return False
+    if is_corporate_physical_excluded(text, "", text):
+        return False
+    if is_pliego_causal_or_prohibition(text, "", text):
+        return False
+    if is_corporate_physical_credential_for_panel(text, "", text):
+        return True
+    if _NON_CORPORATE_PLIEGO_RE.search(text):
+        return False
+    if re.search(
+        r"(?i)\b("
+        r"imss|infonavit|padr[oó]n\s+de\s+proveedores|padr[oó]n\s+[uú]nico|recibo.*participaci[oó]n|"
+        r"comprobante\s+de\s+domicilio|constancia\s+de\s+no\s+adeudo|"
+        r"comprobante\s+bancario|garant[ií]a\s+de\s+seriedad|fianza.*seriedad"
+        r")\b",
+        text,
+    ):
+        if _CONVOCANTE_FILLIN_EXEMPT_RE.search(text) and not re.search(
+            r"(?i)\b(imss|infonavit|padr[oó]n|recibo|comprobante\s+de\s+domicilio|"
+            r"constancia\s+de\s+no\s+adeudo|comprobante\s+bancario|garant[ií]a\s+de\s+seriedad)\b",
+            text,
+        ):
+            return False
+        return True
+    return False
+
+
+def _canonical_physical_credential_label(line: str) -> str:
+    """Etiqueta corta para UI a partir del requisito literal de bases."""
+    text = re.sub(r"\s+", " ", str(line or "").strip())
+    text = re.sub(r"^\d{1,2}\.\d{1,2}\.?\s*", "", text)
+    text = re.sub(r"\(Documento que[^)]*\)", "", text, flags=re.I)
+    text = re.sub(r"\(Forma\s+[A-Z]{1,4}[- ]?\d+[A-Z]?\)", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" .,;")
+    if len(text) > 200:
+        cut = text[:200]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        text = cut + "…"
+    return text or "Documento empresarial"
+
+
 def is_corporate_physical_credential_for_panel(
     nombre: str,
     descripcion: str = "",
@@ -274,6 +538,8 @@ def is_corporate_physical_credential_for_panel(
     (IMSS, SAT, acta, póliza, certificación, etc.), excluyendo anexos rellenables del pliego.
     """
     if is_pliego_causal_or_prohibition(nombre, descripcion, snippet):
+        return False
+    if is_corporate_physical_excluded(nombre, descripcion, snippet):
         return False
     blob = " ".join((nombre, descripcion, snippet)).strip()
     if not blob:
@@ -325,7 +591,7 @@ def filter_corporate_physical_consolidated(
             tipo = str(item.get("tipo_accion_final") or item.get("tipo") or "")
             if not is_corporate_physical_credential_for_panel(nombre, "", snippet, tipo):
                 continue
-            key = normalize_deliverable_key(nombre, bucket)
+            key = physical_credential_dedupe_key(nombre)
             if key in seen:
                 continue
             seen.add(key)
@@ -409,6 +675,65 @@ _STOPWORDS = frozenset(
 )
 
 
+def physical_credential_dedupe_key(nombre: str) -> str:
+    """
+    Clave de fusión para credenciales físicas (variantes del mismo requisito en bases/CML).
+    """
+    n = _normalize_text(nombre)
+    if "modificacion" in n and "estatuto" in n:
+        return "expediente_empresarial|mod_estatutos"
+    if ("constancia" in n or "situacion fiscal" in n) and (
+        "sat" in n or "fiscal" in n or "administracion tributaria" in n
+    ):
+        return "expediente_empresarial|csf_sat"
+    if "opinion" in n and (
+        "estatal" in n
+        or "queretaro" in n
+        or "finanzas" in n
+        or "gobierno del estado" in n
+    ):
+        return "expediente_empresarial|opinion_estatal"
+    if "carta poder" in n or ("carta" in n and "poder" in n and "simple" in n):
+        return "expediente_empresarial|carta_poder_simple"
+    if "poder" in n or ("escritura" in n and ("notarial" in n or "empresa" in n or "publica" in n)):
+        return "expediente_empresarial|poder_escritura"
+    if "imss" in n or ("seguridad social" in n and "opinion" in n):
+        return "expediente_empresarial|imss_opinion"
+    if "sat" in n or "administracion tributaria" in n or (
+        "opinion" in n and "fiscal" in n and "federal" in n
+    ):
+        return "expediente_empresarial|sat_opinion"
+    if "no adeudo" in n or ("tesorer" in n and "adeudo" in n):
+        return "expediente_empresarial|constancia_no_adeudo"
+    if "padron" in n and "proveedor" in n:
+        return "expediente_empresarial|padron_proveedores"
+    if "relacion" in n and "cliente" in n:
+        return "expediente_empresarial|relacion_clientes"
+    if "garantia" in n and "seriedad" in n:
+        return "expediente_empresarial|garantia_seriedad"
+    if "fianza" in n and "seriedad" in n:
+        return "expediente_empresarial|garantia_seriedad"
+    if "recibo" in n and "participacion" in n:
+        return "expediente_empresarial|recibo_participacion"
+    if "comprobante" in n and "domicilio" in n:
+        return "expediente_empresarial|comprobante_domicilio"
+    if "comprobante" in n and "bancario" in n:
+        return "expediente_empresarial|comprobante_bancario"
+    if "identificacion oficial" in n and "asistente" in n:
+        return "expediente_empresarial|ine_asistente"
+    if "identificacion oficial" in n:
+        return "expediente_empresarial|ine_representante"
+    if "acta constitutiva" in n or "instrumento notarial" in n:
+        return "expediente_empresarial|acta_constitutiva"
+    if ("cedula" in n or "sua" in n) and ("imss" in n or "obrero" in n or "patronal" in n):
+        return "expediente_empresarial|cedula_imss"
+    if "responsabilidad civil" in n or ("poliza" in n and "civil" in n):
+        return "expediente_empresarial|poliza_rc"
+    if "articulo 32" in n or "art 32" in n:
+        return "expediente_empresarial|sat_opinion_art32"
+    return normalize_deliverable_key(nombre, "expediente_empresarial")
+
+
 def normalize_deliverable_key(nombre: str, categoria: str = "") -> str:
     """Clave de deduplicación por tokens significativos (fusiona variantes del mismo documento)."""
     toks = [
@@ -439,6 +764,53 @@ def is_company_credential_present_only(
 def is_generable_tipo_accion(tipo_accion: Optional[str]) -> bool:
     """True si el ítem puede encolar generación automática de Word/Excel."""
     return str(tipo_accion or "").strip().lower() in _GENERABLE_ACTIONS
+
+
+def should_exclude_from_formats_panel(nombre: str, descripcion: str = "", snippet: str = "") -> bool:
+    """True si el ítem es trámite/procedimiento, no un formato del pliego a generar."""
+    blob = " ".join((nombre, descripcion, snippet)).strip()
+    return bool(blob and _FORMATS_PANEL_EXCLUDE_RE.search(blob))
+
+
+def is_formats_panel_noise(nombre: str, descripcion: str = "", snippet: str = "") -> bool:
+    """Ruido universal en panel Formatos/Anexos (CCC sin ancla, meta-portal, fianzas post-adjudicación)."""
+    if is_corporate_physical_panel_noise(nombre, descripcion, snippet):
+        return True
+    head = str(snippet or "")[:320]
+    if should_exclude_from_formats_panel(nombre, descripcion, head):
+        return True
+    blob = " ".join((nombre, descripcion, snippet)).strip()
+    if not blob:
+        return True
+    if _PLIEGO_POST_ADJUDICATION_ANEXO_RE.search(str(nombre or "")[:80]):
+        return True
+    norm = _normalize_text(str(nombre or "").strip())
+    if norm in ("manifiesto", "declaracion de integridad", "manifestacion de integridad"):
+        return True
+    if re.match(r"^anexo\s+(?:xii|xi|x|ix|viii|vii|vi|v|iv|iii|ii|i|\d{1,2})\s*$", norm):
+        return True
+    return False
+
+
+def pliego_format_anchor_in_corpus(
+    nombre: str,
+    snippet: str,
+    corpus_text: str,
+) -> bool:
+    """True si el entregable tiene ancla en bases (misma política que credenciales físicas)."""
+    return corporate_physical_anchor_in_corpus(nombre, snippet, corpus_text)
+
+
+def formats_panel_should_generar(nombre: str, descripcion: str = "", snippet: str = "") -> bool:
+    """True si el entregable debe mostrarse como A GENERAR en el panel de formatos."""
+    blob = " ".join((nombre, descripcion, snippet)).strip()
+    if not blob or should_exclude_from_formats_panel(nombre, descripcion, snippet):
+        return False
+    if _FORMATS_PANEL_FORCE_GENERAR_RE.search(blob):
+        return True
+    return is_economic_writer_domain(nombre, descripcion, snippet) or has_admin_format_template_evidence(
+        {"nombre": nombre, "descripcion": descripcion, "snippet": snippet}
+    )
 
 
 def is_economic_writer_domain(nombre: str, descripcion: str = "", snippet: str = "") -> bool:
@@ -637,6 +1009,14 @@ _DEDUP_ALIASES: Dict[str, str] = {
 
 
 def _dedup_signature(nombre: str) -> str:
+    try:
+        from app.services.pliego_formats_enrichment_service import _anexo_key_from_label
+
+        anexo_key = _anexo_key_from_label(nombre)
+        if anexo_key:
+            return anexo_key
+    except Exception:
+        pass
     norm = _normalize_text(nombre)
     for prefix, alias in sorted(_DEDUP_ALIASES.items(), key=lambda x: -len(x[0])):
         if prefix in norm:

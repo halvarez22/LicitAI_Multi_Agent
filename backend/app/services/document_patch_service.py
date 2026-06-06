@@ -76,13 +76,21 @@ async def apply_price_correction(
 
     fresh = await memory.get_session(session_id) or {}
     inputs = dict(fresh.get("economic_user_inputs") or {})
+    cp = inputs.get("concept_prices")
+    if not isinstance(cp, dict):
+        cp = {}
     old = previous_value
     if old is None:
         try:
-            old = float(inputs.get(price_field))
+            old = float(cp.get(price_field, inputs.get(price_field)))
         except (TypeError, ValueError):
             old = None
-    inputs[price_field] = new_value
+    if price_field in cp or price_field.startswith("concept_") or "partida" in price_field.lower():
+        cp = dict(cp)
+        cp[price_field] = new_value
+        inputs["concept_prices"] = cp
+    else:
+        inputs[price_field] = new_value
     audit = list(fresh.get("price_correction_audit") or [])
     audit.append(
         {
@@ -100,11 +108,24 @@ async def apply_price_correction(
     await refresh_economic_validations_for_session(memory, session_id)
     fresh = await memory.get_session(session_id) or fresh
 
+    updated_paths: List[str] = []
+    hash_delta: Dict[str, Dict[str, str]] = {}
+    regen_paths: List[str] = []
+    try:
+        from app.services.economic_document_reapply import regenerate_all_economic_deliverables
+
+        regen = await regenerate_all_economic_deliverables(memory, session_id)
+        regen_paths = list(regen.get("updated") or [])
+        for p in regen_paths:
+            if p not in updated_paths:
+                updated_paths.append(p)
+            hash_delta[p] = {"previous": None, "current": safe_file_sha256(p)}
+    except Exception:
+        regen_paths = []
+
     line_items = list(fresh.get("session_line_items") or [])
     rows = apply_structured_price_inputs(line_items, inputs)
     filler = ExcelFillingService()
-    updated_paths: List[str] = []
-    hash_delta: Dict[str, Dict[str, str]] = {}
 
     by_source: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
@@ -152,6 +173,7 @@ async def apply_price_correction(
     patch_meta = {
         "price_field": price_field,
         "updated_files": updated_paths,
+        "regenerated_economic": regen_paths,
         "hash_delta": hash_delta,
         "file_count": len(updated_paths),
     }

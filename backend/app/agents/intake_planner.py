@@ -85,7 +85,12 @@ class IntakePlannerAgent(BaseAgent):
             return data
         return raw
 
-    def _questions_from_go_no_go(self, gng: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _viability_brechas_from_go_no_go(self, gng: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Brechas de viabilidad para panel Go/No-Go — no entran en ``questions`` del chat.
+
+        Misma estructura que preguntas de intake (IDs INTAKE-B-GNG-*) para trazabilidad.
+        """
         out: List[Dict[str, Any]] = []
         brechas = gng.get("brechas") if isinstance(gng.get("brechas"), list) else []
         for idx, b in enumerate(brechas, start=1):
@@ -190,93 +195,77 @@ class IntakePlannerAgent(BaseAgent):
                         "provenance_ui": {"source": "analysis", "confidence": float(it.get("confidence", 0.78) or 0.78), "reason": "solvencia_economica"},
                     }
                 )
+        # Condiciones contractuales y gap analysis → paneles (``contractual_review``, ``strategic_gaps``).
+
+        return out
+
+    def _contractual_review_from_analysis(self, analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Condiciones de contrato para panel de análisis — no cola de chat."""
+        out: List[Dict[str, Any]] = []
         cond = analysis.get("condiciones_contractuales")
-        if isinstance(cond, dict):
-            _cond_labels = {
-                "penalizaciones": "Penalizaciones contractuales",
-                "condiciones_pago": "Condiciones de pago",
-                "garantia_vicios_ocultos": "Garantía por vicios ocultos",
-            }
-            for key in ("penalizaciones", "condiciones_pago", "garantia_vicios_ocultos"):
-                v = cond.get(key)
-                if v:
-                    label = _cond_labels.get(key, key)
-                    # Incluir el contenido real de la cláusula en la pregunta
-                    # para que el asistente pueda explicársela al usuario en contexto.
-                    clausula_texto = str(v).strip() if isinstance(v, str) else ""
-                    if clausula_texto:
-                        question_text = (
-                            f"He notado una condición crítica sobre **{label.lower()}** que dice literalmente: \"{clausula_texto}\". "
-                            f"Si estás de acuerdo, podré redactar e integrar el documento de aceptación que pide la licitación. "
-                            f"¿Confirmas que la aceptas?"
-                        )
-                    else:
-                        question_text = (
-                            f"He detectado una condición sobre **{label.lower()}**. "
-                            f"Para poder generar el manifiesto correspondiente, necesito saber si estás de acuerdo con este punto. "
-                            f"¿Aceptas esta condición?"
-                        )
-                    out.append(
-                        {
-                            "question_id": f"INTAKE-B-CON-{key}",
-                            "question_type": "B",
-                            "priority": "IMPORTANTE",
-                            "blocking": False,
-                            "label": label,
-                            "question": question_text,
-                            "field_target": f"condiciones_contractuales.{key}",
-                            "required_evidence": "aceptacion_condicion_contractual",
-                            "provenance_ui": {
-                                "source": "analysis",
-                                "confidence": 0.75,
-                                "reason": "condicion_contractual",
-                                "clausula_texto": clausula_texto,
-                            },
-                        }
-                    )
-
-        # NUEVO: Integrar Checklist de Participación (Evidencia Directa)
-        checklist = analysis.get("requisitos_participacion")
-        if isinstance(checklist, list):
-            for idx, it in enumerate(checklist, start=1):
-                txt = str(it.get("texto_literal") or "").strip()
-                if not txt: continue
-                # Propagar metadatos de evidencia
-                pg = it.get("pagina") or ""
-                src = it.get("archivo_fuente") or ""
-                snip = it.get("evidence_snippet") or txt
-                
-                out.append({
-                    "question_id": f"INTAKE-CHECK-{idx:03d}",
+        if not isinstance(cond, dict):
+            return out
+        _cond_labels = {
+            "penalizaciones": "Penalizaciones contractuales",
+            "condiciones_pago": "Condiciones de pago",
+            "garantia_vicios_ocultos": "Garantía por vicios ocultos",
+        }
+        for key in ("penalizaciones", "condiciones_pago", "garantia_vicios_ocultos"):
+            v = cond.get(key)
+            if not v:
+                continue
+            label = _cond_labels.get(key, key)
+            clausula_texto = str(v).strip() if isinstance(v, str) else ""
+            if clausula_texto:
+                question_text = (
+                    f"He notado una condición crítica sobre **{label.lower()}** que dice literalmente: \"{clausula_texto}\". "
+                    f"Si estás de acuerdo, podré redactar e integrar el documento de aceptación que pide la licitación. "
+                    f"¿Confirmas que la aceptas?"
+                )
+            else:
+                question_text = (
+                    f"He detectado una condición sobre **{label.lower()}**. "
+                    f"Para poder generar el manifiesto correspondiente, necesito saber si estás de acuerdo con este punto. "
+                    f"¿Aceptas esta condición?"
+                )
+            out.append(
+                {
+                    "question_id": f"INTAKE-B-CON-{key}",
                     "question_type": "B",
-                    "priority": "CRITICO",
+                    "priority": "IMPORTANTE",
                     "blocking": False,
-                    "label": f"Requisito: {txt[:40]}...",
-                    "question": f"He encontrado este requisito en las bases: \"{txt[:200]}\". ¿Me confirmas que lo cumples y que integrarás el documento correspondiente?",
-                    "field_target": f"participacion.check_{idx}",
-                    "pagina": str(pg),
-                    "archivo_fuente": str(src),
-                    "evidence_snippet": str(snip),
-                    "provenance_ui": {"source": "analysis", "confidence": 0.85, "reason": "checklist_participacion"}
-                })
+                    "label": label,
+                    "question": question_text,
+                    "field_target": f"condiciones_contractuales.{key}",
+                    "required_evidence": "aceptacion_condicion_contractual",
+                    "provenance_ui": {
+                        "source": "analysis",
+                        "confidence": 0.75,
+                        "reason": "condicion_contractual",
+                        "clausula_texto": clausula_texto,
+                    },
+                }
+            )
+        return out
 
-        # NUEVO: Integrar Gap Analysis (Análisis Estratégico)
+    def _strategic_gaps_from_analysis(self, analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Gaps estratégicos (audit_report) para panel — no cola de chat."""
+        out: List[Dict[str, Any]] = []
         audit = analysis.get("audit_report") or {}
         gaps = audit.get("gap_analysis") if isinstance(audit, dict) else []
-        if isinstance(gaps, list):
-            for idx, g in enumerate(gaps, start=1):
-                req = str(g.get("requisito") or "").strip()
-                if not req or req.isdigit():
-                    req = f"Requisito estratégico {idx}"
-                # Solo procesamos Gaps reales (Faltantes o Vencidos)
-                if str(g.get("estado_empresa")).upper() not in ["FALTANTE", "VENCIDO"]:
-                    continue
-                
-                pg = g.get("pagina") or ""
-                src = g.get("archivo_fuente") or ""
-                snip = g.get("evidence_snippet") or req
-
-                out.append({
+        if not isinstance(gaps, list):
+            return out
+        for idx, g in enumerate(gaps, start=1):
+            req = str(g.get("requisito") or "").strip()
+            if not req or req.isdigit():
+                req = f"Requisito estratégico {idx}"
+            if str(g.get("estado_empresa")).upper() not in ["FALTANTE", "VENCIDO"]:
+                continue
+            pg = g.get("pagina") or ""
+            src = g.get("archivo_fuente") or ""
+            snip = g.get("evidence_snippet") or req
+            out.append(
+                {
                     "question_id": f"INTAKE-GAP-{idx:03d}",
                     "question_type": "B",
                     "priority": str(g.get("gravedad", "CRITICO")).upper(),
@@ -287,8 +276,9 @@ class IntakePlannerAgent(BaseAgent):
                     "pagina": str(pg),
                     "archivo_fuente": str(src),
                     "evidence_snippet": str(snip),
-                    "provenance_ui": {"source": "analysis", "confidence": 0.9, "reason": "gap_analysis"}
-                })
+                    "provenance_ui": {"source": "analysis", "confidence": 0.9, "reason": "gap_analysis"},
+                }
+            )
         return out
 
     def _questions_from_compliance(self, compliance_list: Dict[str, Any], company_profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -381,36 +371,13 @@ class IntakePlannerAgent(BaseAgent):
         return out
 
     def _questions_from_mini_dictamen(self, session_state: Dict[str, Any]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for idx, ticket in enumerate(session_state.get("clarification_tickets") or [], start=1):
-            if not isinstance(ticket, dict):
-                continue
-            status = str(ticket.get("status") or "")
-            if status not in {"open", "ready_for_junta"}:
-                continue
-            display_name = str(ticket.get("display_name") or f"Anexo {idx}").strip()
-            question = str(ticket.get("question") or "").strip()
-            if not question:
-                continue
-            priority = "BLOQUEANTE" if str(ticket.get("priority") or "") == "blocking" else "CRITICO"
-            out.append(
-                {
-                    "question_id": f"INTAKE-MD-{idx:03d}",
-                    "question_type": "Q",
-                    "priority": priority,
-                    "blocking": priority == "BLOQUEANTE",
-                    "label": f"Junta de aclaraciones: {display_name}",
-                    "question": question,
-                    "field_target": f"clarification_tickets.{ticket.get('ticket_id') or idx}",
-                    "required_evidence": str(ticket.get("reason") or "aclaracion_convocante"),
-                    "provenance_ui": {
-                        "source": "mini_dictamen_anexos",
-                        "confidence": 0.95,
-                        "reason": str(ticket.get("reason") or "clarification_required"),
-                    },
-                }
-            )
-        return out
+        """
+        Los tickets de aclaración (plantilla no publicada, ISO, curriculum, etc.)
+        no son preguntas de intake al usuario: se listan en Documentos detectados
+        y en el panel de Junta / mini dictamen.
+        """
+        _ = session_state
+        return []
 
     def _questions_from_quality_hints(self, session_state: Dict[str, Any]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -444,7 +411,18 @@ class IntakePlannerAgent(BaseAgent):
         if isinstance(f_hint, dict):
             blocking = int(f_hint.get("blocking_count", 0) or 0)
             warnings = int(f_hint.get("warning_count", 0) or 0)
+            issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
             if blocking > 0 or warnings > 0:
+                if issues:
+                    from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+                    stage = str(f_hint.get("stage") or "technical")
+                    question = build_fill_blocking_question(stage, issues)
+                else:
+                    question = (
+                        "Al armar los documentos me faltan datos concretos. "
+                        "Escríbeme aquí lo que falta o pulsa **Generar** tras corregir."
+                    )
                 pr = "CRITICO" if blocking <= 0 else "BLOQUEANTE"
                 out.append(
                     {
@@ -452,11 +430,8 @@ class IntakePlannerAgent(BaseAgent):
                         "question_type": "Q",
                         "priority": pr,
                         "blocking": blocking > 0,
-                        "label": "Validación de datos de llenado",
-                        "question": (
-                            "Antes de generar, necesito confirmar datos clave de llenado en los documentos "
-                            "(campos obligatorios y consistencia). ¿Me ayudas a validar esos datos críticos?"
-                        ),
+                        "label": "Datos para llenar documentos",
+                        "question": question,
                         "field_target": "quality.fill.review",
                         "required_evidence": "confirmacion_datos_criticos_documentales",
                         "provenance_ui": {
@@ -596,12 +571,16 @@ class IntakePlannerAgent(BaseAgent):
         pending = list(session_state.get("pending_questions") or [])
 
         questions = []
+        viability_brechas = self._dedupe(self._viability_brechas_from_go_no_go(gng))
+        contractual_review = self._contractual_review_from_analysis(analysis)
+        strategic_gaps = self._strategic_gaps_from_analysis(analysis)
+
         # Prioridad de incertidumbre: primero resolver clasificación documental, después llenado.
         questions.extend(self._questions_from_quality_hints(session_state))
         # NOTA: _inventory_summary_from_inventory ya NO agrega a questions —
         # el inventario va a un campo separado para no interrumpir el flujo conversacional.
-        questions.extend(self._questions_from_go_no_go(gng))
-        
+        # Go/No-Go, contractual y gaps → viability_brechas / contractual_review / strategic_gaps (paneles).
+
         # NUEVO: Consumir la Lista Maestra de Compliance (Auditoría Forense)
         master_compliance = company_data.get("compliance_master_list") or results.get("compliance", {}).get("data") or {}
         questions.extend(self._questions_from_compliance(master_compliance, company_profile=master_profile))
@@ -702,9 +681,12 @@ class IntakePlannerAgent(BaseAgent):
         inventory_summary = self._inventory_summary_from_inventory(session_state)
 
         data = {
-            "plan_version": "1.2.0",
+            "plan_version": "1.3.0",
             "summary": self._summary(questions, inventory_summary),
             "questions": questions,
+            "viability_brechas": self._sort_questions(viability_brechas),
+            "contractual_review": contractual_review,
+            "strategic_gaps": strategic_gaps,
             "inventory_summary": inventory_summary,
             "checklist_corporativo": checklist_corporativo,
         }

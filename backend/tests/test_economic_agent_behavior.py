@@ -368,7 +368,7 @@ async def test_prompt_incluye_reglas_y_alcance_del_analista():
 
 @pytest.mark.asyncio
 async def test_quadrature_delta_mayor_a_un_centavo_bloquea_generacion():
-    """Si Excel y motor difieren > 0.01, el agente detiene y pide corrección."""
+    """Si subtotal tabular y cantidad×PU no cuadran, el agente detiene."""
     mem = _memory_stub(
         line_items=[
             {
@@ -376,13 +376,13 @@ async def test_quadrature_delta_mayor_a_un_centavo_bloquea_generacion():
                 "concepto_raw": "Vigilante",
                 "cantidad": 1,
                 "precio_unitario": 120.00,
-                "subtotal": 120.00,
+                "subtotal": 150.00,
             }
         ]
     )
     ctx = MCPContextManager(mem)
     agent = EconomicAgent(ctx)
-    payload = '{"items": [{"concepto": "Vigilante", "cantidad": 1, "precio_unitario": 100.0, "subtotal": 100.0, "status": "matched"}], "alertas": []}'
+    payload = '{"items": [{"concepto": "Vigilante", "cantidad": 1, "precio_unitario": 120.0, "subtotal": 120.0, "status": "matched"}], "alertas": []}'
     with (
         patch.object(agent, "llm") as mock_llm,
         patch.object(agent, "vector_db") as mock_vec,
@@ -1290,6 +1290,65 @@ async def test_structured_slots_replace_generic_price_source_blocking():
     assert oi.get("row_index") == 11
     assert "propuesta economica.xlsx" in str(oi.get("source") or "").lower()
     assert "estructura de cantidades" in str(out.message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_tabular_prices_skip_generic_price_source_blocking():
+    """Con precios en session_line_items no debe pedir fuente genérica (p. ej. Propuesta Técnica)."""
+    mem = _memory_stub(
+        company={"id": "co_tab", "master_profile": {"catalog": []}},
+        line_items=[
+            {
+                "id": "li-oferta-1",
+                "concepto_raw": "Suministro e instalación de paneles solares",
+                "concepto_norm": "suministro e instalacion de paneles solares",
+                "precio_unitario": 2586233.0,
+                "cantidad": 1,
+                "unidad": "Lote",
+                "extra": {"price_column_index": 4, "source_filename": "ofertas.docx"},
+            }
+        ],
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+    payload = (
+        '{"items": [{"concepto": "Suministro e instalación de paneles solares", '
+        '"concepto_id": "li-oferta-1", "cantidad": 1, "precio_unitario": 2586233.0, '
+        '"subtotal": 2586233.0, "status": "matched"}], "alertas": []}'
+    )
+
+    with (
+        patch.object(agent, "llm") as mock_llm,
+        patch.object(agent, "vector_db") as mock_vec,
+        patch(
+            "app.agents.economic.validate_economic_proposal",
+            return_value=EconomicValidationResult(perfil_usado="generic"),
+        ),
+    ):
+        mock_llm.generate = AsyncMock(return_value=LLMResponse(success=True, response=payload))
+        mock_vec.query_texts = MagicMock(return_value={"documents": []})
+        out = await agent.process(
+            _agent_input(
+                "s-tabular-skip-ps",
+                company_id="co_tab",
+                compliance_master_list={
+                    "tecnico": [
+                        {
+                            "id": "t_prop",
+                            "descripcion": "Propuesta Técnica",
+                            "source": "bases.pdf",
+                            "page": 12,
+                            "snippet": "Entregar propuesta técnica en sobre 2.",
+                        },
+                    ]
+                },
+            )
+        )
+
+    assert out.status != AgentStatus.WAITING_FOR_DATA or (
+        str((out.data.get("missing") or [{}])[0].get("input_mode") or "") != "price_source"
+    )
+    assert "fuente real de precios" not in str(out.message or "").lower()
 
 
 def test_human_economic_blocking_summary_prioriza_ux_user_message():

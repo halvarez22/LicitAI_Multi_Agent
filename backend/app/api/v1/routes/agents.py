@@ -5,6 +5,7 @@ from app.agents.orchestrator import OrchestratorAgent
 from app.agents.mcp_context import MCPContextManager
 from app.api.deps import get_connected_memory
 from app.core.logging_config import get_logger
+import asyncio
 import logging
 
 logger = get_logger("licitai.agents")
@@ -17,7 +18,13 @@ from datetime import datetime, timezone
 import json
 from app.config.settings import settings
 from typing import Any, Dict
-from app.services.job_service import update_job_status, redis_client
+from app.services.job_service import (
+    update_job_status,
+    redis_client,
+    link_session_job,
+    clear_session_job,
+    get_active_session_job,
+)
 from app.utils.pipeline_telemetry import build_pipeline_telemetry
 
 def _job_completion_message(final_status: str) -> str:
@@ -53,8 +60,9 @@ async def process_licitation_bases(request: ProcessBasesRequest, background_task
         if not docs:
             raise HTTPException(status_code=404, detail="No se encontraron documentos para esta sesión")
 
-        # Crear Job ID
+        # Crear Job ID (limpia vínculo con job anterior de la sesión)
         job_id = str(uuid.uuid4())
+        clear_session_job(request.session_id)
         
         # Inicializar estado en Redis
         update_job_status(
@@ -62,12 +70,13 @@ async def process_licitation_bases(request: ProcessBasesRequest, background_task
             status="QUEUED",
             progress={"stage": "init", "pct": 0, "message": "Encolando tarea de análisis"}
         )
+        link_session_job(request.session_id, job_id)
 
-        # Encolar tarea en background
+        # Encolar tarea en background (thread dedicado: no bloquear API HTTP durante Compliance)
         background_tasks.add_task(
-            _run_orchestrator_job,
+            _run_orchestrator_job_isolated,
             job_id,
-            request
+            request,
         )
 
         return GenericResponse(
@@ -82,9 +91,63 @@ async def process_licitation_bases(request: ProcessBasesRequest, background_task
     finally:
         await memory.disconnect()
 
-async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
+async def _run_orchestrator_job_isolated(job_id: str, request: ProcessBasesRequest) -> None:
+    """
+    Ejecuta el pipeline en un thread con event loop propio.
+
+    Evita que Compliance/Ollama monopolice el loop de Uvicorn y deje colgados
+    endpoints ligeros (listado de fuentes, estado de job, etc.).
+
+    Usa un adaptador Postgres dedicado al thread; nunca toca el singleton del
+    event loop principal (evita "Future attached to a different loop").
+    """
+
+    def _thread_main() -> None:
+        import os
+
+        from app.config.settings import settings
+        from app.memory.adapters.postgres_adapter import PostgresMemoryAdapter
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        adapter = PostgresMemoryAdapter(
+            connection_string=settings.DATABASE_URL or os.getenv("DATABASE_URL"),
+            encryption_key=os.getenv("MEMORY_ENCRYPTION_KEY"),
+        )
+        try:
+
+            async def _bootstrap_and_run() -> None:
+                from app.memory.runtime import reset_memory_override, set_memory_override
+
+                if not await adapter.connect():
+                    raise RuntimeError("PostgreSQL no disponible para job aislado")
+                token = set_memory_override(adapter)
+                try:
+                    await _run_orchestrator_job(job_id, request, memory=adapter)
+                finally:
+                    reset_memory_override(token)
+
+            loop.run_until_complete(_bootstrap_and_run())
+        finally:
+            try:
+                if getattr(adapter, "engine", None):
+                    loop.run_until_complete(adapter.engine.dispose())
+            except Exception:
+                pass
+            loop.close()
+
+    await asyncio.to_thread(_thread_main)
+
+
+async def _run_orchestrator_job(
+    job_id: str,
+    request: ProcessBasesRequest,
+    memory=None,
+):
     """Tarea de fondo que ejecuta el pipeline real."""
-    memory = await get_connected_memory()
+    thread_local_memory = memory is not None
+    if memory is None:
+        memory = await get_connected_memory()
     
     try:
         update_job_status(job_id, "RUNNING", {"stage": "ingestion", "pct": 10, "message": "Iniciando ingesta de documentos"})
@@ -154,6 +217,21 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             await memory.save_document(
                 d["id"], request.session_id, content, {"status": "ANALYZED"}
             )
+            try:
+                from app.services.document_catalog_service import (
+                    classify_and_persist_catalog_entry,
+                )
+
+                await classify_and_persist_catalog_entry(
+                    memory, request.session_id, d["id"], content
+                )
+            except Exception as catalog_exc:
+                logger.warning(
+                    "background_document_catalog_failed session=%s doc=%s err=%s",
+                    request.session_id,
+                    d["id"],
+                    catalog_exc,
+                )
 
         # ── PASO 2: EJECUCIÓN DEL ORQUESTADOR ────────────────────────────────────
         update_job_status(job_id, "RUNNING", {"stage": "orchestration", "pct": 30, "message": "Iniciando orquestación de agentes"})
@@ -278,23 +356,39 @@ async def _run_orchestrator_job(job_id: str, request: ProcessBasesRequest):
             },
         )
     finally:
-        if 'orchestrator' in locals():
-            await orchestrator.context_manager.memory.disconnect()
+        clear_session_job(request.session_id)
+        if thread_local_memory:
+            if getattr(memory, "engine", None):
+                await memory.engine.dispose()
         else:
             await memory.disconnect()
 
+@router.get("/sessions/{session_id}/active-job", response_model=GenericResponse)
+async def get_session_active_job(session_id: str):
+    """
+    Job de análisis en curso para la sesión (si existe en Redis).
+    Permite al frontend reanudar la ventana de progreso tras recargar la página.
+    """
+    job = get_active_session_job(session_id)
+    if not job:
+        return GenericResponse(success=True, message="Sin job activo", data=None)
+    return GenericResponse(success=True, message="Job activo", data=job)
+
+
 @router.get("/jobs/{job_id}/status", response_model=GenericResponse)
-async def get_job_status(job_id: str):
+async def get_job_status_endpoint(job_id: str):
     """
     Retorna el estado de progreso del análisis asíncrono.
+    Jobs RUNNING/QUEUED sin heartbeat reciente se reconcilian como FAILED.
     """
-    job_data_raw = redis_client.get(f"job:{job_id}")
-    if not job_data_raw:
+    from app.services.job_service import get_job_status as fetch_job_status
+
+    job_data = fetch_job_status(job_id, reconcile_stale=False)
+    if not job_data:
         raise HTTPException(status_code=404, detail="ID de Job no encontrado")
-        
-    job_data = json.loads(job_data_raw)
+
     return GenericResponse(
         success=True,
         message=f"Estado del job: {job_data.get('status')}",
-        data=job_data
+        data=job_data,
     )

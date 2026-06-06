@@ -14,6 +14,7 @@ from app.config.settings import settings
 from app.services.document_candidate_list_service import build_candidate_document_list
 from app.services.tender_router_service import TenderRouterService
 from app.orchestration.pipeline_configurator import PipelineConfigurator, PipelineConfig, ActionType, ConditionType
+from app.core.formats_pilot_slots import is_usable_profile_field_value
 
 # Logger estructurado
 logger = get_logger(__name__)
@@ -274,7 +275,9 @@ def _document_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[str, 
     }
 
 
-def _document_fill_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[str, Any]]:
+def _document_fill_quality_waiting_hints_from_output(
+    res: Any, stage: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """
     Extrae hints del gate de llenado documental cuando writers bloquean por calidad final.
     """
@@ -286,11 +289,16 @@ def _document_fill_quality_waiting_hints_from_output(res: Any) -> Optional[Dict[
     gate = data.get("document_fill_quality_gate")
     if not isinstance(gate, dict):
         return None
+    issues_raw = gate.get("issues") if isinstance(gate.get("issues"), list) else []
+    issues = [i for i in issues_raw if isinstance(i, dict)][:12]
     return {
         "validation_passed": bool(gate.get("validation_passed", True)),
         "blocking_count": int(gate.get("blocking_count", 0) or 0),
         "warning_count": int(gate.get("warning_count", 0) or 0),
         "metrics": gate.get("metrics") if isinstance(gate.get("metrics"), dict) else {},
+        "stage": stage or "",
+        "issues": issues,
+        "experience_summary": data.get("experience_sources_ux") or "",
     }
 
 
@@ -592,6 +600,34 @@ def _economic_snapshot_has_line_items(snapshot: Dict[str, Any]) -> bool:
     return isinstance(items, list) and len(items) > 0
 
 
+def _economic_proposal_snapshot(session_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for task in reversed(list(session_state.get("tasks_completed") or [])):
+        if isinstance(task, dict) and task.get("task") == "economic_proposal":
+            result = task.get("result")
+            return result if isinstance(result, dict) else None
+    return None
+
+
+def _economic_writer_already_materialized(
+    session_id: str, session_state: Dict[str, Any]
+) -> bool:
+    """True si la cotización ya está calculada y hay archivos económicos en disco."""
+    snapshot = _economic_proposal_snapshot(session_state) or {}
+    total_base = float(snapshot.get("total_base") or 0.0)
+    snap_status = str(snapshot.get("status") or "")
+    user_inputs = session_state.get("economic_user_inputs") or {}
+    allow_zero = bool(user_inputs.get("allow_zero_total_base_ack"))
+    snapshot_ready = snap_status == "complete" and (
+        total_base >= 0.01 or allow_zero
+    ) and (_economic_snapshot_has_line_items(snapshot) or allow_zero)
+    if not snapshot_ready:
+        return False
+    econ_dir = Path("/data/outputs") / session_id / "2.propuesta_economica"
+    if not econ_dir.is_dir():
+        return False
+    return any(p.is_file() for p in econ_dir.iterdir())
+
+
 def _can_continue_generation_past_economic_failure(
     step: str, gen_state: Optional[Dict[str, Any]]
 ) -> bool:
@@ -606,6 +642,18 @@ def _can_continue_generation_past_economic_failure(
 
 def _agent_output_user_message(res: Any) -> str:
     msg = getattr(res, "message", None) or getattr(res, "error", None)
+    data = getattr(res, "data", None) if not isinstance(res, dict) else res.get("data")
+    if isinstance(data, dict):
+        gate = data.get("document_fill_quality_gate")
+        if isinstance(gate, dict) and not bool(gate.get("validation_passed", True)):
+            from app.services.document_fill_ux_messages import build_fill_quality_user_brief
+
+            issues = gate.get("issues") if isinstance(gate.get("issues"), list) else []
+            brief = build_fill_quality_user_brief(
+                str(data.get("stage") or "technical"),
+                issues,
+            )
+            return brief["full_message"]
     return str(msg).strip() if msg else "Error desconocido"
 
 
@@ -783,14 +831,16 @@ class OrchestratorAgent(BaseAgent):
             corp_checklist = [c for c in list(plan.get("checklist_corporativo") or []) if isinstance(c, dict)]
             corp_keys = {_get_q_key(c) for c in corp_checklist if _get_q_key(c)}
             
+            from app.services.hitl_queue_service import merge_pending_queues, should_exclude_from_chat_queue
+
             existing_pending = [q for q in existing_pending if _get_q_key(q) not in corp_keys]
+            existing_pending = [q for q in existing_pending if not should_exclude_from_chat_queue(q)]
 
             existing_keys = {_get_q_key(q) for q in existing_pending if _get_q_key(q)}
-            # Solo añadir las que no estén ya en la cola (para no duplicar)
-            # Pero las ponemos al INICIO (unshift)
-            new_to_add = [q for q in planner_questions if _get_q_key(q) not in existing_keys]
-            
-            from app.services.hitl_queue_service import merge_pending_queues
+            new_to_add = [
+                q for q in planner_questions
+                if _get_q_key(q) not in existing_keys and not should_exclude_from_chat_queue(q)
+            ]
 
             merged = merge_pending_queues(existing_pending, new_to_add)
 
@@ -933,18 +983,6 @@ class OrchestratorAgent(BaseAgent):
                 session_state = await self.context_manager.memory.get_session(session_id)
             else:
                 session_state, _ = SessionStateMigrator.migrate(session_id, raw_session_state)
-                # --- HARD RESET (Hito A1): Limpiar cola y artefactos si es un análisis fresco ---
-                if mode == "full" and not agent_input.resume_generation:
-                    logger.info("orchestrator_hard_reset_session_artifacts", session_id=session_id)
-                    reset_fields = {
-                        "pending_questions": [],
-                        "document_inventory": {"items": []},
-                        "document_candidates_v1": [],
-                        "intake_plan": {},
-                        "economic_user_inputs": {},
-                    }
-                    session_state.update(reset_fields)
-                    await _safe_save_session(self.context_manager.memory, session_id, reset_fields)
 
             if not agent_input.company_id:
                 _session_company_id = (
@@ -962,6 +1000,55 @@ class OrchestratorAgent(BaseAgent):
                         company_id=str(_session_company_id),
                         resume_generation=bool(agent_input.resume_generation),
                     )
+
+            _session_docs = await self.context_manager.memory.get_documents(session_id) or []
+            from app.services.session_bases_analysis_invalidation import (
+                bases_analysis_committed,
+                bases_fingerprint_matches_stored,
+                sync_bases_analysis_state,
+            )
+
+            session_state, _bases_sync = await sync_bases_analysis_state(
+                self.context_manager.memory,
+                session_id,
+                session_state,
+                _session_docs,
+                persist=True,
+            )
+            if _bases_sync.get("invalidated"):
+                logger.info(
+                    "bases_analysis_invalidated",
+                    session_id=session_id,
+                    reason=_bases_sync.get("reason"),
+                    fingerprint=_bases_sync.get("fingerprint"),
+                )
+            session_state = await self.context_manager.memory.get_session(session_id) or session_state
+
+            # --- HARD RESET (Hito A1): solo si bases cambiaron; preserva capturas HITL económicas ---
+            from app.services.session_bases_analysis_invalidation import should_hard_reset_session_artifacts
+
+            if should_hard_reset_session_artifacts(
+                mode=mode,
+                resume_generation=bool(agent_input.resume_generation),
+                session_state=session_state,
+                documents=_session_docs,
+            ):
+                logger.info("orchestrator_hard_reset_session_artifacts", session_id=session_id)
+                reset_fields = {
+                    "pending_questions": [],
+                    "document_inventory": {"items": []},
+                    "document_candidates_v1": [],
+                    "intake_plan": {},
+                    "economic_user_inputs": {},
+                }
+                session_state.update(reset_fields)
+                await _safe_save_session(self.context_manager.memory, session_id, reset_fields)
+                session_state = await self.context_manager.memory.get_session(session_id) or session_state
+            elif mode == "full" and not agent_input.resume_generation:
+                logger.info(
+                    "orchestrator_hard_reset_skipped_bases_unchanged",
+                    session_id=session_id,
+                )
             
             context = await self.context_manager.get_global_context(session_id)
             tasks_completed = context.get("session_state", {}).get("tasks_completed", [])
@@ -989,6 +1076,20 @@ class OrchestratorAgent(BaseAgent):
                 reuse_prior_stages = False
             if reuse_prior_stages:
                 completed_stages = _collect_completed_stages_from_session(session_state)
+                if not bases_fingerprint_matches_stored(session_state, _session_docs):
+                    completed_stages -= {"analysis", "compliance"}
+                    logger.info(
+                        "resume_stages_trimmed_stale_bases",
+                        session_id=session_id,
+                        mode=mode,
+                    )
+                elif not bases_analysis_committed(session_state):
+                    completed_stages -= {"analysis", "compliance"}
+                    logger.info(
+                        "resume_stages_trimmed_pending_reanalysis",
+                        session_id=session_id,
+                        mode=mode,
+                    )
                 for completed_stage in sorted(completed_stages):
                     logger.info(
                         "resume_skip_stage",
@@ -1045,13 +1146,24 @@ class OrchestratorAgent(BaseAgent):
             session_state = await _persist_compliance_recovery_if_needed(
                 self.context_manager.memory, session_id, session_state
             )
+            if not bases_analysis_committed(session_state):
+                session_state.pop("compliance_master_list", None)
+                session_state.pop("compliance_recovery_source", None)
             if _compliance_list_from_session(session_state) and "compliance" not in completed_stages:
-                completed_stages.add("compliance")
-                logger.info(
-                    "compliance_stage_inferred_from_recovery",
-                    session_id=session_id,
-                    source=session_state.get("compliance_recovery_source"),
-                )
+                if bases_analysis_committed(session_state) and bases_fingerprint_matches_stored(
+                    session_state, _session_docs
+                ):
+                    completed_stages.add("compliance")
+                    logger.info(
+                        "compliance_stage_inferred_from_recovery",
+                        session_id=session_id,
+                        source=session_state.get("compliance_recovery_source"),
+                    )
+                else:
+                    logger.info(
+                        "compliance_recovery_skipped_stale_bases",
+                        session_id=session_id,
+                    )
 
             # --- VALIDACIÓN PREREQUISITO 2: generation_only requiere compliance previo ---
             # Sin datos de compliance no hay lista maestra → los agentes de generación
@@ -1117,13 +1229,18 @@ class OrchestratorAgent(BaseAgent):
                                 if _logo_path:
                                     _current_profile["logo"] = _logo_path
 
-                        # Fusionar campos faltantes del master_profile fresco
+                        # Fusionar: la DB gana sobre placeholders del frontend (N/A, vacío, etc.)
                         for _field in (
                             "razon_social", "rfc", "representante_legal",
                             "domicilio_fiscal", "tipo", "logo",
                         ):
-                            if not _current_profile.get(_field) and _fresh_profile.get(_field):
-                                _current_profile[_field] = _fresh_profile[_field]
+                            _cur = _current_profile.get(_field)
+                            _fresh = _fresh_profile.get(_field)
+                            if _fresh and (
+                                not is_usable_profile_field_value(_cur)
+                                or not str(_cur or "").strip()
+                            ):
+                                _current_profile[_field] = _fresh
 
                         # Actualizar agent_input con el perfil enriquecido y docs reales
                         agent_input = agent_input.model_copy(
@@ -1284,23 +1401,6 @@ class OrchestratorAgent(BaseAgent):
                             session_id=session_id,
                             error=str(e),
                         )
-                    try:
-                        from app.services.junta_aclaraciones_questions_service import (
-                            build_and_persist_junta_aclaraciones_questions,
-                        )
-
-                        _snap_junta = await self.context_manager.memory.get_session(session_id) or {}
-                        await build_and_persist_junta_aclaraciones_questions(
-                            self.context_manager.memory,
-                            session_id,
-                            session_state=_snap_junta,
-                        )
-                    except Exception as _junta_a:
-                        logger.warning(
-                            "junta_questions_after_analysis_skipped",
-                            session_id=session_id,
-                            error=str(_junta_a)[:120],
-                        )
                     _notify_job_progress(
                         agent_input.job_id,
                         "analysis",
@@ -1347,23 +1447,55 @@ class OrchestratorAgent(BaseAgent):
                             result=res if isinstance(res, dict) else res.model_dump(),
                         )
                         try:
-                            from app.services.junta_aclaraciones_questions_service import (
-                                build_and_persist_junta_aclaraciones_questions,
+                            from app.services.analysis_artifacts_rehydrate_service import (
+                                rehydrate_after_analysis_pipeline,
                             )
 
-                            _snap_junta_c = (
-                                await self.context_manager.memory.get_session(session_id) or {}
+                            _rehydrate_cid = (
+                                getattr(agent_input, "company_id", None)
+                                or session_state.get("company_id")
+                                or (session_state.get("initial_data") or {}).get("company_id")
+                                or (session_state.get("global_inputs") or {}).get("company_id")
                             )
-                            await build_and_persist_junta_aclaraciones_questions(
+                            _rehydrate = await rehydrate_after_analysis_pipeline(
                                 self.context_manager.memory,
                                 session_id,
-                                session_state=_snap_junta_c,
+                                company_id=str(_rehydrate_cid) if _rehydrate_cid else None,
+                                commit_snapshot=True,
                             )
-                        except Exception as _junta_c:
+                            if not _rehydrate.success:
+                                logger.warning(
+                                    "analysis_rehydrate_incomplete",
+                                    session_id=session_id,
+                                    error=_rehydrate.error,
+                                    failed_steps=[
+                                        s.step for s in _rehydrate.steps if not s.ok
+                                    ],
+                                )
+                            else:
+                                logger.info(
+                                    "analysis_rehydrate_ok",
+                                    session_id=session_id,
+                                    hitos=_rehydrate.counts.get("hitos"),
+                                    junta=_rehydrate.counts.get("junta_items"),
+                                    snapshot_committed=_rehydrate.snapshot_committed,
+                                )
+                        except Exception as _reh_exc:
                             logger.warning(
-                                "junta_questions_after_compliance_skipped",
+                                "analysis_rehydrate_failed",
                                 session_id=session_id,
-                                error=str(_junta_c)[:120],
+                                error=str(_reh_exc)[:200],
+                            )
+                            await _safe_save_session(
+                                self.context_manager.memory,
+                                session_id,
+                                {
+                                    "last_orchestrator_decision": {
+                                        "stop_reason": "ANALYSIS_REHYDRATE_INCOMPLETE",
+                                        "aggregate_health": "failed",
+                                        "error": str(_reh_exc)[:200],
+                                    },
+                                },
                             )
                     except Exception as e:
                         logger.error("compliance_stage_failed", session_id=session_id, error=str(e))
@@ -2208,6 +2340,14 @@ class OrchestratorAgent(BaseAgent):
                         **_gfm,
                     )
 
+                if gen_state and _economic_writer_already_materialized(session_id, session_state):
+                    if _gen_job_status(gen_state, "economic_writer") in (
+                        "blocked",
+                        "error",
+                        "pending",
+                    ):
+                        _set_gen_job_status(gen_state, "economic_writer", "done")
+
                 for step, a_cls in [
                     ("technical", "TechnicalWriterAgent"),
                     ("formats", "FormatsAgent"),
@@ -2220,6 +2360,34 @@ class OrchestratorAgent(BaseAgent):
                             skip_step = bool(
                                 gen_state and _gen_job_status(gen_state, step) == "done"
                             )
+                            if skip_step and step == "packager" and gen_state:
+                                from app.agents.document_packager import (
+                                    packager_sobres_stale,
+                                    validated_pack_complete,
+                                )
+
+                                if validated_pack_complete(session_id):
+                                    logger.info(
+                                        "orchestrator_packager_skip_validated_complete",
+                                        session_id=session_id,
+                                    )
+                                elif packager_sobres_stale(session_id):
+                                    logger.warning(
+                                        "orchestrator_packager_stale_sobres_forcing_repack",
+                                        session_id=session_id,
+                                    )
+                                    skip_step = False
+                                    _set_gen_job_status(gen_state, step, "pending")
+                            if (
+                                not skip_step
+                                and step == "economic_writer"
+                                and gen_state
+                                and _gen_job_status(gen_state, step) in ("blocked", "error")
+                                and _economic_writer_already_materialized(session_id, session_state)
+                            ):
+                                _set_gen_job_status(gen_state, step, "done")
+                                execution_results[step] = {"status": "resumed", "data": {"documentos": []}}
+                                skip_step = True
                             if skip_step:
                                 execution_results[step] = {"status": "resumed"}
                                 continue
@@ -2277,7 +2445,7 @@ class OrchestratorAgent(BaseAgent):
                                     )
                                     continue
                                 quality_hints = _document_quality_waiting_hints_from_output(res)
-                                fill_hints = _document_fill_quality_waiting_hints_from_output(res)
+                                fill_hints = _document_fill_quality_waiting_hints_from_output(res, stage=step)
                                 waiting_hints = fill_hints or quality_hints
                                 decision = OrchestratorState(
                                     stop_reason=f"INCOMPLETE_{step.upper()}_DATA",
@@ -2363,7 +2531,7 @@ class OrchestratorAgent(BaseAgent):
                                     mode,
                                 )
 
-                            if gen_state:
+                            if gen_state and step != "packager":
                                 _set_gen_job_status(gen_state, step, "done")
                             _notify_job_progress(
                                 agent_input.job_id,
@@ -2435,10 +2603,59 @@ class OrchestratorAgent(BaseAgent):
                                         session_id=session_id,
                                         error=str(_mini_exc),
                                     )
+                                from app.agents.document_packager import packager_pdata_incomplete
+
+                                incomplete, exp_counts, act_counts = packager_pdata_incomplete(
+                                    session_id,
+                                    pdata,
+                                    agent_input.company_data.get("documentos_generados"),
+                                )
+                                if incomplete:
+                                    if gen_state:
+                                        _set_gen_job_status(gen_state, "packager", "blocked")
+                                    decision = OrchestratorState(
+                                        stop_reason="PACKAGING_INCOMPLETE_SOBRES",
+                                        aggregate_health="failed",
+                                        next_steps=next_steps,
+                                        correlation_id=correlation_id,
+                                    ).model_dump()
+                                    msg = (
+                                        "El empaquetado quedó incompleto: "
+                                        f"admin {act_counts.get('sobre_1', 0)}/{exp_counts.get('sobre_1', 0)}, "
+                                        f"técnico {act_counts.get('sobre_2', 0)}/{exp_counts.get('sobre_2', 0)}, "
+                                        f"económico {act_counts.get('sobre_3', 0)}/{exp_counts.get('sobre_3', 0)}. "
+                                        "Pulsa Generar de nuevo; si persiste, revisa Logística y Expedientes."
+                                    )
+                                    _updates_pack: Dict[str, Any] = {
+                                        "last_orchestrator_decision": decision,
+                                    }
+                                    if gen_state:
+                                        _updates_pack["generation_state"] = gen_state
+                                    await _safe_save_session(
+                                        self.context_manager.memory,
+                                        session_id,
+                                        _updates_pack,
+                                    )
+                                    return _response_with_generation_state(
+                                        {
+                                            "status": "error",
+                                            "session_id": session_id,
+                                            "message": msg,
+                                            "chatbot_message": msg,
+                                            "results": {
+                                                k: (v if isinstance(v, dict) else v.model_dump())
+                                                for k, v in execution_results.items()
+                                            },
+                                            "orchestrator_decision": decision,
+                                        },
+                                        session_state,
+                                        mode,
+                                    )
                                 pack_session = build_pack_session_data_from_outputs(
                                     session_id=session_id,
                                     packager_agent_data=pdata,
                                     company_data=agent_input.company_data or {},
+                                    session_state=session_state,
                                 )
                                 pr = CompraNetPackager().pack(pack_session)
                                 execution_results["compranet_packaging"] = pr.to_dict()
@@ -2457,6 +2674,7 @@ class OrchestratorAgent(BaseAgent):
                                     _updates_9: Dict[str, Any] = {"last_orchestrator_decision": decision}
                                     if gen_state:
                                         _updates_9["generation_state"] = gen_state
+                                        _set_gen_job_status(gen_state, "packager", "blocked")
                                     await _safe_save_session(self.context_manager.memory, session_id, _updates_9)
                                     return _response_with_generation_state(
                                         {
@@ -2482,6 +2700,8 @@ class OrchestratorAgent(BaseAgent):
                                         "message": "Empaque CompraNet validado (manifiesto SHA-256).",
                                     },
                                 )
+                                if gen_state:
+                                    _set_gen_job_status(gen_state, "packager", "done")
                                 try:
                                     from app.services.delivery_coverage_report import (
                                         build_and_persist_coverage,
@@ -2589,8 +2809,9 @@ class OrchestratorAgent(BaseAgent):
                         )
 
                 econ_documents = _extract_documentos(execution_results.get("economic_writer"))
-                if gen_state and _gen_job_status(gen_state, "economic_writer") == "blocked" and econ_documents:
-                    _set_gen_job_status(gen_state, "economic_writer", "done")
+                if gen_state and _gen_job_status(gen_state, "economic_writer") == "blocked":
+                    if econ_documents or _economic_writer_already_materialized(session_id, session_state):
+                        _set_gen_job_status(gen_state, "economic_writer", "done")
                 if gen_state:
                     gen_state["status"] = "completed"
                     await _safe_save_session(
@@ -2696,6 +2917,39 @@ class OrchestratorAgent(BaseAgent):
                     "status": "waiting_for_data",
                     "session_id": session_id,
                     "message": coverage_block.get("message"),
+                    "orchestrator_decision": gate_decision,
+                    "correlation_id": correlation_id,
+                }
+
+            from app.services.formats_coverage_gate import (
+                evaluate_delivery_completeness_before_final_ok,
+            )
+
+            delivery_block = evaluate_delivery_completeness_before_final_ok(
+                fresh_for_gate, session_id
+            )
+            if delivery_block:
+                gate_decision = OrchestratorState(
+                    stop_reason="DELIVERY_COVERAGE_GAP",
+                    aggregate_health=agg_health,
+                    next_steps=[
+                        "Regenera los anexos faltantes y vuelve a empaquetar.",
+                        "Revisa el panel «Formatos/Anexos detectados» frente a la entrega.",
+                    ],
+                    correlation_id=correlation_id,
+                ).model_dump()
+                await _safe_save_session(
+                    self.context_manager.memory,
+                    session_id,
+                    {
+                        "last_orchestrator_decision": gate_decision,
+                        "delivery_coverage_gate": delivery_block,
+                    },
+                )
+                return {
+                    "status": "waiting_for_data",
+                    "session_id": session_id,
+                    "message": delivery_block.get("message"),
                     "orchestrator_decision": gate_decision,
                     "correlation_id": correlation_id,
                 }

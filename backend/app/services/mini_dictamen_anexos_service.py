@@ -19,12 +19,21 @@ from app.services.delivery_coverage_report import (
     _extract_compliance_master,
     build_delivery_coverage_report,
 )
+from app.services.document_deliverable_filter import (
+    is_company_credential_present_only,
+)
 from app.services.session_template_catalog import (
     build_session_template_catalog,
     normalize_filename_key,
 )
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.0.0"
+
+# Tipos que NO deben entrar al chat conversacional (solo panel / junta / documentos detectados).
+CHAT_EXCLUDED_PENDING_TYPES = frozenset({"clarification_ticket", "mini_dictamen_blocking"})
 
 
 def _norm(value: Any) -> str:
@@ -82,6 +91,47 @@ def _pick_best_match(
     return best
 
 
+def _inventory_text_blob(
+    inventory_item: Optional[Dict[str, Any]],
+    compliance_item: Optional[Dict[str, Any]],
+) -> str:
+    """Texto unificado para heurísticas (incluye display_name; sin depender solo de description)."""
+    inv = inventory_item or {}
+    display_name = str(inv.get("display_name") or "").strip()
+    generator_hint = str(inv.get("generator_hint") or "").strip()
+    hint_extra = (
+        generator_hint
+        if _norm(generator_hint) and _norm(generator_hint) != _norm(display_name)
+        else ""
+    )
+    return " ".join(
+        [
+            display_name,
+            str(inv.get("description") or ""),
+            hint_extra,
+            str((compliance_item or {}).get("nombre") or ""),
+            str((compliance_item or {}).get("descripcion") or ""),
+        ]
+    ).strip()
+
+
+def _delivery_is_presentar_fisico(blob: str) -> bool:
+    """Documentos que el licitante aporta físicamente; no bloquean generación de formatos."""
+    if not blob.strip():
+        return False
+    if re.search(r"(?i)\bcarta\s+poder\b", blob):
+        return True
+    if re.search(
+        r"(?i)\b("
+        r"presentar\s+original|presentar\s+f[ií]sico|documento\s+original|"
+        r"constancia\s+de\s+visita|visita\s+a\s+instalaciones"
+        r")\b",
+        blob,
+    ):
+        return True
+    return False
+
+
 def _inventory_expects_official_template(
     inventory_item: Optional[Dict[str, Any]],
     compliance_item: Optional[Dict[str, Any]],
@@ -91,14 +141,12 @@ def _inventory_expects_official_template(
         return True
     if compliance_item and str(compliance_item.get("archivo_fuente") or "").strip():
         return True
-    blob = " ".join(
-        [
-            str((inventory_item or {}).get("description") or ""),
-            str((inventory_item or {}).get("generator_hint") or ""),
-            str((compliance_item or {}).get("nombre") or ""),
-            str((compliance_item or {}).get("descripcion") or ""),
-        ]
-    )
+    blob = _inventory_text_blob(inventory_item, compliance_item)
+    if re.search(
+        r"(?i)relaci[oó]n\s+de\s+(?:clientes\s+principales|principales\s+clientes)",
+        blob,
+    ):
+        return False
     return bool(
         re.search(
             r"(?i)\b(anexo|forma|formato|carta|constancia|cedula|c[eé]dula|"
@@ -158,21 +206,11 @@ def _supports_controlled_generation(
     if cat_action == "presentar_fisico" or cat_class in {"evidencia_visita", "credencial_empresa"}:
         return False
 
-    display_name = str((inventory_item or {}).get("display_name") or "")
-    generator_hint = str((inventory_item or {}).get("generator_hint") or "")
-    blob = " ".join(
-        [
-            str((inventory_item or {}).get("description") or ""),
-            (
-                generator_hint
-                if _norm(generator_hint) and _norm(generator_hint) != _norm(display_name)
-                else ""
-            ),
-            str((compliance_item or {}).get("nombre") or ""),
-            str((compliance_item or {}).get("descripcion") or ""),
-        ]
-    )
+    blob = _inventory_text_blob(inventory_item, compliance_item)
     if not blob.strip():
+        return False
+
+    if _delivery_is_presentar_fisico(blob):
         return False
 
     if re.search(
@@ -181,12 +219,26 @@ def _supports_controlled_generation(
     ):
         return False
 
+    if re.search(
+        r"(?i)\b(plantilla\s+obligatoria|formato\s+oficial\s+no\s+publicado|"
+        r"deber[aá]\s+utilizar\s+el\s+formato\s+publicado)\b",
+        blob,
+    ):
+        return False
+
     return bool(
         re.search(
             r"(?i)\b("
             r"hoja\s+membretada|rubricad[oa]|firmad[oa]|curr[ií]culum|curriculum|"
-            r"relaci[oó]n\s+de\s+principales\s+clientes|anexo\s+t[eé]cnico|"
-            r"propuesta|carta|declaraci[oó]n|manifiesto|formato|cedula|c[eé]dula"
+            r"relaci[oó]n\s+de\s+(?:principales\s+)?clientes|"
+            r"relaci[oó]n\s+de\s+clientes\s+principales|"
+            r"anexo\s+t[eé]cnico|"
+            r"carta\s+(?:de\s+|compromiso|garant|asegur|declar|bajo)|"
+            r"carta\s+.{0,24}(?:garant|asegur|protesta|compromiso|integridad)|"
+            r"declaraci[oó]n|manifiesto|formato|cedula|c[eé]dula|"
+            r"garant[ií]a\s+de\s+|fianza\s+de\s+|constancia\s+de\s+|"
+            r"an[aá]lisis\s+de\s+precios|"
+            r"modelo.{0,30}propuesta|propuesta.{0,30}(?:t[eé]cnica|membretada)"
             r")\b",
             blob,
         )
@@ -194,10 +246,9 @@ def _supports_controlled_generation(
 
 
 def _clarification_question(display_name: str, reason: str) -> str:
-    return (
-        f"Necesito aclarar con la convocante el documento **{display_name}**. "
-        f"Motivo detectado: {reason}. ¿Deseas prepararlo como punto para la junta de aclaraciones?"
-    )
+    from app.services.clarification_ticket_copy import build_ticket_summary_for_hitl
+
+    return build_ticket_summary_for_hitl(display_name, reason)
 
 
 def _ticket_priority(severity: MiniDictamenSeverity) -> MiniDictamenSeverity:
@@ -279,32 +330,20 @@ def _merge_existing_tickets(
     return tickets
 
 
-def _pending_questions_from_tickets(tickets: List[ClarificationTicket]) -> List[Dict[str, Any]]:
+def strip_chat_excluded_pending_questions(
+    pending: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Quita ítems que solo deben mostrarse en UI de inventario (Documentos detectados,
+    mini dictamen, Junta de aclaraciones), nunca como pregunta del chatbot.
+    """
     out: List[Dict[str, Any]] = []
-    for ticket in tickets:
-        if ticket.status not in (
-            ClarificationTicketStatus.OPEN,
-            ClarificationTicketStatus.READY_FOR_JUNTA,
-        ):
+    for q in pending or []:
+        if not isinstance(q, dict):
             continue
-        out.append(
-            {
-                "field": f"clarification_tickets.{ticket.ticket_id}",
-                "label": f"Aclarar anexo: {ticket.display_name}",
-                "question": ticket.question,
-                "document_hint": ticket.reason,
-                "type": "clarification_ticket",
-                "ticket_id": ticket.ticket_id,
-                "canonical_id": ticket.canonical_id,
-                "blocking_items": [
-                    {
-                        "nombre": ticket.display_name,
-                        "source_filename": ticket.source_filename,
-                        "error_type": ticket.reason,
-                    }
-                ],
-            }
-        )
+        if str(q.get("type") or "") in CHAT_EXCLUDED_PENDING_TYPES:
+            continue
+        out.append(q)
     return out
 
 
@@ -344,6 +383,10 @@ def build_mini_dictamen_anexos(
     compliance_items = []
     for idx, (bucket, item) in enumerate(_iter_compliance_items(compliance), start=1):
         compliance_items.append({**item, "_bucket": bucket, "_idx": idx})
+
+    from app.services.junta_bases_corpus import build_bases_corpus, template_embedded_in_bases
+
+    bases_corpus = build_bases_corpus(session_id, documents, session_state=session_state)
 
     rows: List[MiniDictamenAnexoItem] = []
     used_catalog: set[str] = set()
@@ -422,7 +465,10 @@ def build_mini_dictamen_anexos(
         else:
             source_status = MiniDictamenSourceStatus.NOT_EXPECTED
 
-        if str((comp or {}).get("tipo_accion") or "").lower() == "presentar_fisico":
+        inv_blob = _inventory_text_blob(inv, comp)
+        if _delivery_is_presentar_fisico(inv_blob):
+            delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
+        elif str((comp or {}).get("tipo_accion") or "").lower() == "presentar_fisico":
             delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
         elif cat_item and str(cat_item.get("accion_recomendada") or "") == "presentar_fisico":
             delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
@@ -448,16 +494,45 @@ def build_mini_dictamen_anexos(
         else:
             coverage_status = MiniDictamenCoverageStatus.PENDING
 
+        embedded_meta = (
+            template_embedded_in_bases(bases_corpus, display_name)
+            if bases_corpus.segments
+            else None
+        )
+        if embedded_meta and official_template_expected:
+            source_status = MiniDictamenSourceStatus.VALID
+            official_template_present = True
+            if delivery_action == MiniDictamenDeliveryAction.CLARIFICATION_REQUIRED:
+                delivery_action = MiniDictamenDeliveryAction.GENERATE_CONTROLLED
+            if coverage_status == MiniDictamenCoverageStatus.BLOCKED:
+                coverage_status = MiniDictamenCoverageStatus.PENDING
+
         blocking_error = _clarification_error_type(
             source_status=source_status,
             official_template_expected=official_template_expected,
             has_catalog_item=bool(cat_item),
         )
+        if embedded_meta and official_template_expected:
+            blocking_error = None
+        inv_blob_cred = _inventory_text_blob(inv, comp)
+        if blocking_error == "required_annex_not_published" and is_company_credential_present_only(
+            display_name,
+            str(inv.get("description") or ""),
+            inv_blob_cred,
+        ):
+            delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
+            coverage_status = MiniDictamenCoverageStatus.PENDING
+            blocking_error = None
         clarification_candidate = bool(
             delivery_action == MiniDictamenDeliveryAction.CLARIFICATION_REQUIRED and blocking_error
         )
 
         notes: List[str] = []
+        if embedded_meta:
+            notes.append(
+                f"Formato {embedded_meta.get('template_code')} integrado en PDF de bases "
+                f"({embedded_meta.get('archivo_fuente') or 'documento fuente'})."
+            )
         if inv.get("description"):
             notes.append(str(inv.get("description")))
         if comp and comp.get("archivo_fuente"):
@@ -573,10 +648,10 @@ def build_mini_dictamen_anexos(
             continue
         cov_row = _coverage_for_name(nombre)
         action = str(comp.get("tipo_accion") or "").lower()
-        expected_template = bool(
-            action == "generar"
-            and re.search(r"(?i)\b(anexo|formato|carta|cedula|c[eé]dula|manifiesto)\b", nombre)
-        )
+        comp_inv = {"display_name": nombre, "description": comp.get("descripcion")}
+        comp_blob = _inventory_text_blob(comp_inv, comp)
+        expected_template = _inventory_expects_official_template(comp_inv, comp, None)
+        can_generate_controlled = _supports_controlled_generation(comp_inv, comp, None)
         if _is_cross_tender_pending_issue(session_state, str(comp.get("archivo_fuente") or nombre)):
             source_status = MiniDictamenSourceStatus.CROSS_TENDER
         elif str(comp.get("archivo_fuente") or "").strip():
@@ -585,15 +660,24 @@ def build_mini_dictamen_anexos(
             source_status = MiniDictamenSourceStatus.MISSING
         else:
             source_status = MiniDictamenSourceStatus.NOT_EXPECTED
-        delivery_action = (
-            MiniDictamenDeliveryAction.PRESENTAR_FISICO
-            if action == "presentar_fisico"
-            else MiniDictamenDeliveryAction.CLARIFICATION_REQUIRED
-            if expected_template and source_status != MiniDictamenSourceStatus.VALID
-            else MiniDictamenDeliveryAction.GENERATE_CONTROLLED
-            if action in {"generar", "requiere_datos_licitante"}
-            else MiniDictamenDeliveryAction.NOT_APPLICABLE
-        )
+        if _delivery_is_presentar_fisico(comp_blob):
+            delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
+        elif action == "presentar_fisico":
+            delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
+        elif source_status == MiniDictamenSourceStatus.VALID:
+            delivery_action = MiniDictamenDeliveryAction.GENERATE_CONTROLLED
+        elif can_generate_controlled and source_status != MiniDictamenSourceStatus.CROSS_TENDER:
+            delivery_action = MiniDictamenDeliveryAction.GENERATE_CONTROLLED
+        elif expected_template and source_status in (
+            MiniDictamenSourceStatus.MISSING,
+            MiniDictamenSourceStatus.REFERENCE_ONLY,
+            MiniDictamenSourceStatus.CROSS_TENDER,
+        ):
+            delivery_action = MiniDictamenDeliveryAction.CLARIFICATION_REQUIRED
+        elif action in {"generar", "requiere_datos_licitante"}:
+            delivery_action = MiniDictamenDeliveryAction.GENERATE_CONTROLLED
+        else:
+            delivery_action = MiniDictamenDeliveryAction.NOT_APPLICABLE
         coverage_status = (
             MiniDictamenCoverageStatus.COVERED
             if cov_row and str(cov_row.get("estado_cobertura") or "") == "generado"
@@ -603,11 +687,35 @@ def build_mini_dictamen_anexos(
             if delivery_action != MiniDictamenDeliveryAction.NOT_APPLICABLE
             else MiniDictamenCoverageStatus.NOT_APPLICABLE
         )
+        embedded_comp = (
+            template_embedded_in_bases(bases_corpus, nombre)
+            if bases_corpus.segments and expected_template
+            else None
+        )
+        if embedded_comp and source_status == MiniDictamenSourceStatus.MISSING:
+            source_status = MiniDictamenSourceStatus.VALID
+            delivery_action = MiniDictamenDeliveryAction.GENERATE_CONTROLLED
+            coverage_status = (
+                MiniDictamenCoverageStatus.COVERED
+                if cov_row and str(cov_row.get("estado_cobertura") or "") == "generado"
+                else MiniDictamenCoverageStatus.PENDING
+            )
+
         error_type = _clarification_error_type(
             source_status=source_status,
             official_template_expected=expected_template,
             has_catalog_item=False,
         )
+        if embedded_comp:
+            error_type = None
+        if error_type == "required_annex_not_published" and is_company_credential_present_only(
+            nombre,
+            str(comp.get("descripcion") or ""),
+            comp_blob,
+        ):
+            delivery_action = MiniDictamenDeliveryAction.PRESENTAR_FISICO
+            coverage_status = MiniDictamenCoverageStatus.PENDING
+            error_type = None
         rows.append(
             MiniDictamenAnexoItem(
                 canonical_id=f"compliance_{comp.get('_bucket')}_{comp_idx}",
@@ -615,7 +723,7 @@ def build_mini_dictamen_anexos(
                 category=str(comp.get("_bucket") or "administrativo"),
                 required_by_bases=True,
                 official_template_expected=expected_template,
-                official_template_present=bool(comp.get("archivo_fuente")),
+                official_template_present=bool(comp.get("archivo_fuente") or embedded_comp),
                 source_status=source_status,
                 delivery_action=delivery_action,
                 coverage_status=coverage_status,
@@ -662,13 +770,16 @@ def merge_clarification_pending_questions(
     session_state: Dict[str, Any],
     tickets: List[ClarificationTicket],
 ) -> List[Dict[str, Any]]:
-    preserved = [
-        q
-        for q in list(session_state.get("pending_questions") or [])
-        if isinstance(q, dict)
-        and str(q.get("type") or "") not in {"clarification_ticket", "mini_dictamen_blocking"}
-    ]
-    return preserved + _pending_questions_from_tickets(tickets)
+    """
+    Mantiene ``pending_questions`` sin tickets de aclaración.
+
+    Los ``ClarificationTicket`` viven en ``clarification_tickets`` y en
+    ``mini_dictamen_anexos`` para el panel; la Junta los consume aparte.
+    """
+    _ = tickets
+    return strip_chat_excluded_pending_questions(
+        list(session_state.get("pending_questions") or [])
+    )
 
 
 def get_blocking_annex_rows_for_stage(
@@ -692,9 +803,15 @@ def get_blocking_annex_rows_for_stage(
 
     out: List[Dict[str, Any]] = []
     for item in items:
+        if str(item.get("coverage_status") or "") != MiniDictamenCoverageStatus.BLOCKED.value:
+            continue
         if str(item.get("severity") or "") != MiniDictamenSeverity.BLOCKING.value:
             continue
-        if str(item.get("coverage_status") or "") != MiniDictamenCoverageStatus.BLOCKED.value:
+        err = str(item.get("blocking_error_type") or "")
+        if err in ("required_annex_not_published", ""):
+            continue
+        name = str(item.get("display_name") or "")
+        if is_company_credential_present_only(name, "", name):
             continue
         if allowed is not None and str(item.get("category") or "") not in allowed:
             continue
@@ -762,15 +879,30 @@ async def build_and_persist_mini_dictamen(memory: Any, session_id: str) -> MiniD
     session_state["pending_questions"] = merge_clarification_pending_questions(
         session_state, mini.clarification_tickets
     )
+    if not session_state["pending_questions"]:
+        session_state["intake_progress"] = {
+            "started": False,
+            "accepted": False,
+            "remaining": 0,
+            "total": 0,
+        }
+        session_state["current_question_index"] = 0
     await memory.save_session(session_id, dict(session_state))
     try:
         from app.services.junta_aclaraciones_questions_service import (
-            build_and_persist_junta_aclaraciones_questions,
+            build_junta_aclaraciones_questions,
         )
 
-        await build_and_persist_junta_aclaraciones_questions(
-            memory, session_id, session_state=session_state
+        docs: List[Any] = []
+        try:
+            docs = await memory.get_documents(session_id) or []
+        except Exception:
+            pass
+        bundle = build_junta_aclaraciones_questions(
+            session_id, session_state, documents=docs
         )
+        session_state["junta_aclaraciones_questions"] = bundle.model_dump(mode="json")
+        await memory.save_session(session_id, dict(session_state))
     except Exception as exc:
         logger.warning(
             "junta_questions_after_mini_dictamen_skipped",

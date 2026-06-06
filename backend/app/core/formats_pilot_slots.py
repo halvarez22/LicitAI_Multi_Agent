@@ -48,6 +48,7 @@ _PLACEHOLDER_STRINGS = frozenset(
         "...",
         "[dato]",
         "n/d",
+        "no encontrado",
     }
 )
 
@@ -63,6 +64,11 @@ def _is_empty_profile_value(value: Any) -> bool:
         if low in _PLACEHOLDER_STRINGS:
             return True
     return False
+
+
+def is_usable_profile_field_value(value: Any) -> bool:
+    """True si el valor puede usarse para llenar documentos (no placeholder/vacío)."""
+    return not _is_empty_profile_value(value)
 
 
 def list_missing_formats_pilot_slots(master_profile: Optional[Dict[str, Any]]) -> List[str]:

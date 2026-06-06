@@ -15,6 +15,8 @@ export default function SubmissionChecklistPanel({
     syncKey,
     flatList = false,
     initialData = null,
+    active = true,
+    onChecklistUpdated,
 }) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -26,10 +28,13 @@ export default function SubmissionChecklistPanel({
         setError(null);
         try {
             const res = await axios.get(
-                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/submission-checklist`
+                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/submission-checklist`,
+                { timeout: 30000 },
             );
             if (res.data?.success && res.data?.data?.submission_checklist) {
-                setData(res.data.data.submission_checklist);
+                const cl = res.data.data.submission_checklist;
+                setData(cl);
+                onChecklistUpdated?.(cl);
             } else {
                 setData(null);
                 setError(res.data?.message || 'Sin calendario (analiza las bases primero).');
@@ -40,7 +45,7 @@ export default function SubmissionChecklistPanel({
         } finally {
             setLoading(false);
         }
-    }, [sessionId]);
+    }, [sessionId, onChecklistUpdated]);
 
     useEffect(() => {
         if (initialData?.hitos?.length) {
@@ -49,8 +54,10 @@ export default function SubmissionChecklistPanel({
     }, [initialData, syncKey]);
 
     useEffect(() => {
+        if (active === false || !sessionId) return;
+        if (initialData?.hitos?.length) return;
         fetchChecklist();
-    }, [fetchChecklist, syncKey]);
+    }, [fetchChecklist, active, sessionId, initialData]);
 
     const [evidenciaDraft, setEvidenciaDraft] = useState({});
 
@@ -67,7 +74,9 @@ export default function SubmissionChecklistPanel({
                 { estado, evidencia }
             );
             if (res.data?.success && res.data?.data?.submission_checklist) {
-                setData(res.data.data.submission_checklist);
+                const cl = res.data.data.submission_checklist;
+                setData(cl);
+                onChecklistUpdated?.(cl);
                 if (estado === 'completado') {
                     setEvidenciaDraft((prev) => {
                         const next = { ...prev };

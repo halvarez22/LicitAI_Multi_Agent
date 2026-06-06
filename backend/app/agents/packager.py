@@ -70,6 +70,7 @@ class PackResult:
     staged_root: Optional[str] = None
     files: List[Dict[str, Any]] = field(default_factory=list)
     total_bytes: int = 0
+    contamination_report: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,6 +83,7 @@ class PackResult:
             "staged_root": self.staged_root,
             "files": list(self.files),
             "total_bytes": self.total_bytes,
+            "contamination_report": self.contamination_report,
         }
 
 
@@ -345,6 +347,44 @@ class CompraNetPackager:
         manifest_path = staged / "MANIFIESTO_SHA256.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        contamination_report: Optional[Dict[str, Any]] = None
+        from app.services.delivery_content_audit import (
+            format_forensic_contamination_errors,
+            run_forensic_contamination_audit,
+        )
+        from app.services.document_contamination_gate import contamination_enforce_at_pack
+
+        session_state = session_data.get("session_state")
+        if not isinstance(session_state, dict):
+            session_state = {}
+        if contamination_enforce_at_pack():
+            contamination_report = run_forensic_contamination_audit(
+                lic_s,
+                session_state=session_state,
+                validated_root=staged,
+                indice_files=files_meta,
+            )
+            report_path = staged / "FORENSIC_CONTAMINATION_REPORT.json"
+            report_path.write_text(
+                json.dumps(contamination_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if not contamination_report.get("gate_passed", True):
+                gate_errors = format_forensic_contamination_errors(contamination_report)
+                return PackResult(
+                    success=False,
+                    errors=[
+                        "Gate forense P0: contaminación documental en entrega.",
+                        *gate_errors,
+                    ],
+                    validation_passed=False,
+                    manifest_path=str(manifest_path.resolve()),
+                    staged_root=str(staged.resolve()),
+                    files=files_meta,
+                    total_bytes=total,
+                    contamination_report=contamination_report,
+                )
+
         zip_path: Optional[Path] = None
         if total > self._max_bytes:
             zip_name = f"{lic_s}_CompraNet_bundle.zip"
@@ -364,12 +404,15 @@ class CompraNetPackager:
             staged_root=str(staged.resolve()),
             files=files_meta,
             total_bytes=total,
+            contamination_report=contamination_report,
         )
 
 def build_pack_session_data_from_outputs(
     session_id: str,
     packager_agent_data: Dict[str, Any],
     company_data: Dict[str, Any],
+    *,
+    session_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Construye ``session_data`` para ``CompraNetPackager`` a partir del ``AgentOutput.data``
@@ -391,4 +434,5 @@ def build_pack_session_data_from_outputs(
         "rfc": rfc,
         "licitacion_id": lic,
         "estructura_sobres": packager_agent_data.get("estructura_sobres") or {},
+        "session_state": session_state if isinstance(session_state, dict) else {},
     }

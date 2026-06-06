@@ -23,6 +23,12 @@ class MemoryAdapterFactory:
 
     @classmethod
     def create_adapter(cls) -> Optional[MemoryRepository]:
+        from app.memory.runtime import get_memory_override
+
+        override = get_memory_override()
+        if override is not None:
+            return override
+
         if cls._instance is None:
             backend = (settings.MEMORY_BACKEND or os.getenv("MEMORY_BACKEND", "postgres")).lower()
             if backend == "postgres":

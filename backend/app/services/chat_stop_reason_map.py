@@ -23,6 +23,14 @@ STOP_REASON_HUMAN: Dict[str, str] = {
         "Faltan precios o plantillas económicas por materializar antes de cerrar el expediente. "
         "Completa la matriz de precios y vuelve a generar."
     ),
+    "DELIVERY_COVERAGE_GAP": (
+        "El paquete validado no incluye todos los anexos exigidos por las bases. "
+        "Regenera los formatos faltantes antes de descargar el expediente."
+    ),
+    "INCOMPLETE_FORMATS_DATA": (
+        "Faltan formatos administrativos por generar o contienen datos incompletos. "
+        "Revisa los anexos omitidos y vuelve a ejecutar la generación."
+    ),
 }
 
 

@@ -20,13 +20,25 @@ from app.contracts.document_inventory import (
 )
 from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
 from app.core.observability import get_logger
-from app.utils.doc_formatting import ANTI_PLACEHOLDER_PROMPT_RULE, strip_markdown_for_docx
+from app.utils.doc_formatting import (
+    ANTI_PLACEHOLDER_PROMPT_RULE,
+    repair_docx_file_placeholders,
+    strip_bracket_placeholders_for_docx,
+    strip_markdown_for_docx,
+)
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
+from app.services.company_experience_context import (
+    build_company_experience_context_block,
+    build_experience_sources_ux_summary,
+    extract_client_references_from_documents,
+    fill_te03_client_placeholders,
+    req_needs_company_experience,
+)
 from app.services.document_fill_quality_gate import (
     detect_cross_tender_marker,
     validate_generated_documents_fill,
 )
-from app.services.validation_service import validation_mapping_service
+from app.services.document_fill_ux_messages import build_fill_validation_event
 from app.services.document_traceability import (
     attach_traceability,
     build_materialization_metrics,
@@ -61,13 +73,14 @@ def _build_carta_presentacion_text(
     domicilio: str,
     tender_name: str,
     fecha_es: str,
+    destinatario: str = "",
 ) -> str:
     domicilio_line = _clean_profile_text(domicilio) or "No disponible"
+    dest_block = (destinatario or "A QUIEN CORRESPONDA:").strip()
     return (
         "LUGAR Y FECHA\n"
         f"{fecha_es}\n\n"
-        "COMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\n"
-        "PRESENTE.-\n\n"
+        f"{dest_block}\n\n"
         f"Por medio de la presente, {razon_social}, con RFC {rfc}, "
         f"por conducto de su representante legal {representante}, con domicilio en {domicilio_line}, "
         f"presenta su propuesta técnica para {tender_name}.\n\n"
@@ -112,15 +125,16 @@ def _build_te12_text(
     tender_name: str,
     fecha_es: str,
     req_context: str,
+    destinatario: str = "",
 ) -> str:
     domicilio_line = _clean_profile_text(domicilio) or "No disponible"
     threshold_line = _extract_te12_threshold(req_context)
+    dest_block = (destinatario or "A QUIEN CORRESPONDA:").strip()
     return (
         "PUNTUACIÓN O UNIDADES PORCENTUALES A OBTENER EN LA PROPUESTA TÉCNICA\n\n"
         "LUGAR Y FECHA\n"
         f"{fecha_es}\n\n"
-        "COMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\n"
-        "PRESENTE.-\n\n"
+        f"{dest_block}\n\n"
         f"Quien suscribe, {representante}, en representación de {razon_social}, RFC {rfc}, "
         f"con domicilio en {domicilio_line}, comparece para manifestar que conoce y acepta "
         f"el criterio de evaluación técnica aplicable a {tender_name}.\n\n"
@@ -190,6 +204,7 @@ def _build_contenido_nacional_text(
     fecha_es: str,
     zonas: List[str],
     porcentaje: str,
+    destinatario: str = "",
 ) -> str:
     zonas_txt = ", ".join(zonas) if zonas else "correspondientes a la propuesta presentada"
     if len(zonas) == 1:
@@ -200,12 +215,11 @@ def _build_contenido_nacional_text(
         zona_clause = "la zona en que participo"
     porcentaje_txt = porcentaje or "65"
     proc_ref = tender_name.strip() or session_id.replace("_", " ").upper()
+    dest_block = (destinatario or "A QUIEN CORRESPONDA:").strip()
     return (
         "MANIFESTACIÓN DE NACIONALIDAD MEXICANA, PRODUCCIÓN EN MÉXICO Y GRADO DE CONTENIDO NACIONAL\n\n"
         f"{fecha_es}\n\n"
-        "Comité de Adquisiciones, Arrendamientos y Contratación\n"
-        "de Servicios de la Administración Pública Estatal\n"
-        "PRESENTE.-\n\n"
+        f"{dest_block}\n\n"
         f"Me refiero al procedimiento de contratación identificado como {proc_ref}, "
         f"en el que mi representada, la empresa {razon_social}, RFC {rfc}, participa a través de la propuesta contenida en el presente sobre.\n\n"
         "Sobre el particular y en términos de lo previsto por el Acuerdo por el que se establecen las reglas para la determinación "
@@ -522,28 +536,56 @@ class TechnicalWriterAgent(BaseAgent):
             if m:
                 tender_name = f"LICITACIÓN {m.group(0)}"
 
-        # Fecha en español
-        _MESES = {
-            "January": "enero", "February": "febrero", "March": "marzo",
-            "April": "abril", "May": "mayo", "June": "junio",
-            "July": "julio", "August": "agosto", "September": "septiembre",
-            "October": "octubre", "November": "noviembre", "December": "diciembre"
-        }
-        _fecha_raw = datetime.now().strftime("%d de %B de %Y")
-        for en, es in _MESES.items():
-            _fecha_raw = _fecha_raw.replace(en, es)
-        fecha_es = _fecha_raw
+        from app.services.administrative_letter_clauses import resolve_document_ciudad
+        from app.services.document_date_resolver import (
+            normalize_body_spanish_dates,
+            resolve_addressee_lines,
+            resolve_document_date,
+        )
+        from app.services.technical_proposal_deterministic import (
+            build_propuesta_tecnica_body,
+            is_primary_technical_proposal,
+        )
+
+        session_state_early = dict(context.get("session_state", {}) or {})
+        if not str(session_state_early.get("bases_corpus_hint") or "").strip():
+            try:
+                cal_res = vector_db.query_texts(
+                    session_id,
+                    "calendario presentación proposiciones recepción propuestas junta aclaraciones",
+                    n_results=12,
+                )
+                cal_docs = cal_res.get("documents") or []
+                session_state_early["bases_corpus_hint"] = "\n".join(
+                    d for d in cal_docs if d
+                )[:120000]
+            except Exception:
+                pass
+        triage_ctx = (
+            agent_input.triage_context
+            if hasattr(agent_input, "triage_context")
+            else None
+        )
+        _date_info = resolve_document_date(session_state_early)
+        fecha_es = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
+        destinatario = resolve_addressee_lines(session_state_early, triage_ctx)
 
         # Metadata para Word
+        _dom_fiscal = master_profile.get("domicilio_fiscal") or master_profile.get("domicilio") or ""
         doc_metadata = {
             "logo_path": logo_path,
             "tender_name": tender_name,
             "fecha": fecha_es,
+            "fecha_corta": _date_info.get("fecha_corta") or "",
             "empresa": razon_social,
             "rfc": rfc,
             "representante": representante,
             "tipo_persona": tipo_persona,
-            "footer_text": f"{razon_social} | RFC: {rfc} | Domicilio: {master_profile.get('domicilio_fiscal', 'S/D')}"
+            "domicilio": _dom_fiscal,
+            "ciudad": resolve_document_ciudad(master_profile, str(_dom_fiscal)),
+            "footer_text": f"{razon_social} | RFC: {rfc} | Domicilio: {_dom_fiscal or 'S/D'}",
+            "destinatario": destinatario,
+            "formal_closing": True,
         }
 
         # 1. Crear estructura de carpetas
@@ -856,6 +898,7 @@ class TechnicalWriterAgent(BaseAgent):
                         fecha_es=fecha_es,
                         zonas=participation_zones,
                         porcentaje=contenido_nacional_pct,
+                        destinatario=destinatario,
                     )
                     _save_docx(raw_name, contenido_text, filepath, doc_metadata)
                     meta = {
@@ -865,6 +908,8 @@ class TechnicalWriterAgent(BaseAgent):
                     }
                 else:
                     meta = mirror_template_to_output(ref, filepath, profile_fill, fill_profile=True)
+                if str(meta.get("ruta") or filepath).lower().endswith(".docx"):
+                    repair_docx_file_placeholders(str(meta.get("ruta") or filepath))
                 pre_mirror_files.append(
                     attach_traceability(
                         {
@@ -958,6 +1003,7 @@ class TechnicalWriterAgent(BaseAgent):
             domicilio=master_profile.get("domicilio_fiscal", "S/D"),
             tender_name=tender_name,
             fecha_es=fecha_es,
+            destinatario=destinatario,
         )
         
         carta_path = os.path.join(tech_dir, "01_CARTA_PRESENTACION_PROPUESTA_TECNICA.docx")
@@ -978,6 +1024,13 @@ class TechnicalWriterAgent(BaseAgent):
                 materialization_route="deterministic",
                 output_hash=safe_file_sha256(carta_path),
             )
+        )
+
+        session_state = context.get("session_state") or {}
+        session_hint = f"{session_id} {session_state.get('name', '')}"
+        company_experience_block = await build_company_experience_context_block(
+            self.context_manager.memory,
+            session_id,
         )
 
         # 4. Generar documentos del Auditor
@@ -1021,18 +1074,18 @@ RFC: {rfc}
 REPRESENTANTE LEGAL: {representante}
 DOMICILIO: {master_profile.get('domicilio_fiscal', 'S/D')}
 LICITACIÓN: {tender_name}
-FECHA: {fecha_es}
+FECHA CANÓNICA DEL EXPEDIENTE (usar únicamente esta en el documento): {fecha_es}
 
 CONTEXTO DE LAS BASES (fragmento literal donde se describe este requisito — úsalo como fuente de verdad para la estructura y contenido del documento):
 {req_context[:1500] if req_context else "Ver bases de licitación"}
 
 INSTRUCCIONES CRÍTICAS:
 - El CONTEXTO DE LAS BASES define QUÉ debe contener este documento. Léelo primero.
-- Si el contexto describe una RELACIÓN o TABLA (columnas: contratante, descripción, importe, fecha), genera esa tabla con filas de ejemplo marcadas como "[COMPLETAR]".
+- Si el contexto pide currículum empresarial o relación de clientes: NO inventes filas con corchetes ([Domicilio], [Teléfono], etc.). Escribe un párrafo indicando que se anexan contratos y referencias en el expediente de la empresa, o lista solo clientes reales si constan en el contexto.
 - Si el contexto describe una DECLARACIÓN o MANIFESTACIÓN bajo protesta, genera esa declaración.
 - Si el contexto describe un PROGRAMA o CALENDARIO, genera esa estructura.
 - NO generes texto sobre "solicitudes de aclaración", "junta de aclaraciones" ni "responsabilidad del licitante" a menos que el contexto lo indique explícitamente para ESTE documento.
-- NO uses placeholders como [Nombre], [Fecha], [Descripción] — usa los datos reales de la empresa.
+- NO uses placeholders como [Nombre], [Fecha], [Descripción], [COMPLETAR] — usa los datos reales de la empresa o omite la fila.
 - El documento debe ser directamente presentable en la licitación.
 - Bajo protesta de decir verdad cuando aplique.
 - Firma: {representante}, {razon_social}{hint_block}"""
@@ -1048,6 +1101,9 @@ INSTRUCCIONES CRÍTICAS:
             if _needs_economic and economic_block:
                 doc_prompt += f"\n\nDATOS ECONÓMICOS CONFIRMADOS (usar en este documento):\n{economic_block}"
 
+            if req_needs_company_experience(req_id, req_nombre, req_desc) and company_experience_block:
+                doc_prompt += f"\n\n{company_experience_block}"
+
             req_id_upper = str(req_id).upper()
             req_nombre_upper = str(req_nombre).upper()
             if "TE-12" in req_id_upper or "TE-12" in req_nombre_upper:
@@ -1059,10 +1115,31 @@ INSTRUCCIONES CRÍTICAS:
                     tender_name=tender_name,
                     fecha_es=fecha_es,
                     req_context=req_context,
+                    destinatario=destinatario,
+                )
+            elif is_primary_technical_proposal(req_id, req_nombre, req_desc):
+                exp_block = ""
+                if req_needs_company_experience(req_id, req_nombre, req_desc) and company_experience_block:
+                    exp_block = company_experience_block
+                doc_text = build_propuesta_tecnica_body(
+                    razon_social=razon_social,
+                    rfc=rfc,
+                    representante=representante,
+                    domicilio=str(_dom_fiscal),
+                    tender_name=tender_name,
+                    req_nombre=req_nombre,
+                    req_desc=req_desc,
+                    req_context=req_context,
+                    experience_block=exp_block,
                 )
             else:
                 resp = await llm.generate(prompt=doc_prompt, system_prompt=system_prompt, correlation_id=correlation_id)
                 doc_text = resp.response if resp.success else f"Contenido para {req_nombre}"
+
+            doc_text = normalize_body_spanish_dates(doc_text or "", fecha_es)
+            from app.services.document_contamination_gate import strip_llm_meta_leaks
+
+            doc_text = strip_llm_meta_leaks(doc_text)
 
             # Transliterar acentos y caracteres especiales antes de sanitizar.
             # unicodedata.normalize('NFD') descompone 'á' → 'a' + combining accent,
@@ -1072,6 +1149,9 @@ INSTRUCCIONES CRÍTICAS:
             safe_nombre = re.sub(r'[^a-zA-Z0-9\s]', '', _nombre_ascii)[:50].strip().replace(" ", "_")
             file_path = os.path.join(tech_dir, f"{i:02d}_{req_id.replace('.','_')}_{safe_nombre}.docx")
 
+            route = "deterministic_propuesta_tecnica" if is_primary_technical_proposal(
+                req_id, req_nombre, req_desc
+            ) else ("deterministic_te12" if "TE-12" in req_id_upper or "TE-12" in req_nombre_upper else "llm")
             _save_docx(req_nombre, doc_text, file_path, doc_metadata)
             _te_display = f"{req_id}: {req_nombre}.docx" if req_id else f"{req_nombre}.docx"
             generated_files.append(
@@ -1089,12 +1169,35 @@ INSTRUCCIONES CRÍTICAS:
                     source_path=str(req.get("source_path") or "") or None,
                     source_hash=safe_file_sha256(str(req.get("source_path") or "")),
                     template_id="",
-                    materialization_route="generate_controlled",
+                    materialization_route=route,
                     output_hash=safe_file_sha256(file_path),
                     provenance_ui=req.get("provenance_ui") if isinstance(req.get("provenance_ui"), dict) else None,
                 )
             )
             descriptions_map[os.path.basename(file_path)] = req_desc
+
+        for gf in generated_files:
+            gpath = str(gf.get("ruta") or "")
+            if gpath.lower().endswith(".docx") and os.path.exists(gpath):
+                repair_docx_file_placeholders(gpath)
+
+        session_docs = await self.context_manager.memory.get_documents(session_id) or []
+        client_refs = extract_client_references_from_documents(session_docs)
+        try:
+            from app.services.document_catalog_service import experience_client_refs_from_catalog
+
+            catalog_refs = experience_client_refs_from_catalog(session_state)
+            if catalog_refs:
+                client_refs = catalog_refs
+        except Exception:
+            pass
+        experience_summary = build_experience_sources_ux_summary(session_docs, session_state)
+        if client_refs:
+            for gf in generated_files:
+                gpath = str(gf.get("ruta") or "")
+                if gpath.lower().endswith(".docx") and os.path.exists(gpath):
+                    if fill_te03_client_placeholders(gpath, client_refs):
+                        repair_docx_file_placeholders(gpath)
 
         result_data = {
             "titulo": "Propuesta Técnica Completa",
@@ -1108,6 +1211,8 @@ INSTRUCCIONES CRÍTICAS:
                 elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             ),
         }
+        if experience_summary:
+            result_data["experience_sources_ux"] = experience_summary
 
         fill_gate = validate_generated_documents_fill(
             stage="technical",
@@ -1117,27 +1222,25 @@ INSTRUCCIONES CRÍTICAS:
         )
         result_data["document_fill_quality_gate"] = fill_gate
         result_data["validation_events"] = [
-            validation_mapping_service.build_event(
-                error_type=it.get("error_type"),
-                context={
-                    "document_id": it.get("document_id"),
-                    "field_key": it.get("field_key"),
-                    "detected_value": it.get("detected_value"),
-                    "expected_rule": it.get("expected_rule"),
-                },
-                raw_message=f"Validación en {it.get('document_id')}: {it.get('field_key')}"
-            )
+            build_fill_validation_event(it, stage="technical")
             for it in (fill_gate.get("issues") or [])
+            if isinstance(it, dict)
         ]
         if not bool(fill_gate.get("validation_passed", True)):
+            from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+            company_name = str(master_profile.get("razon_social") or "").strip()
+            human_question = build_fill_blocking_question(
+                "technical",
+                fill_gate.get("issues") or [],
+                company_name=company_name,
+                experience_summary=experience_summary,
+            )
             missing = [
                 {
                     "field": "document_fill_quality_gate",
-                    "label": "Corregir llenado documental",
-                    "question": (
-                        "Se detectaron inconsistencias o placeholders en documentos técnicos generados. "
-                        "Corrige perfil/fuentes y vuelve a generar."
-                    ),
+                    "label": "Completar datos de la empresa",
+                    "question": human_question,
                     "document_hint": f"Gate llenado: {fill_gate.get('metrics')}",
                     "type": "document_fill_quality_gate_blocking",
                     "blocking_items": fill_gate.get("issues") or [],
@@ -1148,8 +1251,8 @@ INSTRUCCIONES CRÍTICAS:
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message="Pausa por calidad de llenado documental técnico.",
-                data={**result_data, "missing": missing},
+                message=human_question,
+                data={**result_data, "missing": missing, "stage": "technical"},
                 correlation_id=correlation_id,
             )
 
@@ -1236,20 +1339,23 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     # Cuerpo del Documento
     doc.add_heading(title.upper(), 0)
 
-    # Estilo Artesanal: Lugar y Fecha
-    # Nota: footer_text contiene domicilio, aquí extraemos sólo la ciudad del footer o usamos "México".
-    footer_text = metadata.get("footer_text", "") if metadata else ""
-    lugar = footer_text.split("Domicilio:")[-1].split(",")[0].strip() if "Domicilio:" in footer_text else "México"
-    p_fecha = doc.add_paragraph(f"LUGAR Y FECHA: {lugar} a {metadata.get('fecha', '')}")
-    p_fecha.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    
-    # Destinatario
-    doc.add_paragraph("\nCOMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\nPRESENTE.-").bold = True
+    body = strip_bracket_placeholders_for_docx(strip_markdown_for_docx(content or ""))
+    body_low = body.lower()[:500]
+    has_header = "lugar y fecha" in body_low or "presente" in body_low
+    if not has_header:
+        footer_text = metadata.get("footer_text", "") if metadata else ""
+        lugar = (
+            footer_text.split("Domicilio:")[-1].split(",")[0].strip()
+            if "Domicilio:" in footer_text
+            else "México"
+        )
+        p_fecha = doc.add_paragraph(f"LUGAR Y FECHA: {lugar} a {metadata.get('fecha', '')}")
+        p_fecha.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
+        p_dest = doc.add_paragraph(f"\n{dest}")
+        p_dest.bold = True
+        doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # Separador
-    doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    body = strip_markdown_for_docx(content or "")
     for para in body.split("\n"):
         if para.strip():
             p = doc.add_paragraph(para.strip())

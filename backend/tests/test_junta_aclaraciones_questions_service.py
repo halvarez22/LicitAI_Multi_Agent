@@ -359,6 +359,17 @@ def test_analyst_canonical_pregunta_marca_cita_completa():
                 },
             }
         ],
+        "_junta_session_documents": [
+            {
+                "content": {
+                    "filename": "Bases.pdf",
+                    "extracted_text": (
+                        "REQUISITOS DEL PARTICIPANTE: al menos 12 años de experiencia acreditable. "
+                        "Anexo técnico: se requiere al menos 3 años de experiencia en servicios similares."
+                    ),
+                }
+            }
+        ],
     }
     bundle = build_junta_aclaraciones_questions("s_canon", state)
     assert len(bundle.items) == 1

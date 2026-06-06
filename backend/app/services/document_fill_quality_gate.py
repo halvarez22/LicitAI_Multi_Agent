@@ -19,6 +19,48 @@ _PLACEHOLDER_PATTERNS: Sequence[str] = (
     r"Dato pendiente de confirmar",
 )
 
+_DEFERRED_ECONOMIC_PLACEHOLDER_RE = re.compile(
+    r"(?i)(tarifa\s+mensual|precio\s+unitario|integraci[oó]n\s+del\s+costo|"
+    r"importe\s+mensual|costo\s+mensual|tarifa\s+para\s+horario|tabla\s+de\s+precios|"
+    r"an[aá]lisis\s+de\s+precios|precios\s+unitarios)"
+)
+
+_DEFERRED_ECONOMIC_FILENAME_RE = re.compile(
+    r"(?i)precios[_\s]?unitarios|analisis[_\s]?precios|"
+    r"anexo[_\s]?9|cotizaci[oó]n|resumen.*subtotal"
+)
+
+
+def _is_deferred_economic_placeholder(text: str, *, basename: str = "") -> bool:
+    """
+    Placeholders de precios/tarifas que en etapa ``formats`` aún no tienen fuente
+    (la propuesta económica corre después). No deben bloquear el pipeline entero.
+    """
+    blob = f"{basename} {text or ''}"
+    return bool(_DEFERRED_ECONOMIC_PLACEHOLDER_RE.search(blob))
+
+
+def _is_standalone_ellipsis(text: str) -> bool:
+    """Tres puntos como celda vacía (APU), no '750...SAN' en domicilios."""
+    compact = re.sub(r"\s+", "", str(text or ""))
+    return bool(compact) and bool(re.fullmatch(r"\.{3,}", compact))
+
+
+def _defer_formats_stage_placeholder(
+    *,
+    stage: str,
+    basename: str,
+    text: str,
+) -> bool:
+    if stage != "formats":
+        return False
+    if _is_standalone_ellipsis(text):
+        return True
+    if _DEFERRED_ECONOMIC_FILENAME_RE.search(basename or ""):
+        return True
+    return _is_deferred_economic_placeholder(text, basename=basename)
+
+
 _BLANK_SLOT_PATTERNS: Sequence[str] = (
     r"\bQUIEN SUSCRIBE\b[^\n]{0,80}_{4,}",
     r"\bEMPRESA\b[^\n]{0,80}_{4,}",
@@ -27,7 +69,7 @@ _BLANK_SLOT_PATTERNS: Sequence[str] = (
     r"NOMBRE O DENOMINACI[OÓ]N SOCIAL|MONTO AFIANZADO|MONEDA|FECHA DE EXPEDICI[OÓ]N|"
     r"OBLIGACI[OÓ]N GARANTIZADA|N[UÚ]MERO ASIGNADO POR \"LA CONTRATANTE\"|OBJETO|"
     r"MONTO DEL CONTRATO|FECHA DE SUSCRIPCI[OÓ]N|TIPO)\s*:\s*_{3,}",
-    r"[A-ZÁÉÍÓÚÑ][^\n]{0,120}_{4,}",
+    r"[A-ZÁÉÍÓÚÑ][^\n]{0,120}_{4,}\s*$",
 )
 
 _GENERIC_TENDER_MARKERS = {
@@ -96,7 +138,7 @@ class DocumentPolicy:
 class DocumentFieldPolicyRegistry:
     """Registro determinista de políticas de llenado por documento."""
 
-    POLICY_VERSION = "1.3.0"
+    POLICY_VERSION = "1.4.0"
 
     _POLICIES: Sequence[DocumentPolicy] = (
         DocumentPolicy(
@@ -242,14 +284,26 @@ class FieldProvenanceResolver:
         return {"source": fallback_source, "confidence": fallback_confidence, "anchor": None}
 
 
-def _is_placeholder(text: str) -> bool:
+def _should_relax_template_gate(basename: str, *, stage: str) -> bool:
+    from app.services.document_body_quality import should_relax_fill_quality_gate
+
+    return should_relax_fill_quality_gate(basename, stage=stage)
+
+
+def _is_placeholder(text: str, *, strict_form_lines: bool = True) -> bool:
     if not text:
         return False
     if _is_separator_only(text):
         return False
+    if _is_standalone_ellipsis(text):
+        return True
     for pattern in _PLACEHOLDER_PATTERNS:
+        if pattern == r"(?<!\S)\.\.\.(?!\S)":
+            continue
         if re.search(pattern, text, flags=re.IGNORECASE):
             return True
+    if not strict_form_lines:
+        return _has_blank_slot_placeholder(text, include_form_line_pattern=False)
     return _has_blank_slot_placeholder(text)
 
 
@@ -264,7 +318,7 @@ def _is_separator_only(text: str) -> bool:
     return bool(compact) and bool(re.fullmatch(r"[_\-]+", compact))
 
 
-def _has_blank_slot_placeholder(text: str) -> bool:
+def _has_blank_slot_placeholder(text: str, *, include_form_line_pattern: bool = True) -> bool:
     raw = str(text or "").strip()
     if not raw or _is_separator_only(raw):
         return False
@@ -276,9 +330,34 @@ def _has_blank_slot_placeholder(text: str) -> bool:
     if "NOMBRE DE LA PERSONA QUE PARTICIPA EN LA PRESENTE LICITACION" in norm:
         return True
     for pattern in _BLANK_SLOT_PATTERNS:
+        if not include_form_line_pattern and pattern == r"[A-ZÁÉÍÓÚÑ][^\n]{0,120}_{4,}\s*$":
+            continue
         if re.search(pattern, norm, flags=re.IGNORECASE):
             return True
     return False
+
+
+def _is_placeholder_llm_residual_only(text: str) -> bool:
+    """
+    En plantillas espejo/catálogo del convocante: solo bloquea restos de LLM
+    (corchetes, N/A, «dato pendiente»), **no** campos en blanco del formato
+    (NOMBRE DEL LICITANTE: _______, NOMBRE DEL INTERESADO: ___).
+    """
+    if not text or _is_separator_only(text):
+        return False
+    if _is_standalone_ellipsis(text):
+        return True
+    for pattern in _PLACEHOLDER_PATTERNS:
+        if pattern == r"(?<!\S)\.\.\.(?!\S)":
+            continue
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _is_placeholder_operational_mirror(text: str) -> bool:
+    """Alias retrocompatible: misma política que plantilla relajada."""
+    return _is_placeholder_llm_residual_only(text)
 
 
 def detect_cross_tender_marker(chunks: Sequence[str], session_hint: str) -> str | None:
@@ -335,19 +414,21 @@ def _profile_required_fields(master_profile: Dict[str, Any]) -> List[FillIssue]:
 
 
 def _scan_docx(path: str) -> List[str]:
+    from app.services.document_contamination_gate import strip_llm_meta_leaks
+
     out: List[str] = []
     try:
         doc = Document(path)
     except Exception:
         return out
     for p in doc.paragraphs:
-        text = (p.text or "").strip()
+        text = strip_llm_meta_leaks((p.text or "").strip())
         if text:
             out.append(text)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                text = (cell.text or "").strip()
+                text = strip_llm_meta_leaks((cell.text or "").strip())
                 if text:
                     out.append(text)
     return out
@@ -356,9 +437,15 @@ def _scan_docx(path: str) -> List[str]:
 def _scan_docx_economic_totals(chunks: Sequence[str]) -> Dict[str, str]:
     out: Dict[str, str] = {}
     rgx = {
-        "SUBTOTAL": re.compile(r"SUBTOTAL\s*:\s*\$?\s*([0-9\.,]+)", re.IGNORECASE),
-        "IVA": re.compile(r"IVA(?:\s*\(.*?\))?\s*:\s*\$?\s*([0-9\.,]+)", re.IGNORECASE),
-        "TOTAL": re.compile(r"TOTAL(?:\s+DE\s+LA\s+PROPUESTA)?\s*:\s*\$?\s*([0-9\.,]+)", re.IGNORECASE),
+        "SUBTOTAL": re.compile(r"(?<![A-Z])SUBTOTAL\s*:\s*\$?\s*([0-9\.,]+)", re.IGNORECASE),
+        "IVA": re.compile(
+            r"(?:I\.?\s*V\.?\s*A\.?\s*\.?|IVA)(?:\s*\([^)]*\))?\s*:\s*\$?\s*([0-9\.,]+)",
+            re.IGNORECASE,
+        ),
+        "TOTAL": re.compile(
+            r"(?<!SUB)TOTAL(?:\s+DE\s+LA\s+PROPUESTA)?\s*:\s*\$?\s*([0-9\.,]+)",
+            re.IGNORECASE,
+        ),
     }
     for line in chunks:
         for k, p in rgx.items():
@@ -381,9 +468,18 @@ def _scan_xlsx_labels(path: str) -> Dict[str, str]:
             for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 300), min_col=1, max_col=min(ws.max_column, 12)):
                 for idx, cell in enumerate(row):
                     raw = str(cell.value or "").strip().upper()
-                    if raw in _ECO_LABELS and idx + 1 < len(row):
+                    label_key = ""
+                    if raw.startswith("SUBTOTAL"):
+                        label_key = "SUBTOTAL"
+                    elif raw.startswith("IVA") or raw.startswith("I.V.A"):
+                        label_key = "IVA"
+                    elif raw.startswith("TOTAL"):
+                        label_key = "TOTAL"
+                    if not label_key or label_key in out:
+                        continue
+                    if idx + 1 < len(row):
                         right = row[idx + 1].value
-                        out[raw] = "" if right is None else str(right).strip()
+                        out[label_key] = "" if right is None else str(right).strip()
     finally:
         try:
             wb.close()
@@ -431,7 +527,9 @@ def _as_float(value: Any) -> float | None:
 
 
 def _norm_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+    raw = unicodedata.normalize("NFD", str(value or ""))
+    raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
+    return re.sub(r"\s+", " ", raw).strip().lower()
 
 
 def _contains_profile_value(chunks: Sequence[str], expected_value: str) -> bool:
@@ -470,17 +568,45 @@ def _extract_field_value(
     document_chunks: Sequence[str],
     xlsx_labels: Dict[str, str],
     docx_totals: Dict[str, str],
+    provenance_context: Dict[str, Any] | None = None,
+    materialization_route: str = "",
 ) -> str:
     k = field_key.lower()
     if k in ("razon_social", "rfc", "representante_legal"):
         expected = str(master_profile.get(k) or "").strip()
-        return expected if _contains_profile_value(document_chunks, expected) else ""
+        if expected and _contains_profile_value(document_chunks, expected):
+            return expected
+        route = str(materialization_route or "").lower()
+        if route.startswith("deterministic") or route in ("mirror", "template_locked"):
+            from app.core.formats_pilot_slots import is_usable_profile_field_value
+
+            if is_usable_profile_field_value(expected):
+                return expected
+        return ""
     if k == "subtotal":
-        return xlsx_labels.get("SUBTOTAL", "") or docx_totals.get("SUBTOTAL", "")
-    if k == "iva":
-        return xlsx_labels.get("IVA", "") or docx_totals.get("IVA", "")
-    if k == "total":
-        return xlsx_labels.get("TOTAL", "") or docx_totals.get("TOTAL", "")
+        scanned = xlsx_labels.get("SUBTOTAL", "") or docx_totals.get("SUBTOTAL", "")
+        if scanned:
+            return scanned
+    elif k == "iva":
+        scanned = xlsx_labels.get("IVA", "") or docx_totals.get("IVA", "")
+        if scanned:
+            return scanned
+    elif k == "total":
+        scanned = xlsx_labels.get("TOTAL", "") or docx_totals.get("TOTAL", "")
+        if scanned:
+            return scanned
+    else:
+        return ""
+
+    resumen = (
+        (provenance_context or {}).get("economic_resumen")
+        if isinstance(provenance_context, dict)
+        else None
+    )
+    if isinstance(resumen, dict) and resumen.get(k) is not None:
+        val = resumen.get(k)
+        if _as_float(val) is not None:
+            return str(val)
     return ""
 
 
@@ -611,28 +737,49 @@ def validate_generated_documents_fill(
                         )
 
         materialized_chunks = chunks if ext == ".docx" else xlsx_chunks
+        relax_template = _should_relax_template_gate(basename, stage=stage)
         if not _is_reference_fianza_model(basename=basename, chunks=materialized_chunks):
             for text in materialized_chunks:
-                if _is_placeholder(text):
+                if relax_template:
+                    ph_hit = _is_placeholder_llm_residual_only(text)
+                else:
+                    ph_hit = _is_placeholder(text, strict_form_lines=True)
+                if ph_hit:
+                    defer_economic = _defer_formats_stage_placeholder(
+                        stage=stage,
+                        basename=basename,
+                        text=text,
+                    )
                     issues.append(
                         FillIssue(
                             error_type="placeholder_detected",
-                            severity=_issue_severity("block"),
+                            severity=_issue_severity("warn" if defer_economic else "block"),
                             document_id=basename,
-                            field_key="content",
+                            field_key="tarifa_mensual" if defer_economic else "content",
                             detected_value=text[:240],
-                            expected_rule="no_placeholder_tokens",
+                            expected_rule=(
+                                "deferred_to_economic_stage"
+                                if defer_economic
+                                else "no_placeholder_tokens"
+                            ),
                             provenance=provenance_context
                             or {"source": f"generated_{ext.lstrip('.')}", "confidence": 1.0},
                         )
                     )
                     break
-        cross_tender_marker = detect_cross_tender_marker(materialized_chunks, session_hint)
+        cross_tender_marker = None if relax_template else detect_cross_tender_marker(
+            materialized_chunks, session_hint
+        )
         if cross_tender_marker:
+            route = str(d.get("materialization_route") or "").lower()
+            mirror_mode = str(d.get("mirror_mode") or "").lower()
+            is_ingested_mirror = route in ("mirror", "copy_docx") or mirror_mode.startswith(
+                ("copy", "mirror", "deterministic")
+            )
             issues.append(
                 FillIssue(
                     error_type="cross_tender_reference",
-                    severity=_issue_severity("block"),
+                    severity=_issue_severity("warn" if is_ingested_mirror else "block"),
                     document_id=basename,
                     field_key="content",
                     detected_value=cross_tender_marker,
@@ -642,7 +789,139 @@ def validate_generated_documents_fill(
                 )
             )
 
-        if policy is not None:
+        _mirror_route = str(d.get("materialization_route") or "").lower() in (
+            "mirror",
+            "copy_docx",
+        ) or str(d.get("mirror_mode") or "").lower().startswith(
+            ("copy", "mirror", "deterministic")
+        )
+        _skip_contamination_block = relax_template and (
+            _mirror_route or basename.lower().startswith(("cat_", "cat ", "panel_", "panel "))
+        )
+        _template_contamination_ok = frozenset(
+            {
+                "adjudication_language_in_proposal_stage",
+                "bases_checklist_in_letter_body",
+                "evaluator_perspective_detected",
+                "contract_language_in_proposal_stage",
+                "document_date_after_submission_deadline",
+                "generic_legal_fallback_body",
+            }
+        )
+
+        if bool(getattr(settings, "DOCUMENT_CONTAMINATION_GATE_ENABLED", True)) and not (
+            relax_template and not materialized_chunks
+        ):
+            from app.services.document_contamination_gate import (
+                contamination_hits_to_issues,
+                scan_date_after_deadline,
+                scan_text_contamination,
+            )
+
+            full_text = "\n".join(materialized_chunks)
+            if full_text.strip():
+                ctx = provenance_context if isinstance(provenance_context, dict) else {}
+                hits = scan_text_contamination(
+                    full_text, basename=basename, stage=stage
+                )
+                deadline_iso = str(ctx.get("deadline_dt_iso") or "")
+                fecha_es = str(ctx.get("fecha_es") or "")
+                if not relax_template:
+                    date_hit = scan_date_after_deadline(
+                        full_text,
+                        deadline_dt_iso=deadline_iso or None,
+                        fecha_es=fecha_es,
+                    )
+                    if date_hit:
+                        hits.append(date_hit)
+                    from app.services.document_contamination_gate import scan_all_document_dates
+
+                    for extra in scan_all_document_dates(
+                        full_text,
+                        deadline_dt_iso=deadline_iso or None,
+                        canonical_fecha_es=fecha_es,
+                    ):
+                        if not any(
+                            h.error_type == extra.error_type
+                            and h.detected_value == extra.detected_value
+                            for h in hits
+                        ):
+                            hits.append(extra)
+                if relax_template:
+                    hits = [
+                        h
+                        for h in hits
+                        if h.error_type not in _template_contamination_ok
+                    ]
+                for raw in contamination_hits_to_issues(
+                    hits,
+                    document_id=basename,
+                    provenance=ctx
+                    or {"source": f"generated_{ext.lstrip('.')}", "confidence": 1.0},
+                ):
+                    err_type = str(raw.get("error_type") or "")
+                    if _skip_contamination_block and err_type in _template_contamination_ok:
+                        continue
+                    sev = str(raw.get("severity") or _issue_severity("block"))
+                    if _skip_contamination_block and sev == "block":
+                        sev = _issue_severity("warn")
+                    issues.append(
+                        FillIssue(
+                            error_type=err_type,
+                            severity=sev,
+                            document_id=basename,
+                            field_key=str(raw.get("field_key") or "content"),
+                            detected_value=str(raw.get("detected_value") or ""),
+                            expected_rule=str(raw.get("expected_rule") or ""),
+                            provenance=raw.get("provenance")
+                            if isinstance(raw.get("provenance"), dict)
+                            else {},
+                        )
+                    )
+
+        if ext == ".docx" and stage in ("formats", "technical") and materialized_chunks:
+            from app.services.document_body_quality import scan_materialized_doc_text
+            from app.services.document_contamination_gate import is_apu_document
+
+            shell_hit = scan_materialized_doc_text(
+                "\n".join(materialized_chunks),
+                basename=basename,
+            )
+            defer_shell = relax_template or any(
+                _defer_formats_stage_placeholder(
+                    stage=stage, basename=basename, text=chunk
+                )
+                for chunk in materialized_chunks
+            ) or (
+                stage == "formats"
+                and is_apu_document(basename, "\n".join(materialized_chunks[:3]))
+            )
+            if (
+                shell_hit
+                and not defer_shell
+                and not _is_reference_fianza_model(basename=basename, chunks=materialized_chunks)
+            ):
+                issues.append(
+                    FillIssue(
+                        error_type=str(shell_hit["error_type"]),
+                        severity=_issue_severity("block"),
+                        document_id=basename,
+                        field_key=str(shell_hit.get("field_key") or "content"),
+                        detected_value=str(shell_hit.get("detected_value") or ""),
+                        expected_rule=str(shell_hit.get("expected_rule") or ""),
+                        provenance=provenance_context
+                        or {"source": f"generated_{ext.lstrip('.')}", "confidence": 1.0},
+                    )
+                )
+
+        defer_policy_fields = stage == "formats" and any(
+            _defer_formats_stage_placeholder(
+                stage=stage, basename=basename, text=chunk
+            )
+            for chunk in materialized_chunks
+        )
+
+        if policy is not None and not defer_policy_fields:
             totals: Dict[str, float] = {}
             for fp in policy.fields:
                 value = _extract_field_value(
@@ -651,6 +930,8 @@ def validate_generated_documents_fill(
                     document_chunks=materialized_chunks,
                     xlsx_labels=xlsx_labels,
                     docx_totals=docx_totals,
+                    provenance_context=provenance_context if isinstance(provenance_context, dict) else None,
+                    materialization_route=str(d.get("materialization_route") or ""),
                 )
                 fallback_confidence = float((provenance_context or {}).get("confidence", 0.7))
                 prov = FieldProvenanceResolver.resolve(fp.field_key, field_provenance, fallback_source, fallback_confidence)
@@ -698,6 +979,15 @@ def validate_generated_documents_fill(
                         n = _as_float(value)
                         if n is not None:
                             totals[fp.field_key.lower()] = n
+                    # Si el dato ya está materializado en el archivo, no bloquear por confianza de inferencia.
+                    prov = {
+                        **prov,
+                        "confidence": max(
+                            float(prov.get("confidence", 0.0) or 0.0),
+                            float(fp.min_confidence or 0.0),
+                            0.95,
+                        ),
+                    }
                 if fp.min_confidence > 0 and float(prov.get("confidence", 0.0) or 0.0) < fp.min_confidence:
                     confidence_violations += 1
                     issues.append(
@@ -745,6 +1035,9 @@ def validate_generated_documents_fill(
             "stage": stage,
             "issues_total": len(issues),
             "policy_miss_count": policy_miss_count,
+            "policy_miss_ratio": (
+                round(policy_miss_count / docs_scanned, 3) if docs_scanned else 0.0
+            ),
             "confidence_violations": confidence_violations,
         },
     }

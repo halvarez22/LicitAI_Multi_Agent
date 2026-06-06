@@ -13,6 +13,7 @@ from app.api.deps import get_connected_memory
 from app.services.output_delivery_view import (
     build_delivery_structure,
     delivery_zip_available,
+    has_compranet_validated,
     iter_delivery_zip_entries,
     _find_prebuilt_zip_path,
 )
@@ -197,6 +198,35 @@ async def download_file(path: str, session_id: str):
 
 
 def _zip_streaming_response(session_path: str, filename_hint: str):
+    # Fuente de verdad: manifiesto CompraNet validado (evita ZIP obsoleto en raíz).
+    if has_compranet_validated(session_path):
+        entries = iter_delivery_zip_entries(session_path)
+        if not entries:
+            raise HTTPException(
+                status_code=409,
+                detail="No hay archivos de entrega para empaquetar en ZIP.",
+            )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zip_file:
+            for file_path, arcname in entries:
+                if os.path.isfile(file_path):
+                    zip_file.write(file_path, arcname.replace("\\", "/"))
+        zip_buffer.seek(0)
+        safe = re.sub(r"[^\w.\-]+", "_", filename_hint, flags=re.UNICODE)[:120] or "licitacion"
+
+        def _iter_chunks(chunk_size: int = 512 * 1024):
+            while True:
+                chunk = zip_buffer.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+        return StreamingResponse(
+            _iter_chunks(),
+            media_type="application/x-zip-compressed",
+            headers={"Content-Disposition": f"attachment; filename=Propuesta_{safe}.zip"},
+        )
+
     prebuilt = _find_prebuilt_zip_path(session_path)
     if prebuilt:
         safe = re.sub(r"[^\w.\-]+", "_", filename_hint, flags=re.UNICODE)[:120] or "licitacion"

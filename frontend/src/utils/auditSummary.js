@@ -641,6 +641,12 @@ export function pickDetectedFormatsForPanel(auditResults) {
     if (!auditResults || typeof auditResults !== 'object') {
         return { sobre_1_tecnico: [], sobre_2_economico: [], _meta: { filtered_actionable_only: true, total: 0 } };
     }
+    const pliegoPanel =
+        auditResults.pliegoFormatsPanel
+        || auditResults.pliego_formats_panel;
+    if (pliegoPanel && typeof pliegoPanel === 'object' && pliegoPanel.sobre_1_tecnico) {
+        return pliegoPanel;
+    }
     const ccc = auditResults.documentCandidatesConsolidated;
     const ft = auditResults.fastTrackDocumentCandidates;
     const ftIsCcc = ft && typeof ft === 'object' && ft.sobre_1_tecnico;

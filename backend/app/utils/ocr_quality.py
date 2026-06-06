@@ -2,10 +2,21 @@
 from __future__ import annotations
 
 import re
+from typing import List
 
 _PAGE_MARKER_RE = re.compile(r"-{2,}\s*P[ÁA]GINA\s+\d+\s*-{2,}", re.IGNORECASE)
 _NUMERIC_LINE_RE = re.compile(r"^\d{5,}$")
 _MARKER_WORDS = {"PAGINA", "PÁGINA"}
+
+# Eco del prompt forense legacy o del prompt corto cuando el VLM no transcribe.
+_VLM_PROMPT_ECHO_MARKERS = (
+    "ANALIZAR Y TRANSCRIBIR DE FORMA FORENSE",
+    "INSTRUCCIONES DE ALTA FIDELIDAD",
+    "PROHIBIDO RESUMIR O GENERALIZAR",
+    "Text Recognition:",
+    "Extract all text from this page accurately",
+    "Transcribe every word, number, date",
+)
 
 
 def looks_like_low_signal_ocr(text: str) -> bool:
@@ -31,4 +42,48 @@ def looks_like_low_signal_ocr(text: str) -> bool:
     too_many_numeric = numeric_hits >= max(3, len(lines) // 4)
     too_little_semantic_text = alpha_ratio < 0.18 or len(unique_meaningful) < 5
     return (too_many_markers and too_little_semantic_text) or (too_many_numeric and too_little_semantic_text)
+
+
+def is_vlm_prompt_echo(text: str) -> bool:
+    """
+    True si la salida del VLM parece repetir instrucciones en lugar de transcribir la página.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    head = t[:280].upper()
+    for marker in _VLM_PROMPT_ECHO_MARKERS:
+        if marker.upper() in head and len(t) < 900:
+            return True
+    if t.startswith("ANALIZAR Y TRANSCRIBIR") and len(t) < 750:
+        return True
+    return False
+
+
+def assess_vlm_page_quality(text: str, *, min_chars: int = 80) -> List[str]:
+    """Devuelve flags de calidad para una página extraída por VLM."""
+    flags: List[str] = []
+    t = (text or "").strip()
+    if not t:
+        flags.append("empty")
+        return flags
+    if len(t) < min_chars:
+        flags.append("short")
+    if is_vlm_prompt_echo(t):
+        flags.append("vlm_prompt_echo")
+    if looks_like_low_signal_ocr(t):
+        flags.append("low_signal")
+    return flags
+
+
+def is_usable_vlm_page_text(text: str, *, min_chars: int = 80) -> bool:
+    """True si el texto VLM es apto para persistir como transcripción."""
+    t = (text or "").strip()
+    if len(t) < min_chars:
+        return False
+    if is_vlm_prompt_echo(t):
+        return False
+    if looks_like_low_signal_ocr(t):
+        return False
+    return True
 

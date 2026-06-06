@@ -92,7 +92,10 @@ async def test_chatbot_idle_con_empresa_sin_fuentes_mensaje_factual(agent, mock_
 
 
 @pytest.mark.asyncio
-async def test_chatbot_ofrece_intake_plan_proactivo_con_bloqueantes(agent, mock_context):
+async def test_chatbot_ofrece_intake_plan_proactivo_con_bloqueantes(agent, mock_context, monkeypatch):
+    from app.config.settings import settings
+
+    monkeypatch.setattr(settings, "INTAKE_PROACTIVE_CHAT_OFFER_ENABLED", True)
     mock_context.memory.get_session.return_value = {
         "pending_questions": [],
         "current_question_index": 0,
@@ -109,6 +112,31 @@ async def test_chatbot_ofrece_intake_plan_proactivo_con_bloqueantes(agent, mock_
     assert resp.data.get("tipo") == "intake_proactive_offer"
     assert "bloqueante" in (resp.data.get("respuesta") or "").lower()
     assert "diagnóstico listo" in (resp.data.get("respuesta") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_chatbot_sin_oferta_plan_guiado_por_defecto(agent, mock_context):
+    """Usuario común: saludo → reanudación clara, no «plan guiado» ni pendientes inventario."""
+    mock_context.memory.get_session.return_value = {
+        "pending_questions": [],
+        "tasks_completed": [{"task": "stage_completed:compliance"}, {"task": "economic_proposal", "result": {"status": "complete", "total_base": 100.0}}],
+        "intake_plan": {
+            "summary": {"blocking_count": 0},
+            "questions": [
+                {
+                    "question_id": "INTAKE-COMP-FOR-001",
+                    "priority": "IMPORTANTE",
+                    "question": "Para armar el expediente de Catálogo, ¿ya tienes el documento?",
+                    "provenance_ui": {"reason": "master_list_formatos"},
+                },
+            ],
+        },
+    }
+    resp = await agent.process(_inp("sess_no_offer", "hola"))
+    assert resp.status == AgentStatus.SUCCESS
+    assert resp.data.get("tipo") != "intake_proactive_offer"
+    assert "plan guiado" not in (resp.data.get("respuesta") or "").lower()
+    assert resp.data.get("intake_active") is not True
 
 
 @pytest.mark.asyncio
@@ -1582,6 +1610,85 @@ def test_cronogram_anchored_accepts_matching_pliego():
         "Junta de aclaraciones el 12 de febrero de 2024 a las 11:00 horas."
     )
     assert ChatbotRAGAgent._cronogram_anchored_in_pliego(cron, pliego) is True
+
+
+def test_bases_analysis_phase_partial_when_only_analysis_stage():
+    state = {
+        "tasks_completed": [
+            {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
+        ]
+    }
+    assert ChatbotRAGAgent._bases_analysis_phase(state) == "partial"
+
+
+def test_bases_analysis_phase_complete_when_compliance_ok():
+    state = {
+        "tasks_completed": [
+            {"task": "stage_completed:analysis", "result": {"status": "success"}},
+            {"task": "stage_completed:compliance", "result": {"status": "success"}},
+        ]
+    }
+    assert ChatbotRAGAgent._bases_analysis_phase(state) == "complete"
+
+
+def test_session_resume_partial_does_not_claim_bases_analyzed():
+    agent = ChatbotRAGAgent(MagicMock())
+    state = {
+        "name": "VIGILANCIA ISSSTE",
+        "tasks_completed": [
+            {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
+        ],
+    }
+    msg = agent._build_session_resume_message(state)
+    assert "las bases están analizadas" not in msg.lower()
+    assert "dictamen forense" in msg.lower()
+    assert "generar propuesta económica" not in msg.lower() or "primero" in msg.lower()
+
+
+def test_session_resume_complete_allows_economic_cta():
+    agent = ChatbotRAGAgent(MagicMock())
+    state = {
+        "name": "VIGILANCIA ISSSTE",
+        "tasks_completed": [
+            {"task": "stage_completed:compliance", "result": {"status": "success"}},
+        ],
+    }
+    msg = agent._build_session_resume_message(state)
+    assert "dictamen forense de cumplimiento está listo" in msg
+    assert "generar propuesta económica" in msg.lower()
+
+
+def test_build_analysis_in_progress_message_shows_pct():
+    msg = ChatbotRAGAgent._build_analysis_in_progress_message(
+        {"name": "VIGILANCIA ISSSTE"},
+        {"progress": {"pct": 66, "message": "FORMATOS/ANEXOS: bloque 18/39"}},
+    )
+    assert "66%" in msg
+    assert "aún no está cerrado" in msg.lower() or "sigue en curso" in msg.lower()
+    assert "generar propuesta económica" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_session_resume_running_job_returns_in_progress(agent, mock_context):
+    mock_context.memory.get_session = AsyncMock(
+        return_value={
+            "name": "VIGILANCIA ISSSTE",
+            "tasks_completed": [
+                {"task": "stage_completed:analysis", "result": {"status": "success"}},
+            ],
+        }
+    )
+    with patch(
+        "app.agents.chatbot_rag.get_active_session_job",
+        return_value={
+            "job_id": "job-1",
+            "status": "RUNNING",
+            "progress": {"pct": 70, "message": "compliance"},
+        },
+    ):
+        resp = await agent.process(_inp("vigilancia_issste", ""))
+    assert resp.data.get("tipo") == "session_resume_in_progress"
+    assert "sigue en curso" in str(resp.data.get("respuesta") or "").lower()
 
 
 def test_extract_analyst_cronogram_from_session_tasks():

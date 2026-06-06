@@ -15,7 +15,7 @@ from app.economic_validation.service import refresh_economic_validations_for_ses
 from app.services.document_preprocessor import DocumentPreprocessor
 from app.agents.mission_data_extractor import MissionDataExtractor
 from app.services.numeric_validator import NumericValidator
-from app.services.job_service import get_job_status
+from app.services.job_service import get_job_status, get_active_session_job
 from app.services.tender_router_service import TenderRouterService
 
 logger = get_logger(__name__)
@@ -32,8 +32,6 @@ def _looks_like_bases_clarification_query(user_query: str) -> bool:
     q = (user_query or "").strip()
     if not q:
         return False
-    if "?" in q:
-        return True
     lo = q.lower()
     needles = (
         "explícame",
@@ -60,7 +58,23 @@ def _looks_like_bases_clarification_query(user_query: str) -> bool:
         "únicamente podrán",
         "unicamente podran",
     )
-    return any(n in lo for n in needles)
+    if any(n in lo for n in needles):
+        return True
+    if "?" in q and any(
+        token in lo
+        for token in (
+            "bases",
+            "pliego",
+            "convocatoria",
+            "anexo",
+            "requisito",
+            "licitacion",
+            "licitación",
+            "acreditar",
+        )
+    ):
+        return True
+    return False
 
 
 class ChatbotRAGAgent(BaseAgent):
@@ -158,8 +172,12 @@ class ChatbotRAGAgent(BaseAgent):
 
     @staticmethod
     def _pending_from_intake_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from app.services.hitl_queue_service import should_exclude_from_chat_queue
+
         out: List[Dict[str, Any]] = []
         for q in list(plan.get("questions") or []):
+            if should_exclude_from_chat_queue(q):
+                continue
             question = str(q.get("question") or "").strip()
             if not question:
                 continue
@@ -207,15 +225,24 @@ class ChatbotRAGAgent(BaseAgent):
         if isinstance(f_hint, dict):
             blocking = int(f_hint.get("blocking_count", 0) or 0)
             warnings = int(f_hint.get("warning_count", 0) or 0)
+            issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
             if blocking > 0 or warnings > 0:
+                if issues:
+                    from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+                    stage = str(f_hint.get("stage") or "technical")
+                    question = build_fill_blocking_question(stage, issues)
+                else:
+                    question = (
+                        "Al armar los documentos me faltan **datos de tu empresa** (RFC, representante legal, "
+                        "domicilio, etc.). Ve a **Empresas**, complétalos y pulsa **Generar** otra vez; "
+                        "o escríbeme aquí el dato que falta."
+                    )
                 out.append(
                     {
                         "field": "quality.fill.review",
-                        "label": "Validación de llenado",
-                        "question": (
-                            "Antes de continuar, necesito confirmar datos críticos de llenado "
-                            "(campos obligatorios y consistencia). ¿Me ayudas a validarlos?"
-                        ),
+                        "label": "Datos para llenar documentos",
+                        "question": question,
                         "type": "quality_validation_blocking",
                         "is_blocking": blocking > 0,
                         "priority": "BLOQUEANTE" if blocking > 0 else "CRITICO",
@@ -652,7 +679,7 @@ class ChatbotRAGAgent(BaseAgent):
         return pending_question
 
     # Tipos HITL de perfil: redacción canónica (DataGap), sin LLM (evita refusals PII del modelo).
-    _PROFILE_INTAKE_TYPES = frozenset({"profile", "profile_field"})
+    _PROFILE_INTAKE_TYPES = frozenset({"profile", "profile_field", "quality_validation_blocking"})
 
     @staticmethod
     def _is_mission_llm_refusal(text: str) -> bool:
@@ -922,10 +949,18 @@ Genera el mensaje conversacional para solicitar este dato."""
 
     @staticmethod
     def _compute_pending_progress(pending: List[Dict[str, Any]], current_idx: int) -> Dict[str, Any]:
-        total = len(pending or [])
+        from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+        chat_pending = sanitize_chat_pending_questions(pending or [])
+        total = len(chat_pending)
         if total <= 0:
             return {"progress_current": 0, "progress_total": 0, "progress_label": "Sin pendientes"}
-        idx = max(0, min(int(current_idx or 0), total - 1))
+        # Reindexar puntero si el índice global apuntaba a un ticket excluido.
+        qid_types = {str(q.get("type") or "") for q in (pending or []) if isinstance(q, dict)}
+        if qid_types & {"clarification_ticket", "mini_dictamen_blocking"}:
+            idx = 0
+        else:
+            idx = max(0, min(int(current_idx or 0), total - 1))
         current = idx + 1
         return {
             "progress_current": current,
@@ -967,6 +1002,55 @@ Genera el mensaje conversacional para solicitar este dato."""
             return "Checklist de intake completado. Ya puedes continuar con generación con mayor certeza documental."
         return str(context.get("question") or "")
 
+    @staticmethod
+    def _stage_task_result(tasks: List[Dict[str, Any]], stage: str) -> Optional[Dict[str, Any]]:
+        """Último resultado persistido para ``stage_completed:{stage}``."""
+        task_name = f"stage_completed:{stage}"
+        for task in reversed(tasks or []):
+            if str(task.get("task") or "") == task_name:
+                result = task.get("result")
+                return result if isinstance(result, dict) else {}
+        return None
+
+    @classmethod
+    def _bases_analysis_phase(cls, state: Dict[str, Any]) -> str:
+        """
+        Fase del análisis de bases respecto al dictamen forense.
+
+        Returns:
+            ``none`` | ``partial`` | ``complete`` | ``failed``
+        """
+        tasks = list(state.get("tasks_completed") or [])
+        compliance_res = cls._stage_task_result(tasks, "compliance")
+        if compliance_res is not None:
+            status = str(compliance_res.get("status") or "").lower()
+            if status in ("error", "failed"):
+                return "failed"
+            return "complete"
+        if cls._stage_task_result(tasks, "analysis") is not None:
+            return "partial"
+        return "none"
+
+    @staticmethod
+    def _build_analysis_in_progress_message(state: Dict[str, Any], active_job: Dict[str, Any]) -> str:
+        """Mensaje honesto cuando el job de análisis sigue RUNNING."""
+        session_name = str(state.get("name") or "esta licitación")
+        progress = active_job.get("progress") or {}
+        pct = progress.get("pct", 0)
+        detail = progress.get("message") or progress.get("stage") or "procesando bases"
+        msg = f"¡Hola! Retomamos el trabajo en **{session_name}**.\n\n"
+        msg += "⏳ **El análisis de bases sigue en curso** — el dictamen forense **aún no está cerrado**.\n\n"
+        msg += f"**Progreso estimado:** {pct}% — {detail}\n\n"
+        msg += (
+            "No reinicies el análisis desde el panel. En PDFs largos puede tardar más de una hora. "
+            "Si la barra dejó de moverse, el servidor puede seguir trabajando: recarga la pestaña en unos minutos.\n"
+        )
+        msg += (
+            "\n---\n**¿Continuamos?** Espera a que termine el análisis antes de "
+            "«generar propuesta económica» o pulsar **Generar**."
+        )
+        return msg
+
     def _build_session_resume_message(self, state: Dict[str, Any]) -> str:
         """
         Construye un mensaje proactivo de reanudación de sesión.
@@ -975,27 +1059,51 @@ Genera el mensaje conversacional para solicitar este dato."""
         No invoca al LLM: todo es determinista desde el estado.
         """
         session_name = str(state.get("name") or "esta licitación")
-        
+        bases_phase = self._bases_analysis_phase(state)
+
         # --- Análisis de estado ---
         tasks = list(state.get("tasks_completed") or [])
         task_names = {str(t.get("task") or "") for t in tasks}
-        has_analysis   = any("stage_completed" in n for n in task_names)
-        has_go_no_go   = "go_no_go_result" in task_names
-        has_economic   = "economic_proposal" in task_names
+        has_go_no_go = "go_no_go_result" in task_names
+        has_economic = "economic_proposal" in task_names
 
-        # Intro
+        # Intro (sin afirmar éxito si el dictamen no está cerrado)
         msg = f"¡Hola! Retomamos el trabajo en **{session_name}**.\n\n"
-        msg += "Hemos sincronizado el contexto de las **bases**, tu **perfil corporativo** y la **intención de tu oferta** para garantizar una propuesta sólida y ganadora.\n\n"
-        
-        # Narrativa de progreso
+        if bases_phase == "complete":
+            msg += (
+                "Hemos sincronizado el contexto de las **bases**, tu **perfil corporativo** "
+                "y la **intención de tu oferta** para garantizar una propuesta sólida.\n\n"
+            )
+        elif bases_phase == "partial":
+            msg += (
+                "Tenemos contexto parcial de las **bases** y tu **perfil corporativo**, "
+                "pero **el dictamen forense completo aún no está listo**.\n\n"
+            )
+        else:
+            msg += (
+                "Estamos preparando el contexto de las **bases** y tu **perfil corporativo**. "
+                "El dictamen forense **todavía no está disponible**.\n\n"
+            )
+
+        # Narrativa de progreso (honesta)
         progress_bits = []
-        if has_analysis:
-            progress_bits.append("las bases están analizadas")
+        if bases_phase == "complete":
+            progress_bits.append("el dictamen forense de cumplimiento está listo")
+        elif bases_phase == "partial":
+            msg += (
+                "⚠️ **Avance parcial:** el extracto inicial de requisitos terminó, "
+                "pero **falta cerrar la auditoría forense (compliance)**.\n"
+            )
+        elif bases_phase == "failed":
+            msg += (
+                "❌ El último intento de auditoría forense terminó con error. "
+                "Revisa los logs o pulsa **Actualizar análisis**.\n"
+            )
         if has_go_no_go:
             progress_bits.append("la evaluación de viabilidad (Go/No-Go) está lista")
-            
+
         if progress_bits:
-            msg += f"Ya hemos avanzado bastante: {' y '.join(progress_bits)}.\n"
+            msg += f"Ya hemos avanzado: {' y '.join(progress_bits)}.\n"
 
         # Estado Económico
         if has_economic:
@@ -1035,7 +1143,12 @@ Genera el mensaje conversacional para solicitar este dato."""
                 float(_eco_res_cta.get("total_base") or 0.0) >= 0.01
                 or bool((state.get("economic_user_inputs") or {}).get("allow_zero_total_base_ack"))
             )
-        if _eco_ready and not eco_pending:
+        if bases_phase != "complete":
+            msg += (
+                "Primero hay que **cerrar el análisis de bases** (dictamen forense). "
+                "No cotices ni generes documentos hasta ver el dictamen actualizado en el panel central."
+            )
+        elif _eco_ready and not eco_pending:
             msg += (
                 "La cotización económica ya está lista. Pulsa **Generar** en el panel principal "
                 "para crear el expediente (técnica, formatos y empaquetado), "
@@ -1061,11 +1174,16 @@ Genera el mensaje conversacional para solicitar este dato."""
         user_query = agent_input.company_data.get("query", "").strip()
         company_id = agent_input.company_id or ""
         job_id = agent_input.job_id
+
+        _GREETINGS = {"", "hola", "hi", "hello", "buenas", "buenas tardes",
+                      "buenas noches", "buenos dias", "buenos días", "hey",
+                      "buen dia", "buen día"}
+        _is_bootstrap_query = user_query.lower() in _GREETINGS
         
         # --- C04: COMPLIANCE GATE (Sensor Asíncrono) ---
         # Si el análisis de cumplimiento está en curso, devolvemos PENDING.
-        # Esto evita que el bot responda sin el contexto estratégico del inventario.
-        if job_id:
+        # No bloquear bootstrap/saludos: deben mostrar resumen honesto de progreso.
+        if job_id and not _is_bootstrap_query:
             job = get_job_status(job_id)
             status = job.get("status")
             progress = job.get("progress") or {}
@@ -1092,14 +1210,17 @@ Genera el mensaje conversacional para solicitar este dato."""
         # EXCEPCIÓN: Si hay pending_questions activas, se prioriza la pregunta
         # pendiente sobre el resumen de sesión (Req 2.3, 4.1).
         # =====================================================================
-        _GREETINGS = {"", "hola", "hi", "hello", "buenas", "buenas tardes",
-                      "buenas noches", "buenos dias", "buenos días", "hey",
-                      "buen dia", "buen día"}
-        if user_query.lower() in _GREETINGS:
+        if _is_bootstrap_query:
             _state_for_resume = await self.context_manager.memory.get_session(session_id) or {}
             # Si hay preguntas pendientes, NO mostrar session_resume: el flujo
             # secuencial de pending_questions tiene prioridad (Req 2.3, 4.1).
-            _has_pending_for_resume = bool(_state_for_resume.get("pending_questions"))
+            from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+            _has_pending_for_resume = bool(
+                sanitize_chat_pending_questions(
+                    _state_for_resume.get("pending_questions") or []
+                )
+            )
             if not _has_pending_for_resume:
                 _eco_ready_resume = self._maybe_economic_capture_complete_message(
                     session_id=session_id,
@@ -1114,6 +1235,18 @@ Genera el mensaje conversacional para solicitar este dato."""
                         str((_eco_ready_resume.data or {}).get("respuesta") or ""),
                     )
                     return _eco_ready_resume
+            _active_job = get_active_session_job(session_id)
+            if _active_job.get("status") == "RUNNING" and not _has_pending_for_resume:
+                _resume_msg = self._build_analysis_in_progress_message(_state_for_resume, _active_job)
+                await self._save_chat_history(session_id, user_query or "Hola", _resume_msg)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=_resume_msg,
+                    confianza="Alta",
+                    tipo="session_resume_in_progress",
+                    suggested_actions=[],
+                )
             if _state_for_resume.get("tasks_completed") and not _has_pending_for_resume:  # sesión con trabajo previo y sin pendientes
                 _resume_msg = self._build_session_resume_message(_state_for_resume)
                 if _resume_msg:
@@ -1124,10 +1257,12 @@ Genera el mensaje conversacional para solicitar este dato."""
                     _has_real_docs_to_gen = bool(
                         _state_for_resume.get("document_inventory", {}).get("items")
                     )
-                    _resume_actions = [
-                        {"label": "Generar Propuesta Economica", "payload": "CMD_TRIGGER_GENERATION", "style": "primary"},
-                        {"label": "Ver Requisitos Administrativos", "payload": "CMD_SHOW_PENDING_DOCS", "style": "secondary"}
-                    ]
+                    _resume_actions = []
+                    if self._bases_analysis_phase(_state_for_resume) == "complete":
+                        _resume_actions = [
+                            {"label": "Generar Propuesta Economica", "payload": "CMD_TRIGGER_GENERATION", "style": "primary"},
+                            {"label": "Ver Requisitos Administrativos", "payload": "CMD_SHOW_PENDING_DOCS", "style": "secondary"},
+                        ]
 
                     return self._format_response(
                         session_id=session_id,
@@ -1174,8 +1309,19 @@ Genera el mensaje conversacional para solicitar este dato."""
         # snapshot activo de tasks_completed["economic_proposal"].
         _pending_before_sanitize = list(session_state.get("pending_questions") or [])
         _pending_sanitized = await self._sanitize_economic_pending_questions(session_id, session_state)
-        if len(_pending_sanitized) != len(_pending_before_sanitize):
+        from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+        _pending_sanitized = sanitize_chat_pending_questions(_pending_sanitized)
+        if _pending_sanitized != _pending_before_sanitize:
             session_state["pending_questions"] = _pending_sanitized
+            session_state["current_question_index"] = 0
+            if not _pending_sanitized:
+                session_state["intake_progress"] = {
+                    "started": False,
+                    "accepted": False,
+                    "remaining": 0,
+                    "total": 0,
+                }
             await self.context_manager.memory.save_session(session_id, session_state)
 
         # Archivo en chat: cotización Excel/CSV (matriz económica) antes que extracción 1-a-1.
@@ -1320,30 +1466,48 @@ Genera el mensaje conversacional para solicitar este dato."""
                 pending_questions = quality_pending
                 current_idx = 0
 
-        # Fase 2 Intake proactivo (opt-in): ofrece plan cuando no hay cola legacy activa.
-        if has_real_work_context and settings.INTAKE_PLANNER_ENABLED and not pending_questions and isinstance(intake_plan, dict):
-            intake_qs = list(intake_plan.get("questions") or [])
+        # Fase 2 Intake proactivo (opt-in): desactivado por defecto — confunde frente a paneles de inventario.
+        if (
+            settings.INTAKE_PROACTIVE_CHAT_OFFER_ENABLED
+            and has_real_work_context
+            and settings.INTAKE_PLANNER_ENABLED
+            and not pending_questions
+            and isinstance(intake_plan, dict)
+        ):
+            from app.services.hitl_queue_service import should_exclude_from_chat_queue
+
+            intake_qs = [
+                q
+                for q in (intake_plan.get("questions") or [])
+                if isinstance(q, dict) and not should_exclude_from_chat_queue(q)
+            ]
             if intake_qs:
-                summary = intake_plan.get("summary") if isinstance(intake_plan.get("summary"), dict) else {}
-                blocking_count = int(summary.get("blocking_count", 0) or 0)
+                blocking_count = sum(
+                    1
+                    for q in intake_qs
+                    if bool(q.get("blocking")) or str(q.get("priority") or "").upper() == "BLOQUEANTE"
+                )
                 total_q = len(intake_qs)
                 if self._looks_like_optin_acceptance(user_query):
                     converted = self._pending_from_intake_plan(intake_plan)
-                    session_state["pending_questions"] = converted
-                    session_state["current_question_index"] = 0
-                    session_state["intake_progress"] = {
-                        "started": True,
-                        "accepted": True,
-                        "current_question_id": converted[0].get("question_id") if converted else None,
-                        "remaining": len(converted),
-                        "total": len(converted),
-                        "last_prompt_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                    await self.context_manager.memory.save_session(session_id, session_state)
-                    pending_questions = converted
-                    current_idx = 0
+                    if converted:
+                        session_state["pending_questions"] = converted
+                        session_state["current_question_index"] = 0
+                        session_state["intake_progress"] = {
+                            "started": True,
+                            "accepted": True,
+                            "current_question_id": converted[0].get("question_id"),
+                            "remaining": len(converted),
+                            "total": len(converted),
+                            "last_prompt_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        await self.context_manager.memory.save_session(session_id, session_state)
+                        pending_questions = converted
+                        current_idx = 0
                 elif self._looks_like_greeting_or_progress_intent(user_query):
-                    intro = self._render_intake_message("offer", {"blocking_count": blocking_count, "total": total_q})
+                    intro = self._render_intake_message(
+                        "offer", {"blocking_count": blocking_count, "total": total_q}
+                    )
                     await self._save_chat_history(session_id, user_query or "Hola", intro)
                     return self._format_response(
                         session_id=session_id,
@@ -1354,6 +1518,25 @@ Genera el mensaje conversacional para solicitar este dato."""
                         intake_active=True,
                         activity_state=activity_state,
                     )
+        elif (
+            _is_bootstrap_query
+            and has_real_work_context
+            and not pending_questions
+            and isinstance(intake_plan, dict)
+            and session_state.get("tasks_completed")
+        ):
+            _resume_after_plan = self._build_session_resume_message(session_state)
+            if _resume_after_plan:
+                await self._save_chat_history(session_id, user_query or "Hola", _resume_after_plan)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=_resume_after_plan,
+                    confianza="Alta",
+                    tipo="session_resume",
+                    intake_active=False,
+                    activity_state=activity_state,
+                )
 
         # === SANEAMIENTO CONTRA MASTER PROFILE ===
         # Previene que el asistente pregunte datos (como razon_social) que el usuario
@@ -1419,26 +1602,45 @@ Genera el mensaje conversacional para solicitar este dato."""
                 pending_questions = anchored
                 current_idx = int(session_state.get("current_question_index") or 0)
         if pending_questions:
-            current_idx = self._resolve_resume_pointer(session_state, pending_questions, current_idx)
-            session_state["current_question_index"] = current_idx
-            prog = dict(session_state.get("intake_progress") or {})
-            p = self._compute_pending_progress(pending_questions, current_idx)
-            prog.update(
-                {
-                    "started": bool(prog.get("started", False)) or any(
-                        str(q.get("type")) == "intake_planner" for q in pending_questions
-                    ),
-                    "accepted": bool(prog.get("accepted", False)) or any(
-                        str(q.get("type")) == "intake_planner" for q in pending_questions
-                    ),
-                    "current_question_id": self._stable_question_id(pending_questions[current_idx]),
-                    "remaining": max(0, p["progress_total"] - p["progress_current"] + 1),
-                    "total": p["progress_total"],
-                    "last_prompt_at": datetime.now(timezone.utc).isoformat(),
+            from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+            chat_pending = sanitize_chat_pending_questions(pending_questions)
+            if len(chat_pending) != len(pending_questions):
+                session_state["pending_questions"] = chat_pending
+                pending_questions = chat_pending
+                current_idx = 0
+            if chat_pending:
+                current_idx = self._resolve_resume_pointer(session_state, chat_pending, current_idx)
+                session_state["current_question_index"] = current_idx
+                prog = dict(session_state.get("intake_progress") or {})
+                p = self._compute_pending_progress(chat_pending, current_idx)
+                prog.update(
+                    {
+                        "started": bool(prog.get("started", False)) or any(
+                            str(q.get("type")) == "intake_planner" for q in chat_pending
+                        ),
+                        "accepted": bool(prog.get("accepted", False)) or any(
+                            str(q.get("type")) == "intake_planner" for q in chat_pending
+                        ),
+                        "current_question_id": self._stable_question_id(chat_pending[current_idx]),
+                        "remaining": max(0, p["progress_total"] - p["progress_current"] + 1),
+                        "total": p["progress_total"],
+                        "last_prompt_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                session_state["intake_progress"] = prog
+                await self.context_manager.memory.save_session(session_id, session_state)
+            elif session_state.get("pending_questions"):
+                session_state["pending_questions"] = []
+                session_state["current_question_index"] = 0
+                session_state["intake_progress"] = {
+                    "started": False,
+                    "accepted": False,
+                    "remaining": 0,
+                    "total": 0,
                 }
-            )
-            session_state["intake_progress"] = prog
-            await self.context_manager.memory.save_session(session_id, session_state)
+                pending_questions = []
+                await self.context_manager.memory.save_session(session_id, session_state)
         active_blocking_q = self._active_economic_blocking_pending(pending_questions, current_idx)
 
         # =====================================================================
@@ -1455,6 +1657,22 @@ Genera el mensaje conversacional para solicitar este dato."""
                 user_query=user_query,
                 correlation_id=correlation_id,
             )
+
+        # Corrección post-entrega de precios (Ítem B): antes de RAG y sin depender de pending económico.
+        if user_query and company_id:
+            _corr_out = await self._try_price_correction_channel(
+                session_id=session_id,
+                session_state=session_state,
+                user_query=user_query,
+                correlation_id=correlation_id,
+            )
+            if _corr_out is not None:
+                await self._save_chat_history(
+                    session_id,
+                    user_query,
+                    str((_corr_out.data or {}).get("respuesta") or ""),
+                )
+                return _corr_out
 
         # =====================================================================
         # SPRINT 3: Canal transaccional económico desde chat (override explícito)
@@ -1817,14 +2035,6 @@ Genera el mensaje conversacional para solicitar este dato."""
                             raw_user_query=user_query,
                             correlation_id=correlation_id,
                         )
-            correction = self._detect_price_correction_intent(user_query)
-            if correction and str(
-                (session_state.get("last_orchestrator_decision") or {}).get("stop_reason") or ""
-            ) in ("FINAL_OK", "GENERATION_COMPLETED"):
-                return await self._handle_price_correction(
-                    session_id, session_state, correction, correlation_id
-                )
-
             if intent == "META":
                 has_eco_pending = pending_questions and any(
                     str(q.get("type") or "")
@@ -2228,12 +2438,7 @@ Genera el mensaje conversacional para solicitar este dato."""
                 # Ahora permitimos que el flujo continúe hacia la clasificación LLM/RAG.
 
         if pending_questions:
-            clarification_intent = (
-                False
-                if _looks_like_bases_clarification_query(user_query)
-                else self._evaluate_clarification_intent(user_query)
-            )
-            if clarification_intent:
+            if self._evaluate_clarification_intent(user_query):
                 logger.info(f"[Chatbot] Rama DETERMINÍSTICA detectada para: '{user_query}'")
                 return await self._handle_clarification(
                     session_id, pending_questions, correlation_id, current_idx=current_idx
@@ -8900,30 +9105,47 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
 
     @staticmethod
     def _detect_price_correction_intent(query: str) -> Optional[Dict[str, Any]]:
-        """Detecta corrección post-entrega: «corrige precio zona A a 35529»."""
-        q = (query or "").strip()
-        if not q:
-            return None
-        low = ChatbotRAGAgent._normalize(q)
-        if not any(t in low for t in ("corrige", "corregir", "cambiar precio", "actualiza precio", "recalcular")):
-            return None
-        m = re.search(
-            r"(?:a|en|por)\s*[\$]?\s*([\d,]+(?:\.\d+)?|\d+\s*mil(?:\s*\d+)?)",
-            q,
-            flags=re.I,
-        )
-        if not m:
-            return None
-        from app.services.conversational_price_normalizer import normalize_conversational_price
+        """Detecta corrección post-entrega (lenguaje natural + monto)."""
+        from app.services.price_correction_chat import detect_price_correction_intent
 
-        val, err, _conf = normalize_conversational_price(m.group(1))
-        if err or not val:
+        return detect_price_correction_intent(query)
+
+    async def _try_price_correction_channel(
+        self,
+        *,
+        session_id: str,
+        session_state: Dict[str, Any],
+        user_query: str,
+        correlation_id: str,
+    ) -> Optional[AgentOutput]:
+        """
+        Canal dedicado de corrección de precios; None si el mensaje no aplica.
+        """
+        from app.services.price_correction_chat import (
+            build_price_correction_guidance_message,
+            detect_price_correction_intent,
+            session_ready_for_price_correction,
+        )
+
+        correction = detect_price_correction_intent(user_query)
+        if not correction:
             return None
-        field_hint = ""
-        fm = re.search(r"zona\s+([a-d])", low)
-        if fm:
-            field_hint = f"price_struct_service_{fm.group(1).upper()}"
-        return {"new_value": float(val), "field_hint": field_hint, "raw": q}
+        ready = session_ready_for_price_correction(session_state, session_id)
+        if correction.get("needs_price") or not ready:
+            msg = build_price_correction_guidance_message(
+                needs_price=bool(correction.get("needs_price")),
+                session_ready=ready,
+            )
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=msg,
+                confianza="Alta",
+                tipo="economic_correction_guidance",
+            )
+        return await self._handle_price_correction(
+            session_id, session_state, correction, correlation_id
+        )
 
     async def _handle_price_correction(
         self,
@@ -8937,8 +9159,30 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         field = str(correction.get("field_hint") or "").strip()
         if not field:
             inputs = session_state.get("economic_user_inputs") or {}
-            if len(inputs) == 1:
+            cp = inputs.get("concept_prices") if isinstance(inputs.get("concept_prices"), dict) else {}
+            if len(cp) == 1:
+                field = next(iter(cp.keys()))
+            elif len(cp) > 1:
+                for k in cp:
+                    if "partida" in k.lower() or k.startswith("concept_"):
+                        field = k
+                        break
+            if not field and len(inputs) == 1:
                 field = next(iter(inputs.keys()))
+            if not field:
+                try:
+                    from app.services.structured_economic_price_mapper import (
+                        build_structured_price_slots,
+                    )
+
+                    rows = await self.context_manager.memory.get_line_items_for_session(
+                        session_id
+                    )
+                    slots = build_structured_price_slots(rows or [], cp)
+                    if len(slots) == 1:
+                        field = str(slots[0].get("field") or "").strip()
+                except Exception:
+                    pass
         if not field:
             return self._format_response(
                 session_id=session_id,
@@ -8958,8 +9202,12 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             source="chat_correction",
         )
         n = int(patch.get("file_count") or 0)
+        regen = patch.get("regenerated_economic") or []
+        detail = ""
+        if regen:
+            detail = " Incluye tabla, anexo AE, APU y carta compromiso."
         msg = (
-            f"Listo. Actualicé el precio y recalculé **{n}** archivo(s) impactado(s). "
+            f"Listo. Actualicé el precio y recalculé **{n}** archivo(s) impactado(s).{detail} "
             f"Puedes descargar solo los actualizados desde el panel de entrega (delta)."
         )
         return self._format_response(
@@ -9577,8 +9825,9 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             tipo = "profile_help_pending"
             intake_active = True
         else:
+            _sess_label = str((session_state or {}).get("name") or "esta licitación").strip()
             msg = (
-                "Para avanzar en **ISAPEG**:\n\n"
+                f"Para avanzar en **{_sess_label}**:\n\n"
                 "1. Escribe **`generar propuesta economica`** — arma o actualiza la cotización.\n"
                 "2. Cuando el chat confirme precios, pulsa **Generar** en el panel (documentos).\n\n"
                 "Si el bot pegó requisitos del pliego y no pedía un número, ignóralo y usa el paso 1."
@@ -9801,6 +10050,19 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
 
         idx = max(0, min(int(current_idx or 0), len(pending) - 1))
         q = pending[idx]
+        ft = str(q.get("field") or q.get("field_target") or "")
+        if str(q.get("type")) == "quality_validation_blocking" and ft == "quality.fill.review":
+            resp = str(q.get("question") or "").strip()
+            if not resp:
+                session_state = await self.context_manager.memory.get_session(session_id) or {}
+                f_hint = session_state.get("last_document_fill_quality_waiting_hints") or {}
+                issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
+                if issues:
+                    from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+                    resp = build_fill_blocking_question(str(f_hint.get("stage") or "technical"), issues)
+            await self._save_chat_history(session_id, "Solicitud de aclaración sobre pendientes", resp)
+            return self._format_response(session_id, correlation_id, resp, tipo="clarification_answer")
         if str(q.get("type")) == "economic_validation_blocking":
             if self._economic_blocking_requires_source_input(q):
                 resp = self._economic_blocking_source_reply(q)
@@ -10227,10 +10489,21 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         # - INTAKE-B-ECO-* (solvencia económica) → ídem
         # Estos documentos aparecen en el inventario/checklist del expediente, no en el chat.
         inventory_filtered: List[Dict[str, Any]] = []
+        from app.services.hitl_queue_service import normalize_pending_queue, should_exclude_from_chat_queue
+
         for q in pending:
             q_type = str(q.get("question_type") or q.get("type") or "")
             field_target = str(q.get("field_target") or q.get("field") or "")
             question_id = str(q.get("question_id") or "")
+            if should_exclude_from_chat_queue(q):
+                logger.info(
+                    "chatbot_hitl_pending_discarded",
+                    session_id=session_id,
+                    question_id=question_id,
+                    field_target=field_target[:64],
+                    reason="physical_or_procedural",
+                )
+                continue
             if (
                 q_type == "I"
                 or field_target.startswith("inventory.")
@@ -10249,7 +10522,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 )
                 continue
             inventory_filtered.append(q)
-        pending = inventory_filtered
+        pending = await self._refresh_fill_quality_pending(session_id, session_state, inventory_filtered)
 
         # Obtener ítems del snapshot activo
         tasks = list(session_state.get("tasks_completed") or [])
@@ -10277,7 +10550,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                         )
                         continue
                 cleaned_no_snapshot.append(q)
-            return cleaned_no_snapshot
+            return normalize_pending_queue(cleaned_no_snapshot)
 
         snapshot_concepts = {
             self._normalize(str(it.get("concepto") or it.get("descripcion") or ""))
@@ -10316,7 +10589,79 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             else:
                 cleaned.append(q)
 
-        return cleaned
+        return normalize_pending_queue(cleaned)
+
+    async def _refresh_fill_quality_pending(
+        self,
+        session_id: str,
+        session_state: Dict[str, Any],
+        pending: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Unifica y actualiza preguntas del gate de llenado con el mensaje UX vigente."""
+        f_hint = session_state.get("last_document_fill_quality_waiting_hints")
+        if not isinstance(f_hint, dict):
+            return pending
+
+        blocking = int(f_hint.get("blocking_count") or 0)
+        passed = f_hint.get("validation_passed") is True
+        issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
+
+        # Gate ya cerrado: eliminar preguntas obsoletas con texto de pausa antiguo.
+        if passed or blocking == 0:
+            return [
+                q
+                for q in pending
+                if isinstance(q, dict)
+                and str(q.get("field") or "") not in (
+                    "quality.fill.review",
+                    "document_fill_quality_gate",
+                )
+                and str(q.get("type") or "")
+                not in (
+                    "document_fill_quality_gate_blocking",
+                    "document_fill_quality_gate",
+                    "quality_validation_blocking",
+                )
+            ]
+
+        if not issues:
+            return pending
+        from app.services.document_fill_ux_messages import build_fill_blocking_question
+        from app.services.company_experience_context import build_experience_sources_ux_summary
+
+        stage = str(f_hint.get("stage") or "technical")
+        experience_summary = str(f_hint.get("experience_summary") or "").strip() or None
+        if not experience_summary:
+            try:
+                docs = await self.context_manager.memory.get_documents(session_id) or []
+                experience_summary = build_experience_sources_ux_summary(docs, session_state)
+            except Exception:
+                experience_summary = None
+        fresh_question = build_fill_blocking_question(
+            stage, issues, experience_summary=experience_summary
+        )
+        updated: List[Dict[str, Any]] = []
+        kept_fill = False
+        for q in pending:
+            if not isinstance(q, dict):
+                continue
+            ft = str(q.get("field") or q.get("field_target") or "")
+            qtype = str(q.get("type") or "")
+            if ft == "quality.fill.review" or qtype in (
+                "document_fill_quality_gate_blocking",
+                "document_fill_quality_gate",
+            ) or ft == "document_fill_quality_gate":
+                if kept_fill:
+                    continue
+                q = dict(q)
+                q["question"] = fresh_question
+                q["label"] = "Datos para llenar documentos"
+                q["field"] = "quality.fill.review"
+                q["field_target"] = "quality.fill.review"
+                q["type"] = "quality_validation_blocking"
+                kept_fill = True
+            updated.append(q)
+        return updated
 
     # =========================================================================
     # TAREA 6: Confirmación HITL para licitaciones sin importe base
@@ -10450,11 +10795,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
 
         from app.services.economic_price_file_import import import_economic_prices_from_file
 
-        eco_n = self._count_economic_price_pending(
-            list(session_state.get("pending_questions") or [])
+        pending_list = list(session_state.get("pending_questions") or [])
+        eco_n = self._count_economic_price_pending(pending_list)
+        has_price_source_pending = any(
+            str(q.get("field") or "").strip() == "economic_price_source"
+            or str(q.get("input_mode") or "").strip().lower() == "price_source"
+            for q in pending_list
         )
         blocks = await self._ensure_capture_matrix_blocks(session_id, session_state)
-        if eco_n <= 0 and not blocks:
+        if eco_n <= 0 and not blocks and not has_price_source_pending:
             return None
 
         doc = None
@@ -10490,6 +10839,126 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             )
 
         suffix = Path(file_path).suffix.lower()
+        if suffix in (".docx",):
+            from app.services.document_docx_ingest import process_docx_document
+            from app.services.economic_tabular_ingest_sync import (
+                filter_reliable_pricing_rows,
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            try:
+                await process_docx_document(
+                    self.context_manager.memory,
+                    session_id,
+                    str(doc_id),
+                    file_path,
+                    filename,
+                )
+            except Exception as proc_exc:
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=(
+                        f"No pude leer tablas de precios en **{filename or 'el DOCX'}**. "
+                        f"Detalle: {str(proc_exc)[:200]}"
+                    ),
+                    confianza="Media",
+                    tipo="clarification_needed",
+                    intake_active=True,
+                )
+
+            sync = await sync_economic_pending_after_tabular_ingest(
+                self.context_manager.memory, session_id
+            )
+            fresh = await self.context_manager.memory.get_session(session_id) or session_state
+            rows = await self.context_manager.memory.get_line_items_for_session(session_id)
+            reliable = filter_reliable_pricing_rows(rows or [])
+            n_rel = len(reliable)
+            if n_rel <= 0:
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=(
+                        f"Recibí **{filename or 'el archivo'}**, pero no detecté precios unitarios "
+                        "en tablas del documento. Si es plantilla vacía, completa los importes o "
+                        "adjunta un Excel con columnas de concepto y precio."
+                    ),
+                    confianza="Media",
+                    tipo="clarification_needed",
+                    intake_active=bool(fresh.get("pending_questions")),
+                )
+            cleared = bool(sync.get("cleared_price_source"))
+            tail = (
+                " Ya quité el bloqueo de «fuente de precios» pendiente."
+                if cleared
+                else ""
+            )
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=(
+                    f"Listo. Extraje **{n_rel}** partida(s) con precio desde **{filename or 'tu DOCX'}**."
+                    f"{tail}\n\n"
+                    "Puedes escribir **generar propuesta económica** o usar **Revalidar** arriba."
+                ),
+                confianza="Alta",
+                tipo="data_saved",
+                intake_active=bool(fresh.get("pending_questions")),
+            )
+
+        if suffix in (".xlsx", ".xls") and has_price_source_pending and not blocks:
+            from app.services.document_excel_ingest import process_excel_document
+            from app.services.economic_tabular_ingest_sync import (
+                filter_reliable_pricing_rows,
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            try:
+                await process_excel_document(
+                    self.context_manager.memory,
+                    session_id,
+                    str(doc_id),
+                    file_path,
+                    filename,
+                )
+            except Exception as proc_exc:
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=(
+                        f"No pude leer precios en **{filename or 'el Excel'}**. "
+                        f"Detalle: {str(proc_exc)[:200]}"
+                    ),
+                    confianza="Media",
+                    tipo="clarification_needed",
+                    intake_active=True,
+                )
+            sync = await sync_economic_pending_after_tabular_ingest(
+                self.context_manager.memory, session_id
+            )
+            fresh = await self.context_manager.memory.get_session(session_id) or session_state
+            rows = await self.context_manager.memory.get_line_items_for_session(session_id)
+            reliable = filter_reliable_pricing_rows(rows or [])
+            if reliable:
+                cleared = bool(sync.get("cleared_price_source"))
+                tail = (
+                    " Ya quité el bloqueo de «fuente de precios» pendiente."
+                    if cleared
+                    else ""
+                )
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=(
+                        f"Listo. Extraje **{len(reliable)}** partida(s) con precio desde "
+                        f"**{filename or 'tu Excel'}**.{tail}\n\n"
+                        "Puedes escribir **generar propuesta económica** o usar **Revalidar** arriba."
+                    ),
+                    confianza="Alta",
+                    tipo="data_saved",
+                    intake_active=bool(fresh.get("pending_questions")),
+                )
+
         if suffix not in (".xlsx", ".xls", ".csv", ".tsv", ".txt"):
             return None
 

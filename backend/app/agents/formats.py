@@ -20,8 +20,11 @@ from app.services.document_fill_quality_gate import (
     detect_cross_tender_marker,
     validate_generated_documents_fill,
 )
-from app.services.validation_service import validation_mapping_service
-from app.core.formats_pilot_slots import build_formats_pilot_missing_entries
+from app.services.document_fill_ux_messages import build_fill_validation_event
+from app.core.formats_pilot_slots import (
+    build_formats_pilot_missing_entries,
+    is_usable_profile_field_value,
+)
 from app.core.observability import get_logger
 from app.services.document_traceability import (
     attach_traceability,
@@ -29,11 +32,15 @@ from app.services.document_traceability import (
     safe_file_sha256,
 )
 from app.utils.doc_formatting import (
-    ANTI_PLACEHOLDER_PROMPT_RULE, 
+    ANTI_PLACEHOLDER_PROMPT_RULE,
+    CONCURSANTE_LEXICON_SYSTEM_RULE,
+    LEGAL_AUTHORIZATION_SYSTEM_RULE,
     strip_markdown_for_docx,
     is_markdown_table_line,
-    parse_markdown_table
+    parse_markdown_table,
 )
+from app.services.document_date_resolver import resolve_addressee_lines, resolve_document_date
+from app.services.document_contamination_gate import is_apu_document, strip_llm_meta_leaks
 from app.core.template_engine import LegalTemplateEngine, TemplateIntegrityError
 from app.services.resilient_llm import ResilientLLMClient
 from app.services.vector_service import VectorDbServiceClient
@@ -42,22 +49,27 @@ from app.config.settings import settings as app_settings
 logger = get_logger(__name__)
 
 
-def _formats_inventory_doc_exists(output_dir: str, canonical_id: str) -> bool:
-    """Idempotencia: no regenerar si ya existe .docx que incluye el canonical_id."""
+def _formats_inventory_doc_path(output_dir: str, canonical_id: str) -> str:
+    """Ruta del .docx ya materializado para este canonical_id, si existe."""
     if not canonical_id or not os.path.isdir(output_dir):
-        return False
+        return ""
     token = re.sub(r"[^\w\-]+", "_", canonical_id).strip("_").lower()
     if len(token) < 3:
-        return False
+        return ""
     try:
         for fn in os.listdir(output_dir):
             if not fn.endswith(".docx") or fn.startswith("~$"):
                 continue
             if token in fn.lower():
-                return True
+                return os.path.join(output_dir, fn)
     except OSError:
-        return False
-    return False
+        return ""
+    return ""
+
+
+def _formats_inventory_doc_exists(output_dir: str, canonical_id: str) -> bool:
+    """Idempotencia: no regenerar si ya existe .docx que incluye el canonical_id."""
+    return bool(_formats_inventory_doc_path(output_dir, canonical_id))
 
 
 def _merge_document_inventory_legal(
@@ -131,6 +143,17 @@ def _merge_document_inventory_legal(
         )
 
 
+def _resolve_metadata_domicilio(metadata: Dict[str, Any]) -> str:
+    """Domicilio usable desde metadata o pie de página (sin S/D ni vacíos)."""
+    raw = str(metadata.get("domicilio") or "").strip()
+    if is_usable_profile_field_value(raw):
+        return raw
+    footer_text = str(metadata.get("footer_text") or "")
+    if "Domicilio:" in footer_text:
+        raw = footer_text.split("Domicilio:", 1)[1].strip()
+    return raw if is_usable_profile_field_value(raw) else ""
+
+
 def _sanitize_legal_content(
     content: str,
     *,
@@ -141,7 +164,8 @@ def _sanitize_legal_content(
     Sanea placeholders frecuentes de plantillas legales antes de guardar DOCX.
 
     Regla: ningún documento final debe contener marcadores entre corchetes ni
-    tokens genéricos tipo "N/A" como dato principal.
+    tokens genéricos tipo "N/A" como dato principal. No inyecta el token
+    «Dato pendiente…» (el gate de llenado lo trataría como bloqueo).
     """
     text = (content or "").strip()
     if not text:
@@ -151,30 +175,47 @@ def _sanitize_legal_content(
     representante = str(metadata.get("representante") or "representante legal").strip()
     rfc = str(metadata.get("rfc") or "").strip()
     fecha = str(metadata.get("fecha") or "").strip()
-    domicilio = ""
-    footer_text = str(metadata.get("footer_text") or "")
-    if "Domicilio:" in footer_text:
-        domicilio = footer_text.split("Domicilio:", 1)[1].strip()
+    hora = str(metadata.get("hora") or datetime.now().strftime("%H:%M")).strip()
+    domicilio = _resolve_metadata_domicilio(metadata)
     ciudad = domicilio.split(",")[0].strip() if domicilio else "México"
+    pending_slot = "________________________"
 
     replacements = {
-        "[Dirección de la empresa]": domicilio or "Dato pendiente de confirmar por el representante legal.",
-        "[Ciudad, Estado, Código Postal]": domicilio or "Dato pendiente de confirmar por el representante legal.",
-        "[Fecha actual]": fecha or "Dato pendiente de confirmar por el representante legal.",
-        "[Fecha]": fecha or "Dato pendiente de confirmar por el representante legal.",
+        "[Dirección de la empresa]": domicilio or pending_slot,
+        "[Ciudad, Estado, Código Postal]": domicilio or pending_slot,
+        "[Fecha actual]": fecha or pending_slot,
+        "[Fecha]": fecha or pending_slot,
+        "[Hora]": hora,
         "[Nombre del Representante Legal/Apoderado]": representante,
         "[Nombre del Representante Legal o Destinatario]": representante,
-        "[Nombre del Destinatario]": "Comité de Adquisiciones y Dirección de Obras Públicas",
+        "[Nombre del Destinatario]": str(
+            metadata.get("destinatario") or "A QUIEN CORRESPONDA:"
+        ).split("\n")[0].strip()
+        or "A QUIEN CORRESPONDA:",
         "[Nombre completo del concursante]": razon_social,
         "[Número de Licitación o Nombre del Proceso]": session_id,
     }
     for src, dst in replacements.items():
         text = text.replace(src, dst)
 
+    # Paginación y plazos típicos de plantillas (evita sustituir por texto bloqueante).
+    text = re.sub(
+        r"\[?\s*p[aá]gina\s+[^\]\n]{0,80}\]?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\[[^\]]{0,120}\bmeses\b[^\]]*\]",
+        "12 (doce) meses",
+        text,
+        flags=re.IGNORECASE,
+    )
+
     # Reemplazos semánticos de fallback comunes.
-    text = re.sub(r"\bRFC:\s*N/A\b", f"RFC: {rfc or 'Dato pendiente de confirmar por el representante legal.'}", text, flags=re.I)
+    text = re.sub(r"\bRFC:\s*N/A\b", f"RFC: {rfc or pending_slot}", text, flags=re.I)
     text = re.sub(r"\bRepresentante\s+Legal:\s*N/A\b", f"Representante Legal: {representante}", text, flags=re.I)
-    text = re.sub(r"\bLugar y fecha:\s*N/A\b", f"Lugar y fecha: {ciudad}, {fecha}", text, flags=re.I)
+    text = re.sub(r"\bLugar y fecha:\s*N/A\b", f"Lugar y fecha: {ciudad}, {fecha or pending_slot}", text, flags=re.I)
     if domicilio:
         text = text.replace(
             "domicilio en Dato pendiente de confirmar por el representante legal.",
@@ -188,12 +229,9 @@ def _sanitize_legal_content(
             flags=re.I,
         )
 
-    # Última barrera: cualquier placeholder restante entre [] o {} se neutraliza.
-    text = re.sub(
-        r"\[[^\]]+\]|\{[^}]+\}",
-        "Dato pendiente de confirmar por el representante legal.",
-        text,
-    )
+    # Corchetes/llaves residuales → ranura visible (HITL), no token que dispare gate.
+    text = re.sub(r"\[[^\]]+\]|\{[^}]+\}", pending_slot, text)
+    text = re.sub(r"\s{2,}", " ", text)
     return text
 
 
@@ -229,6 +267,7 @@ def _build_formats_contenido_nacional_text(
     fecha_es: str,
     zonas: List[str],
     porcentaje: str,
+    destinatario: str = "",
 ) -> str:
     zonas_txt = ", ".join(zonas) if zonas else "correspondientes a la propuesta presentada"
     if len(zonas) == 1:
@@ -239,12 +278,11 @@ def _build_formats_contenido_nacional_text(
         zona_clause = "la zona en que participo"
     porcentaje_txt = porcentaje or "65"
     proc_ref = tender_name.strip() or session_id.replace("_", " ").upper()
+    dest_block = (destinatario or "A QUIEN CORRESPONDA:").strip()
     return (
         "MANIFESTACIÓN DE NACIONALIDAD MEXICANA, PRODUCCIÓN EN MÉXICO Y GRADO DE CONTENIDO NACIONAL\n\n"
         f"{fecha_es}\n\n"
-        "Comité de Adquisiciones, Arrendamientos y Contratación\n"
-        "de Servicios de la Administración Pública Estatal\n"
-        "PRESENTE.-\n\n"
+        f"{dest_block}\n\n"
         f"Me refiero al procedimiento de contratación identificado como {proc_ref}, "
         f"en el que mi representada, la empresa {razon_social}, RFC {rfc}, participa a través de la propuesta contenida en el presente sobre.\n\n"
         "Sobre el particular y en términos de lo previsto por el Acuerdo por el que se establecen las reglas para la determinación "
@@ -266,17 +304,34 @@ def _build_formats_contenido_nacional_text(
 def _pick_reference_service_price(user_inputs: Dict[str, Any]) -> Optional[float]:
     candidates: List[tuple[str, float]] = []
 
+    def _try_float(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+            return parsed if parsed > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     def _collect_from_mapping(mapping: Any) -> None:
         if not isinstance(mapping, dict):
             return
         for key, value in mapping.items():
             k = str(key or "")
-            if not k.startswith("price_struct_service_"):
+            if k.startswith("price_struct_service_"):
+                parsed = _try_float(value)
+                if parsed is not None:
+                    candidates.append((k, parsed))
                 continue
-            try:
-                candidates.append((k, float(value)))
-            except (TypeError, ValueError):
-                continue
+            if re.search(r"(tarifa|precio|unit_price|price)", k, flags=re.IGNORECASE):
+                parsed = _try_float(value)
+                if parsed is not None:
+                    candidates.append((k, parsed))
+
+    for direct_key in ("tarifa_mensual", "tarifa_mensual_referencia", "reference_unit_price"):
+        parsed = _try_float(user_inputs.get(direct_key))
+        if parsed is not None:
+            return parsed
 
     _collect_from_mapping(user_inputs.get("concept_prices"))
     _collect_from_mapping(user_inputs)
@@ -284,6 +339,31 @@ def _pick_reference_service_price(user_inputs: Dict[str, Any]) -> Optional[float
         return None
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1]
+
+
+async def _pick_reference_service_price_from_line_items(
+    memory: Any,
+    session_id: str,
+) -> Optional[float]:
+    """Fallback: primera partida tabular con precio unitario > 0."""
+    try:
+        rows = await memory.get_line_items_for_session(session_id) or []
+    except Exception:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("unit_price", "precio_unitario", "price", "tarifa_mensual", "total_price"):
+            parsed = None
+            try:
+                val = row.get(key)
+                if val not in (None, ""):
+                    parsed = float(val)
+            except (TypeError, ValueError):
+                parsed = None
+            if parsed is not None and parsed > 0:
+                return parsed
+    return None
 
 
 def _zones_from_economic_user_inputs(user_inputs: Dict[str, Any]) -> List[str]:
@@ -309,6 +389,70 @@ def _zones_from_economic_user_inputs(user_inputs: Dict[str, Any]) -> List[str]:
 def _mirror_source_has_cross_tender_marker(ref: Any, session_hint: str) -> bool:
     text = str(getattr(ref, "extracted_text", "") or "")
     return bool(detect_cross_tender_marker([text], session_hint))
+
+
+def _build_panel_authoritative_reqs(panel_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Cola «generar» alineada 1:1 con el panel UI (sin dedupe contra compliance).
+
+    Restaura cantidad y nombres de anexos cuando la lista de compliance quedó
+    demasiado filtrada.
+    """
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+    from app.services.document_deliverable_filter import is_economic_writer_domain
+
+    panel_reqs: List[Dict[str, Any]] = []
+    panel_seen: Set[str] = set()
+    for bucket in (
+        "sobre_1_tecnico",
+        "sobre_2_economico",
+        "requisitos_legales",
+        "otros_requisitos_criticos",
+    ):
+        for row in panel_payload.get(bucket) or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("tipo_accion_final") or row.get("tipo") or "") != "generar":
+                continue
+            nombre_panel = str(
+                row.get("nombre_canonico") or row.get("nombre") or ""
+            ).strip()
+            if not nombre_panel:
+                continue
+            nombre_low = nombre_panel.lower()
+            if re.search(
+                r"modelo.*propuesta\s+t[eé]cnica|propuesta\s+t[eé]cnica.*modelo",
+                nombre_low,
+            ):
+                continue
+            desc_panel = str(row.get("descripcion") or "")
+            snippet_panel = str(
+                row.get("snippet_representativo") or row.get("snippet") or ""
+            )
+            if is_economic_writer_domain(nombre_panel, desc_panel, snippet_panel):
+                continue
+            if is_apu_document(nombre_panel, desc_panel, ""):
+                continue
+            dedupe_key = pliego_format_dedupe_key(nombre_panel)
+            if dedupe_key in panel_seen:
+                continue
+            panel_seen.add(dedupe_key)
+            safe_id = re.sub(r"[^\w-]", "_", dedupe_key)[:48].strip("_") or "anexo"
+            panel_reqs.append(
+                {
+                    "id": f"panel_{safe_id}",
+                    "nombre": nombre_panel,
+                    "descripcion": desc_panel,
+                    "snippet": snippet_panel,
+                    "tipo_accion": "generar",
+                    "from_document_inventory": True,
+                    "inventory_synthetic": True,
+                    "evidence_match": True,
+                    "from_formats_panel": True,
+                    "panel_dedupe_key": dedupe_key,
+                }
+            )
+    return panel_reqs
 
 
 def _should_block_by_quality_gate(
@@ -542,7 +686,9 @@ class FormatsAgent(BaseAgent):
             "Nunca escribas 'Dato pendiente de confirmar', nunca dejes blancos reales y nunca cites una institución "
             "o convocante distinta a la del procedimiento actual. Si no tienes un dato variable, omite la cláusula "
             "o devuelve solo el texto sustentado por contexto real. "
-            f"{ANTI_PLACEHOLDER_PROMPT_RULE}"
+            f"{ANTI_PLACEHOLDER_PROMPT_RULE} "
+            f"{LEGAL_AUTHORIZATION_SYSTEM_RULE} "
+            f"{CONCURSANTE_LEXICON_SYSTEM_RULE}"
         )
 
         # Buscar logo real
@@ -559,22 +705,63 @@ class FormatsAgent(BaseAgent):
             "July": "julio", "August": "agosto", "September": "septiembre",
             "October": "octubre", "November": "noviembre", "December": "diciembre"
         }
-        _fecha_f = datetime.now().strftime("%d de %B de %Y")
-        for _en, _es in _MESES_F.items():
-            _fecha_f = _fecha_f.replace(_en, _es)
+        session_state = dict(context.get("session_state", {}) or {})
+        if not str(session_state.get("bases_corpus_hint") or "").strip():
+            try:
+                cal_res = self.vector_db.query_texts(
+                    session_id,
+                    "recepción de propuestas calendario evento fecha presentación apertura proposiciones",
+                    n_results=20,
+                )
+                cal_docs = cal_res.get("documents") or []
+                session_state["bases_corpus_hint"] = "\n".join(
+                    d for d in cal_docs if d
+                )[:120000]
+            except Exception as exc:
+                logger.warning(
+                    "formats_bases_corpus_hint_failed",
+                    session_id=session_id,
+                    error=str(exc)[:120],
+                )
+        _date_info = resolve_document_date(session_state)
+        _fecha_f = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
 
+        _dom_fiscal = master_profile.get("domicilio_fiscal") or master_profile.get("domicilio") or ""
+        _dom_footer = _dom_fiscal if is_usable_profile_field_value(_dom_fiscal) else "S/D"
+        from app.services.administrative_letter_clauses import (
+            is_invalid_letter_lugar,
+            resolve_document_ciudad,
+            resolve_letter_session_metadata,
+        )
+
+        _letter_meta = resolve_letter_session_metadata(session_state)
+        _ciudad = resolve_document_ciudad(master_profile, str(_dom_fiscal))
         doc_metadata = {
             "logo_path": logo_path,
             "tender_name": session_id.replace("_", " ").upper(),
             "fecha": _fecha_f,
+            "fecha_corta": _date_info.get("fecha_corta", ""),
+            "deadline_dt_iso": _date_info.get("deadline_dt"),
+            "date_source": _date_info.get("source", ""),
+            "hora": datetime.now().strftime("%H:%M"),
             "empresa": razon_social,
             "rfc": rfc,
             "representante": representante,
-            "footer_text": f"{razon_social} | RFC: {rfc} | Domicilio: {master_profile.get('domicilio_fiscal', 'S/D')}"
+            "domicilio": _dom_fiscal if is_usable_profile_field_value(_dom_fiscal) else "",
+            "footer_text": f"{razon_social} | RFC: {rfc} | Domicilio: {_dom_footer}",
+            "destinatario": _letter_meta.get("destinatario")
+            or resolve_addressee_lines(
+                session_state, agent_input.triage_context if hasattr(agent_input, "triage_context") else None
+            ),
+            "convocante": _letter_meta.get("convocante", ""),
+            "concurso_label": _letter_meta.get("concurso_label", ""),
+            "ciudad": _ciudad,
+            "formal_closing": True,
+            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+            "materialization_provenance": "llm_controlled",
         }
 
         # --- Hito 3.2: Inyectar Overrides Económicos ---
-        session_state = context.get("session_state", {})
         user_inputs = session_state.get("economic_user_inputs") or {}
         econ_parts = []
         for k, v in user_inputs.items():
@@ -720,6 +907,20 @@ class FormatsAgent(BaseAgent):
             if is_economic_writer_domain(raw_name_u, desc_u, str(req.get("snippet") or "")):
                 seen_ids.add(rid)
                 continue
+            if re.match(r"^AD[-_]?\d+", rid, re.I):
+                integridad_sig = normalize_deliverable_key(
+                    "declaracion integridad", "administrativo"
+                )
+                if integridad_sig in seen_sigs or any(
+                    "integridad" in s for s in seen_sigs
+                ):
+                    seen_ids.add(rid)
+                    logger.info(
+                        "formats_compliance_integridad_deduped",
+                        session_id=session_id,
+                        rid=rid,
+                    )
+                    continue
 
             blob_ids = f"{rid} {raw_name_u} {desc_u}".upper()
 
@@ -771,6 +972,60 @@ class FormatsAgent(BaseAgent):
             seen_sigs.add(sig)
             reqs_to_process.append(req)
             seen_ids.add(rid)
+
+        # Panel consolidado (misma fuente que UI): anexos «generar» con ancla en bases.
+        panel_payload: Dict[str, Any] = {}
+        panel_expected = 0
+        try:
+            from app.services.document_candidate_list_service import (
+                build_formats_panel_consolidated,
+            )
+
+            panel_payload = await build_formats_panel_consolidated(
+                self.context_manager.memory, session_id, session_state
+            )
+            from app.services.formats_coverage_gate import count_panel_admin_generar
+
+            panel_expected = count_panel_admin_generar(panel_payload)
+            panel_authoritative = _build_panel_authoritative_reqs(panel_payload)
+            if panel_expected >= 3 and panel_authoritative:
+                reqs_to_process = panel_authoritative
+                action_counts["generar"] = len(panel_authoritative)
+                logger.info(
+                    "formats_panel_authoritative_queue",
+                    session_id=session_id,
+                    count=len(panel_authoritative),
+                    panel_expected=panel_expected,
+                )
+            else:
+                panel_added = 0
+                for req_panel in panel_authoritative:
+                    sig_panel = normalize_deliverable_key(
+                        str(req_panel.get("nombre") or ""), "administrativo"
+                    )
+                    if sig_panel in seen_sigs:
+                        continue
+                    seen_sigs.add(sig_panel)
+                    rid_panel = str(req_panel.get("id") or "")
+                    if rid_panel in seen_ids:
+                        continue
+                    seen_ids.add(rid_panel)
+                    reqs_to_process.append(req_panel)
+                    panel_added += 1
+                    action_counts["generar"] = action_counts.get("generar", 0) + 1
+                if panel_added:
+                    logger.info(
+                        "formats_panel_generables_merged",
+                        session_id=session_id,
+                        added=panel_added,
+                        total=len(reqs_to_process),
+                    )
+        except Exception as panel_exc:
+            logger.warning(
+                "formats_panel_merge_failed",
+                session_id=session_id,
+                error=str(panel_exc)[:200],
+            )
 
         gate = _should_block_by_quality_gate(
             total_items=total_candidates,
@@ -874,20 +1129,12 @@ class FormatsAgent(BaseAgent):
                 continue
             if mirror_enabled and ref and ext in ("doc", "docx", "xls", "xlsx"):
                 if _mirror_source_has_cross_tender_marker(ref, session_hint):
-                    if bool(req.get("from_session_catalog")):
-                        logger.warning(
-                            "formats_catalog_cross_tender_skip_llm",
-                            session_id=session_id,
-                            requested=q,
-                            source_filename=ref.filename,
-                        )
-                        continue
-                    fallback_req = dict(req)
-                    fallback_req["archivo_fuente"] = ""
-                    fallback_req["cross_tender_mirror_skipped"] = True
-                    fallback_req["mirror_conflict_source"] = ref.filename
-                    llm_queue.append(fallback_req)
-                    continue
+                    logger.warning(
+                        "formats_cross_tender_mirror_proceeding",
+                        session_id=session_id,
+                        requested=q,
+                        source_filename=ref.filename,
+                    )
                 mirror_queue.append((req, ref))
             else:
                 llm_queue.append(req)
@@ -904,6 +1151,8 @@ class FormatsAgent(BaseAgent):
             mirror_queue = mirror_queue[:mirror_max]
 
         max_formats = int(getattr(settings, "FORMATS_MAX_GENERABLE_DOCS", 18) or 18)
+        if max_formats > 0 and panel_expected > max_formats:
+            max_formats = min(max(panel_expected + 5, max_formats), 60)
         if max_formats > 0 and len(llm_queue) > max_formats:
             llm_queue = llm_queue[:max_formats]
 
@@ -918,6 +1167,22 @@ class FormatsAgent(BaseAgent):
         )
 
         generated_files = []
+        generation_skipped: List[Dict[str, Any]] = []
+        initial_mirror_count = len(mirror_queue)
+        initial_llm_count = len(llm_queue)
+
+        def _record_generation_skip(
+            nombre: str,
+            reason: str,
+            **extra: Any,
+        ) -> None:
+            generation_skipped.append(
+                {
+                    "nombre": str(nombre or "")[:200],
+                    "reason": reason,
+                    **extra,
+                }
+            )
         zonas_detectadas: list[str] = []
         zone_sources: List[str] = []
         for req_item in list(mirror_queue) + [(item, None) for item in llm_queue]:
@@ -951,6 +1216,12 @@ class FormatsAgent(BaseAgent):
             if z not in zonas_detectadas:
                 zonas_detectadas.append(z)
         zonas_ofertadas = ", ".join(zonas_detectadas[:-1]) + (" y " + zonas_detectadas[-1] if len(zonas_detectadas) > 1 else (zonas_detectadas[0] if zonas_detectadas else ""))
+        tarifa_ref = _pick_reference_service_price(user_inputs)
+        if tarifa_ref is None:
+            tarifa_ref = await _pick_reference_service_price_from_line_items(
+                self.context_manager.memory,
+                session_id,
+            )
         profile_fill = {
             "rfc": rfc,
             "razon_social": razon_social,
@@ -960,7 +1231,7 @@ class FormatsAgent(BaseAgent):
             "licitacion": doc_metadata.get("tender_name") or session_id,
             "zonas_ofertadas": zonas_ofertadas,
             "numero_referencia": doc_metadata.get("tender_name") or session_id,
-            "tarifa_mensual_referencia": _pick_reference_service_price(user_inputs),
+            "tarifa_mensual_referencia": tarifa_ref,
         }
         contenido_nacional_pct = _infer_formats_contenido_nacional_pct(self.vector_db, session_id)
 
@@ -990,7 +1261,24 @@ class FormatsAgent(BaseAgent):
                 out_ext = ".docx"
             output_dir = _mirror_output_dir(req)
             filepath = os.path.join(output_dir, f"{filename}{out_ext}")
-            if _formats_inventory_doc_exists(output_dir, rid):
+            existing_path = _formats_inventory_doc_path(output_dir, rid)
+            if existing_path:
+                generated_files.append(
+                    attach_traceability(
+                        {
+                            "nombre": raw_name,
+                            "ruta": existing_path,
+                            "status": "REUSED",
+                            "tipo": str(req.get("tipo") or "administrativo"),
+                            "template_id": None,
+                        },
+                        source_doc_id=str(ref.doc_id or req.get("source_doc_id") or "") or None,
+                        source_filename=ref.filename,
+                        source_path=ref.file_path,
+                        materialization_route="mirror_reused",
+                        output_hash=safe_file_sha256(existing_path),
+                    )
+                )
                 continue
             try:
                 normalized_name = _normalize_formats_blob(raw_name or ref.filename)
@@ -1004,6 +1292,7 @@ class FormatsAgent(BaseAgent):
                         fecha_es=doc_metadata.get("fecha") or "",
                         zonas=zonas_detectadas,
                         porcentaje=contenido_nacional_pct,
+                        destinatario=doc_metadata.get("destinatario") or "",
                     )
                     _save_docx(raw_name, contenido_text, filepath, doc_metadata)
                     meta = {
@@ -1060,10 +1349,43 @@ class FormatsAgent(BaseAgent):
         for req in llm_queue:
             rid = str(req.get("id", "")).strip().replace(".", "_")
             raw_name = req.get('nombre', 'Documento')
-            # Usar nombre completo (hasta 60 chars) para evitar colisiones de nombre de archivo
-            safe_name = re.sub(r'[^\w\s-]', '', raw_name.replace(' ', '_'))[:60].strip('_')
-            filename = f"{rid}_{safe_name}" if rid else safe_name
-            filename = re.sub(r'_+', '_', filename).strip('_')
+            if is_apu_document(raw_name, str(req.get("descripcion") or ""), rid):
+                logger.info(
+                    "formats_apu_deferred_to_economic_writer",
+                    session_id=session_id,
+                    req_id=rid,
+                    req_name=raw_name[:80],
+                )
+                continue
+            safe_name = re.sub(r"[^\w\s-]", "", raw_name.replace(" ", "_"))[:60].strip("_")
+            if rid and not str(rid).startswith("panel_"):
+                filename = f"{rid}_{safe_name}"
+            else:
+                filename = safe_name or "documento"
+            filename = re.sub(r"_+", "_", filename).strip("_")
+            output_dir_early = _mirror_output_dir(req)
+            existing_path = _formats_inventory_doc_path(output_dir_early, rid)
+            if existing_path:
+                _display = raw_name if str(raw_name).lower().endswith(".docx") else f"{raw_name}.docx"
+                generated_files.append(
+                    attach_traceability(
+                        {
+                            "nombre": raw_name,
+                            "source_filename": str(req.get("archivo_fuente") or _display).strip() or _display,
+                            "ruta": existing_path,
+                            "status": "REUSED",
+                            "tipo": str(req.get("tipo") or "administrativo"),
+                            "template_id": None,
+                        },
+                        source_doc_id=str(req.get("source_doc_id") or "") or None,
+                        materialization_route="llm_reused",
+                        output_hash=safe_file_sha256(existing_path),
+                    )
+                )
+                continue
+            display_title = raw_name[:120] if str(rid).startswith("panel_") else (
+                f"{rid} - {raw_name}"[:120] if rid else raw_name[:120]
+            )
             
             template_id = self._template_id_for_requirement(req)
             req_nombre = raw_name
@@ -1083,9 +1405,12 @@ class FormatsAgent(BaseAgent):
                     context_type = "ESPEJO COMPLETO (TEMPLATE OFICIAL)"
                 if not req_context:
                     rag_query = f"{req_nombre} {req_desc} {req_snippet}".strip()
-                    req_context_res = self.vector_db.query_texts(session_id, rag_query, n_results=5)
+                    rag_n = 8 if req.get("inventory_synthetic") else 5
+                    req_context_res = self.vector_db.query_texts(
+                        session_id, rag_query, n_results=rag_n
+                    )
                     docs = req_context_res.get("documents", []) if req_context_res else []
-                    req_context = "\n".join(d for d in docs[:4] if d and d.strip())
+                    req_context = "\n".join(d for d in docs[:6] if d and d.strip())
             except Exception as _rag_err:
                 logger.warning(
                     "formats_context_retrieval_failed",
@@ -1101,18 +1426,38 @@ class FormatsAgent(BaseAgent):
                 if req_context
                 else ""
             )
+            snippet_block = ""
+            if req_snippet and len(req_snippet.strip()) >= 20:
+                snippet_block = (
+                    f"\nFRAGMENTO LITERAL DE BASES (respeta estructura y cláusulas):\n"
+                    f"{req_snippet.strip()[:2000]}\n"
+                )
             prompt = (
                 f"Genera el contenido legal oficial para el requisito {req.get('id')}: {req_nombre}\n"
                 f"Descripción: {req_desc}\nEmpresa: {razon_social}\n"
                 f"Representante: {representante}\nRFC: {rfc}\n"
                 f"Domicilio: {master_profile.get('domicilio_fiscal', '')}\n"
-                f"{bases_context_block}\n"
-                f"{economic_block}\n{hint_line}"
+                f"{snippet_block}{bases_context_block}\n"
+                f"{economic_block}\n{hint_line}\n"
+                "OBLIGATORIO: Redacta como concursante (quien suscribe / mi representada). "
+                "Incluye al menos un párrafo con «bajo protesta de decir verdad» o «manifiesto». "
+                "No devuelvas solo títulos ni encabezados."
             )
 
             content = ""
             materialization_route = "generate_controlled"
-            if template_id:
+            from app.services.administrative_letter_clauses import try_build_clause_markdown
+
+            clause_body = try_build_clause_markdown(
+                req_label=raw_name,
+                master_profile=master_profile,
+                doc_metadata={**doc_metadata, "req_snippet": req_snippet or req_desc},
+                req_snippet=req_snippet or req_desc,
+            )
+            if clause_body and not template_id:
+                content = clause_body
+                materialization_route = "deterministic_clause"
+            elif template_id:
                 tpl_data = self._template_data(session_id, master_profile, doc_metadata, user_inputs)
                 content = self.template_engine.render(template_id, tpl_data)
                 if not self.template_engine.verify_integrity(content, template_id):
@@ -1129,12 +1474,14 @@ class FormatsAgent(BaseAgent):
                         req_name=raw_name,
                         error=resp.error,
                     )
+                    _record_generation_skip(raw_name, "llm_generation_failed", req_id=rid)
                     continue
                 llm_content = (resp.response or "").strip()
                 if llm_content:
-                    content = llm_content
+                    content = strip_llm_meta_leaks(llm_content)
             if not content.strip():
                 logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
+                _record_generation_skip(raw_name, "llm_empty_response", req_id=rid)
                 continue
 
             content = _sanitize_legal_content(
@@ -1142,10 +1489,91 @@ class FormatsAgent(BaseAgent):
                 session_id=session_id,
                 metadata=doc_metadata,
             )
-            
-            filepath = os.path.join(_mirror_output_dir(req), f"{filename}.docx")
+
+            from app.services.document_body_quality import is_substantive_markdown
+
+            if not template_id and materialization_route != "deterministic_clause" and not is_substantive_markdown(content):
+                retry_prompt = (
+                    f"{prompt}\n\nREINTENTO OBLIGATORIO: Redacta el cuerpo legal completo "
+                    "(declaración o carta bajo protesta de decir verdad) con al menos tres "
+                    "párrafos sustantivos. Debe aparecer literalmente «bajo protesta de decir verdad» "
+                    "o «manifiesto». No devuelvas solo encabezados ni líneas vacías."
+                )
+                resp_retry = await llm.generate(
+                    prompt=retry_prompt,
+                    system_prompt=system_prompt,
+                    correlation_id=correlation_id,
+                )
+                if resp_retry.success and (resp_retry.response or "").strip():
+                    content = strip_llm_meta_leaks((resp_retry.response or "").strip())
+                    content = _sanitize_legal_content(
+                        content,
+                        session_id=session_id,
+                        metadata=doc_metadata,
+                    )
+            if not template_id and materialization_route != "deterministic_clause" and not is_substantive_markdown(content):
+                from app.services.legal_document_fallback import (
+                    build_administrative_fallback_markdown,
+                )
+
+                content = build_administrative_fallback_markdown(
+                    req_nombre=raw_name,
+                    req_desc=req_desc,
+                    req_snippet=req_snippet,
+                    master_profile=master_profile,
+                    doc_metadata=doc_metadata,
+                    session_state=session_state,
+                )
+                logger.warning(
+                    "formats_insufficient_body_using_fallback",
+                    session_id=session_id,
+                    req_name=raw_name[:80],
+                    req_id=rid,
+                )
+
+            filepath = os.path.join(output_dir_early, f"{filename}.docx")
             try:
-                _save_docx(f"{rid} - {raw_name}", content, filepath, doc_metadata)
+                _save_docx(display_title, content, filepath, doc_metadata)
+                try:
+                    from docx import Document as DocxDocument
+
+                    from app.services.document_body_quality import (
+                        scan_materialized_doc_text,
+                    )
+
+                    post_paras = [
+                        (p.text or "").strip()
+                        for p in DocxDocument(filepath).paragraphs
+                        if (p.text or "").strip()
+                    ]
+                    shell_hit = scan_materialized_doc_text("\n".join(post_paras))
+                    if shell_hit and not template_id:
+                        from app.services.legal_document_fallback import (
+                            build_administrative_fallback_markdown,
+                        )
+
+                        fallback_body = build_administrative_fallback_markdown(
+                            req_nombre=raw_name,
+                            req_desc=req_desc,
+                            req_snippet=req_snippet,
+                            master_profile=master_profile,
+                            doc_metadata=doc_metadata,
+                            session_state=session_state,
+                        )
+                        os.remove(filepath)
+                        _save_docx(display_title, fallback_body, filepath, doc_metadata)
+                        logger.warning(
+                            "formats_post_save_shell_replaced_with_fallback",
+                            session_id=session_id,
+                            req_name=raw_name[:80],
+                            detail=shell_hit.get("detected_value"),
+                        )
+                except Exception as post_chk_exc:
+                    logger.warning(
+                        "formats_post_save_check_failed",
+                        session_id=session_id,
+                        error=str(post_chk_exc)[:120],
+                    )
                 _display = raw_name if str(raw_name).lower().endswith(".docx") else f"{raw_name}.docx"
                 generated_files.append(
                     attach_traceability(
@@ -1178,6 +1606,12 @@ class FormatsAgent(BaseAgent):
             "count": len(generated_files),
             "folder": admin_output_dir,
             "action_type_stats": action_counts,
+            "generation_skipped": generation_skipped,
+            "generation_expected": {
+                "panel_admin_generar": panel_expected,
+                "mirror_queue": initial_mirror_count,
+                "llm_queue": initial_llm_count,
+            },
             "materialization_metrics": build_materialization_metrics(
                 stage="formats",
                 documents=generated_files,
@@ -1192,31 +1626,33 @@ class FormatsAgent(BaseAgent):
                 "source": "formats_writer",
                 "confidence": 0.9,
                 "session_hint": session_hint,
+                "fecha_es": doc_metadata.get("fecha"),
+                "deadline_dt_iso": doc_metadata.get("deadline_dt_iso"),
             },
         )
         result_data["document_fill_quality_gate"] = fill_gate
         result_data["validation_events"] = [
-            validation_mapping_service.build_event(
-                error_type=it.get("error_type"),
-                context={
-                    "document_id": it.get("document_id"),
-                    "field_key": it.get("field_key"),
-                    "detected_value": it.get("detected_value"),
-                    "expected_rule": it.get("expected_rule"),
-                },
-                raw_message=f"Validación en {it.get('document_id')}: {it.get('field_key')}"
-            )
+            build_fill_validation_event(it, stage="formats")
             for it in (fill_gate.get("issues") or [])
+            if isinstance(it, dict)
         ]
         if not bool(fill_gate.get("validation_passed", True)):
+            from app.services.document_fill_ux_messages import (
+                build_fill_blocking_question,
+                pick_fill_gate_pending_label,
+            )
+
+            company_name = str(master_profile.get("razon_social") or "").strip()
+            human_question = build_fill_blocking_question(
+                "formats",
+                fill_gate.get("issues") or [],
+                company_name=company_name,
+            )
             missing = [
                 {
                     "field": "document_fill_quality_gate",
-                    "label": "Corregir llenado documental administrativo",
-                    "question": (
-                        "Se detectaron inconsistencias o placeholders en documentos administrativos generados. "
-                        "Corrige perfil/fuentes y vuelve a generar."
-                    ),
+                    "label": pick_fill_gate_pending_label(fill_gate.get("issues") or []),
+                    "question": human_question,
                     "document_hint": f"Gate llenado: {fill_gate.get('metrics')}",
                     "type": "document_fill_quality_gate_blocking",
                     "blocking_items": fill_gate.get("issues") or [],
@@ -1227,10 +1663,68 @@ class FormatsAgent(BaseAgent):
                 status=AgentStatus.WAITING_FOR_DATA,
                 agent_id=self.agent_id,
                 session_id=session_id,
-                message="Pausa por calidad de llenado documental administrativo.",
-                data={**result_data, "missing": missing},
+                message=human_question,
+                data={**result_data, "missing": missing, "stage": "formats"},
                 correlation_id=correlation_id,
             )
+
+        from app.services.formats_coverage_gate import evaluate_formats_stage_completeness
+
+        generated_count_for_gate = len(generated_files)
+        panel_expected_for_gate = panel_expected
+        try:
+            from app.services.delivery_coverage_report import build_delivery_coverage_report
+
+            cov = build_delivery_coverage_report(
+                session_id, session_state, session_documents
+            )
+            cov_summary = cov.get("summary") if isinstance(cov.get("summary"), dict) else {}
+            cov_generadas = int(cov_summary.get("generadas") or 0)
+            cov_esperadas = int(cov_summary.get("esperadas_generar") or 0)
+            if cov_esperadas >= 3:
+                panel_expected_for_gate = cov_esperadas
+                generated_count_for_gate = max(generated_count_for_gate, cov_generadas)
+        except Exception as cov_exc:
+            logger.warning(
+                "formats_coverage_report_for_gate_failed",
+                session_id=session_id,
+                error=str(cov_exc)[:160],
+            )
+
+        completeness_block = evaluate_formats_stage_completeness(
+            generated_count=generated_count_for_gate,
+            mirror_queue_size=initial_mirror_count,
+            llm_queue_size=initial_llm_count,
+            generation_skipped=generation_skipped,
+            panel_expected=panel_expected_for_gate,
+        )
+        if completeness_block:
+            missing = [
+                {
+                    "field": "formats_completeness_gate",
+                    "label": "Anexos administrativos incompletos",
+                    "question": completeness_block.get("message"),
+                    "document_hint": (
+                        f"Generados: {completeness_block.get('generated_count')}/"
+                        f"{completeness_block.get('expected_count')}"
+                    ),
+                    "type": "formats_completeness_gate_blocking",
+                    "blocking_items": completeness_block.get("skipped") or [],
+                    "pending_names": completeness_block.get("pending_names") or [],
+                }
+            ]
+            result_data["formats_completeness_gate"] = completeness_block
+            await self._save_pending_questions(session_id, missing)
+            return AgentOutput(
+                status=AgentStatus.WAITING_FOR_DATA,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message=str(completeness_block.get("message") or ""),
+                data={**result_data, "missing": missing, "stage": "formats"},
+                correlation_id=correlation_id,
+            )
+
+        await self._clear_resolved_formats_pending(session_id)
         await self.context_manager.record_task_completion(session_id, "formats_generation_COMPLETED", result_data)
 
         return AgentOutput(
@@ -1240,6 +1734,43 @@ class FormatsAgent(BaseAgent):
             data=result_data,
             correlation_id=correlation_id
         )
+
+    async def _clear_resolved_formats_pending(self, session_id: str) -> None:
+        """Quita preguntas HITL de formatos ya resueltas (evita chat con mensajes obsoletos)."""
+        try:
+            session_state = await self.context_manager.memory.get_session(session_id) or {}
+            drop_fields = frozenset(
+                {
+                    "formats_completeness_gate",
+                    "document_fill_quality_gate",
+                    "quality.fill.review",
+                }
+            )
+            drop_types = frozenset(
+                {
+                    "formats_completeness_gate_blocking",
+                    "document_fill_quality_gate_blocking",
+                    "quality_validation_blocking",
+                }
+            )
+            before = list(session_state.get("pending_questions") or [])
+            after = [
+                q
+                for q in before
+                if isinstance(q, dict)
+                and str(q.get("field") or "") not in drop_fields
+                and str(q.get("type") or "") not in drop_types
+            ]
+            if len(after) != len(before):
+                session_state["pending_questions"] = after
+                session_state["current_question_index"] = 0
+                await self.context_manager.memory.save_session(session_id, session_state)
+        except Exception as e:
+            logger.warning(
+                "formats_clear_resolved_pending_failed",
+                session_id=session_id,
+                error=str(e)[:120],
+            )
 
     async def _save_pending_questions(self, session_id: str, missing_fields: List[Dict]):
         """Persiste preguntas para el chatbot."""
@@ -1253,6 +1784,12 @@ class FormatsAgent(BaseAgent):
             logger.error("save_questions_failed", agent=self.agent_id, session_id=session_id, error=str(e))
 
 def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
+    from app.services.administrative_letter_clauses import (
+        city_from_domicilio,
+        format_letter_lugar_ciudad,
+        is_invalid_letter_lugar,
+    )
+
     doc = docx.Document()
     section = doc.sections[0]
     
@@ -1291,11 +1828,20 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     
     # LUGAR Y FECHA
     footer_text = metadata.get("footer_text", "") if metadata else ""
-    lugar = footer_text.split("Domicilio:")[-1].split(",")[0].strip() if "Domicilio:" in footer_text else "México"
-    doc.add_paragraph(f"LUGAR Y FECHA: {lugar} a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
+    domicilio_ref = str((metadata or {}).get("domicilio") or "").strip()
+    if not domicilio_ref and "Domicilio:" in footer_text:
+        domicilio_ref = footer_text.split("Domicilio:")[-1].strip()
+    ciudad = str((metadata or {}).get("ciudad") or "").strip()
+    if is_invalid_letter_lugar(ciudad):
+        ciudad = format_letter_lugar_ciudad(city_from_domicilio(domicilio_ref), domicilio_ref)
+    if is_invalid_letter_lugar(ciudad):
+        ciudad = "México"
+    doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
+    doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
     
-    # Destinatario
-    p_dest = doc.add_paragraph("\nCOMITÉ DE ADQUISICIONES Y DIRECCIÓN DE OBRAS PÚBLICAS\nPRESENTE.-")
+    # Destinatario (convocante desde sesión o genérico; sin hardcode por licitación)
+    dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
+    p_dest = doc.add_paragraph(f"\n{dest}")
     p_dest.bold = True
     
     doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1347,18 +1893,27 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     if table_buffer:
         flush_table(table_buffer)
             
-    # Firma Final
-    doc.add_paragraph("\n\n")
-    p_at = doc.add_paragraph("ATENTAMENTE\n")
-    p_at.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    p_line = doc.add_paragraph("___________________________\n")
-    p_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    run_firma = p_line.add_run(f"{metadata.get('representante', '').upper()}\n")
-    run_firma.bold = True
-    
-    p_rfc = doc.add_paragraph(f"RFC: {metadata.get('rfc', '')}")
-    p_rfc.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Firma al calce (formal)
+    if metadata and metadata.get("formal_closing", True):
+        doc.add_paragraph("\n\n")
+        p_at = doc.add_paragraph("A T E N T A M E N T E\n")
+        p_at.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_paragraph("\n")
+        p_line = doc.add_paragraph("________________________________________\n")
+        p_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        rep = str(metadata.get("representante") or "").upper()
+        emp = str(metadata.get("empresa") or "").upper()
+        rfc_val = str(metadata.get("rfc") or "")
+        run_firma = p_line.add_run(f"{rep}\n")
+        run_firma.bold = True
+        p_line.add_run("REPRESENTANTE LEGAL\n").bold = True
+        if emp:
+            p_line.add_run(f"{emp}\n").bold = True
+        if rfc_val:
+            p_line.add_run(f"R.F.C. {rfc_val}\n")
+        if metadata.get("require_rubrica_hint"):
+            doc.add_paragraph(
+                "[Rúbrica al margen derecho de cada hoja — según bases del procedimiento]"
+            ).alignment = WD_ALIGN_PARAGRAPH.LEFT
     
     doc.save(file_path)

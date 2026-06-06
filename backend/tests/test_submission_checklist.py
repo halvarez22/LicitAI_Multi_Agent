@@ -15,6 +15,8 @@ from app.checklist.hito_scheduler import (
 )
 from app.checklist.models import MarkHitoPayload
 from app.checklist.submission_checklist_service import (
+    ensure_session_cronograma_and_checklist,
+    get_submission_checklist,
     mark_hito,
     upsert_checklist_from_cronograma,
 )
@@ -123,3 +125,159 @@ async def test_upsert_y_mark_hito():
     h2 = next(x for x in undone.hitos if x.id == "presentacion_proposiciones")
     assert h2.estado == "pendiente"
     assert h2.evidencia is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_checklist_sin_cronograma_analysis_no_recursion():
+    """Checklist persistido sin cronograma en stage_completed:analysis no debe reentrar infinitamente."""
+    store: dict = {}
+
+    class Mem:
+        def __init__(self):
+            self.get_session = AsyncMock(side_effect=lambda sid: store.get(sid))
+            self.save_session = AsyncMock(side_effect=lambda sid, data: store.update({sid: data}) or True)
+            self.get_documents = AsyncMock(return_value=[])
+
+    mem = Mem()
+    sid = "sess_no_cron_recursion"
+    await mem.save_session(
+        sid,
+        {
+            "name": "Demo",
+            "tasks_completed": [
+                {
+                    "task": "stage_completed:analysis",
+                    "result": {"data": {"cronograma": None}},
+                }
+            ],
+            "submission_checklist": {
+                "licitation_id": "Demo",
+                "hitos": [
+                    {
+                        "id": "junta_aclaraciones",
+                        "nombre": "Junta de aclaraciones",
+                        "fecha_texto_raw": "No especificado",
+                        "fecha_hora": None,
+                        "obligatorio": True,
+                        "estado": "pendiente",
+                        "evidencia": None,
+                        "notificado": False,
+                    }
+                ],
+                "ultima_actualizacion": "2026-01-01T00:00:00",
+                "porcentaje_completado": 0.0,
+            },
+        },
+    )
+
+    model = await ensure_session_cronograma_and_checklist(mem, sid)
+    assert model is not None
+    assert len(model.hitos) == 1
+
+    again = await get_submission_checklist(mem, sid, auto_sync=False)
+    assert again is not None
+    assert len(again.hitos) == 1
+
+
+@pytest.mark.asyncio
+async def test_checklist_ready_without_enrichment():
+    from app.checklist.submission_checklist_service import checklist_ready_without_enrichment
+
+    session = {
+        "submission_checklist": {
+            "hitos": [
+                {
+                    "id": "junta_aclaraciones",
+                    "fecha_texto_raw": "12 de enero de 2026 10:00 hrs",
+                }
+            ]
+        }
+    }
+    assert checklist_ready_without_enrichment(session) is True
+    session_bad = {
+        "submission_checklist": {
+            "hitos": [
+                {"id": "a", "fecha_texto_raw": "No especificado"},
+                {"id": "b", "fecha_texto_raw": "No especificado"},
+            ]
+        }
+    }
+    assert checklist_ready_without_enrichment(session_bad) is False
+
+
+@pytest.mark.asyncio
+async def test_cronograma_enrichment_timeout_returns_cached_checklist(monkeypatch):
+    """Si RAG excede el tope, devolver checklist cacheado sin bloquear el worker."""
+    import asyncio
+
+    store: dict = {}
+
+    class Mem:
+        def __init__(self):
+            self.get_session = AsyncMock(side_effect=lambda sid: store.get(sid))
+            self.save_session = AsyncMock(side_effect=lambda sid, data: store.update({sid: data}) or True)
+            self.get_documents = AsyncMock(return_value=[])
+
+    mem = Mem()
+    sid = "sess_timeout"
+    cron = {
+        "publicacion_convocatoria": "No especificado",
+        "visita_instalaciones": "No especificado",
+        "junta_aclaraciones": "No especificado",
+        "presentacion_proposiciones": "No especificado",
+        "fallo": "No especificado",
+        "firma_contrato": "No especificado",
+    }
+    await mem.save_session(
+        sid,
+        {
+            "name": "Timeout demo",
+            "tasks_completed": [
+                {
+                    "task": "stage_completed:analysis",
+                    "result": {"data": {"cronograma": cron}},
+                }
+            ],
+            "submission_checklist": {
+                "licitation_id": "Timeout demo",
+                "hitos": [
+                    {
+                        "id": "junta_aclaraciones",
+                        "nombre": "Junta",
+                        "fecha_texto_raw": "15 de marzo de 2026",
+                        "fecha_hora": None,
+                        "obligatorio": True,
+                        "estado": "pendiente",
+                        "evidencia": None,
+                        "notificado": False,
+                    }
+                ],
+                "ultima_actualizacion": "2026-01-01T00:00:00",
+                "porcentaje_completado": 0.0,
+            },
+        },
+    )
+
+    async def slow_rag(*args, **kwargs):
+        await asyncio.sleep(60)
+        return cron
+
+    monkeypatch.setattr(
+        "app.services.cronograma_enrichment_service.enrich_cronograma_from_rag",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("sync path")),
+    )
+
+    async def slow_thread(fn, *args, **kwargs):
+        await asyncio.sleep(60)
+        return cron
+
+    monkeypatch.setattr(asyncio, "to_thread", slow_thread)
+    monkeypatch.setattr(
+        "app.config.settings.settings.CRONOGRAMA_ENRICHMENT_TIMEOUT_S",
+        0.05,
+    )
+
+    model = await ensure_session_cronograma_and_checklist(mem, sid)
+    assert model is not None
+    assert len(model.hitos) == 1
+    assert model.hitos[0].fecha_texto_raw == "15 de marzo de 2026"

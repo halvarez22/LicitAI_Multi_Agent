@@ -9,6 +9,20 @@ def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
 
 
+def _trim_name_candidate(candidate: str) -> str:
+    """Quita cola legal capturada por regex con IGNORECASE (p. ej. «con facultades», «comparece»)."""
+    s = _normalize_spaces(candidate)
+    if not s:
+        return s
+    cut = re.split(
+        r"\s+(?:con|quien|comparece|para|en\s+su|y\s+declara|quien\s+acepta|mediante|otorga)\b",
+        s,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return _normalize_spaces(cut)
+
+
 def _looks_like_person_name(candidate: str) -> bool:
     """Evita tomar razones sociales u otros encabezados como nombre de persona."""
     u = (candidate or "").strip().upper()
@@ -16,14 +30,31 @@ def _looks_like_person_name(candidate: str) -> bool:
         return False
     if any(x in u for x in (" S.A.", " S. A.", " SAPI", " S DE ", " DE C.V", " SOCIEDAD ", " ANÓNIMA ", " ANONIMA ")):
         return False
-    
-    # Filtro anti-muletillas (verbos y nexos comunes en actas que no son nombres)
+
     lower_c = (candidate or "").strip().lower()
-    bad_words = ["quien", "acepta", "dicho", "nombramiento", "otorga", "declara", "manifiesta", "acuerda", "comparece", "otorgar", "poder"]
-    if any(word in lower_c.split() for word in bad_words):
+    if lower_c.startswith("para que ") or lower_c.startswith("a fin de ") or lower_c.startswith("a efecto de "):
         return False
-        
+
+    bad_words = {
+        "quien", "acepta", "dicho", "nombramiento", "otorga", "declara", "manifiesta", "acuerda",
+        "comparece", "otorgar", "poder", "para", "que", "ocurra", "ante", "notario", "notaria",
+        "notaría", "publico", "público", "escritura", "delegado", "especial", "facultad", "facultades",
+        "sociedad", "secretario", "tesorero", "vocal", "mediante", "virtud", "efecto", "fin",
+    }
+    tokens = re.findall(r"[a-záéíóúñ]+", lower_c)
+    if not tokens or len(tokens) < 2:
+        return False
+    if any(word in bad_words for word in tokens):
+        return False
+    if any(word in lower_c for word in ("notario publico", "notario público", "para que ocurra")):
+        return False
+
     return True
+
+
+def is_plausible_representative_name(candidate: str) -> bool:
+    """API pública para validar nombres de representante antes de persistir en perfil."""
+    return _looks_like_person_name(candidate)
 
 
 def detect_legal_representative(text: str) -> Dict[str, Any]:
@@ -87,7 +118,7 @@ def detect_legal_representative(text: str) -> Dict[str, Any]:
         {
             "trigger": "delegado_especial_el_c_nombre",
             "confidence": 0.975,
-            "regex": rf"delegado\s+especial(?:\s+de\s+la\s+sociedad)?\s*,?\s+(?:el\s+)?(?:c\.\s*)?{NAME_PATTERN}",
+            "regex": rf"delegado\s+especial(?:\s+de\s+la\s+sociedad)?\s*,\s*(?:el\s+)(?:c\.\s*)?{NAME_PATTERN}",
         },
         {
             "trigger": "presidente_asamblea_el_c",
@@ -131,7 +162,7 @@ def detect_legal_representative(text: str) -> Dict[str, Any]:
     for item in patterns:
         for m in re.finditer(item["regex"], clean, flags=re.IGNORECASE):
             groups = [g for g in m.groups() if g]
-            candidate = _normalize_spaces(groups[-1] if groups else m.group(0))
+            candidate = _trim_name_candidate(groups[-1] if groups else m.group(0))
             if not _looks_like_person_name(candidate):
                 continue
             evidence = _normalize_spaces(m.group(0))[:320]

@@ -63,6 +63,30 @@ def test_extract_line_items_desde_docx_con_tabla_economica(tmp_path):
     assert by_concept["servicio uvie"]["precio_unitario"] == 150000.0
 
 
+def test_extract_line_items_docx_dedupes_repeated_tables(tmp_path):
+    """Dos tablas idénticas en el DOCX no deben duplicar la misma partida en cuadratura."""
+    from docx import Document
+
+    path = tmp_path / "oferta_dup.docx"
+    doc = Document()
+    for _ in range(2):
+        table = doc.add_table(rows=2, cols=4)
+        table.rows[0].cells[0].text = "Partida"
+        table.rows[0].cells[1].text = "Descripcion"
+        table.rows[0].cells[2].text = "Unidad"
+        table.rows[0].cells[3].text = "Precio Unitario"
+        r1 = table.rows[1].cells
+        r1[0].text = "1"
+        r1[1].text = "Suministro e instalacion de paneles solares"
+        r1[2].text = "Lote"
+        r1[3].text = "2586233"
+    doc.save(path)
+
+    rows = extract_line_items_from_docx_path(str(path), "oferta_dup.docx")
+    assert len(rows) == 1
+    assert rows[0]["precio_unitario"] == 2586233.0
+
+
 def test_extract_line_items_blank_price_templates_preserve_quantity_and_structure(tmp_path):
     path = tmp_path / "anexo_blank.xlsx"
     with pd.ExcelWriter(path, engine="openpyxl") as w:

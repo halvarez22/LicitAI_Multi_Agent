@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.agents.analyst import normalize_cronograma_dict
+from app.services.cronograma_bases_extract import parse_spanish_date_fragment
 
 # Orden de presentación en UI (mismo orden canónico que el analista).
 _HITO_ORDER: Tuple[str, ...] = (
@@ -47,8 +48,34 @@ def parse_fecha_hito(texto: str) -> Optional[datetime]:
         return None
     t = texto.strip()
     low = t.lower()
-    if not t or low in ("no especificado", "n/e", "—", "-", "según bases", "por definir"):
+    if not t or low in (
+        "no especificado",
+        "fecha no especificada",
+        "n/e",
+        "—",
+        "-",
+        "según bases",
+        "por definir",
+    ):
         return None
+    if "no especificad" in low and not re.search(r"\d{1,2}\s+de\s+", low):
+        return None
+    if re.search(r"\d{1,2}[/\-]\d{1,2}[/\-]", t):
+        m_num = _RE_FECHA.search(t.replace("h", ":", 1) if "h" in low and ":" not in t else t)
+        if m_num:
+            d, mo, y = int(m_num.group(1)), int(m_num.group(2)), int(m_num.group(3))
+            if y < 100:
+                y += 2000
+            hh, mm = 0, 0
+            if m_num.group(4) and m_num.group(5):
+                hh, mm = int(m_num.group(4)), int(m_num.group(5))
+            try:
+                return datetime(y, mo, d, hh, mm, 0, 0)
+            except ValueError:
+                return None
+    parsed_es = parse_spanish_date_fragment(t)
+    if parsed_es is not None:
+        return parsed_es
     m = _RE_FECHA.search(t.replace("h", ":", 1) if "h" in low and ":" not in t else t)
     if not m:
         return None
@@ -64,14 +91,42 @@ def parse_fecha_hito(texto: str) -> Optional[datetime]:
         return None
 
 
+_MESES_ES_NOM: Tuple[str, ...] = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
+
+
+def _compact_fecha_texto(raw: str, parsed: Optional[datetime]) -> str:
+    """Texto corto para UI cuando hay fecha parseable en el fragmento de bases."""
+    if parsed is None:
+        return raw
+    mes = _MESES_ES_NOM[parsed.month - 1]
+    base = f"{parsed.day} de {mes} de {parsed.year}"
+    if parsed.hour or parsed.minute:
+        return f"{base}, {parsed.hour:02d}:{parsed.minute:02d}"
+    return base
+
+
 def _hito_dict_from_canon(hito_id: str, valor_cronograma: str) -> Dict[str, Any]:
     nombre = _NOMBRES_ES.get(hito_id, hito_id.replace("_", " ").title())
     raw = (valor_cronograma or "").strip() or "No especificado"
     parsed = parse_fecha_hito(raw)
+    fecha_raw = _compact_fecha_texto(raw, parsed) if parsed else raw
     return {
         "id": hito_id,
         "nombre": nombre,
-        "fecha_texto_raw": raw,
+        "fecha_texto_raw": fecha_raw,
         "fecha_hora": parsed,
         "obligatorio": True,
         "estado": "pendiente",
