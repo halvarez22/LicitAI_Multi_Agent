@@ -1,7 +1,6 @@
 # SUPER ISSUE — Chat conversacional, intención del usuario y UX de mercado
 
-**Estado:** DOCUMENTADO — **pospuesto** hasta cerrar generación documental mínima (solo entregables reales, sin duplicados, conteo estable).  
-**Prioridad cuando se retome:** P0 producto / riesgo reputacional y contractual.  
+**Estado:** **Gate 5 cerrado en código** (2026-06-02) — intención determinista, sanitize global, META/resume compactos, batería 295 utterances, keys React estables. Validación E2E UI pendiente en licitación nueva.  
 **Fecha de registro:** 2026-05-21.
 
 ---
@@ -49,17 +48,17 @@ Esto es **independiente** de los bugs ya corregidos en intake de perfil (refusal
 
 ### P0 — Conversación usuario
 
-- [ ] Capa de intención acotada: `COTIZAR`, `GENERAR_EXPEDIENTE`, `RESPONDER_PENDIENTE`, `PREGUNTAR_BASES`, `VER_ESTADO`, `AYUDA`.
-- [ ] `generar` solo → desambiguación en una pregunta corta (no META forense).
-- [ ] Prohibir volcado de compliance / gates / `stop_reason` crudos en respuestas META al usuario.
-- [ ] Mapa completo `stop_reason` → español claro + un solo CTA.
-- [ ] Bootstrap sobrio alineado a semáforo y snapshot económico (sin “ganadora” si YELLOW/bloqueo).
+- [x] Capa de intención acotada: `COTIZAR`, `GENERAR_EXPEDIENTE`, `RESPONDER_PENDIENTE`, `PREGUNTAR_BASES`, `VER_ESTADO`, `AYUDA`.
+- [x] `generar` solo → desambiguación en una pregunta corta (no META forense).
+- [x] Prohibir volcado de compliance / gates / `stop_reason` crudos en respuestas META al usuario (`sanitize_user_visible_text` global en `_format_response`).
+- [x] Mapa completo `stop_reason` → español claro + un solo CTA (`chat_stop_reason_map.py` + `chat_gate5_formatter.py`).
+- [x] Bootstrap/resume compacto Gate 5 (`build_compact_session_resume`).
 
 ### P1 — Calidad operativa
 
-- [ ] Batería de ≥100–200 utterances (typos, regionalismos, mensajes mixtos).
-- [ ] Criterio CI: ninguna respuesta al usuario contiene `MISSING_`, `12.1.`, `Gate 12.1` sin traducción.
-- [ ] Keys React únicas en `DocumentCandidatePanel` (duplicados `opinion_del_cumplimiento...`).
+- [x] Batería de ≥100–200 utterances (295 casos + demo).
+- [x] Criterio CI: `test_chat_gate5.py` + sanitize en smoke pytest.
+- [x] Keys React únicas en `DocumentCandidatePanel` (`stableReactKey.js`).
 
 ### P2 — Contenido y dictamen
 
@@ -76,7 +75,7 @@ Esto es **independiente** de los bugs ya corregidos en intake de perfil (refusal
 | No borrar `economic_proposal` al limpiar disco | Implementado |
 | Re-ejecutar `EconomicAgent` si falta snapshot al generar | Implementado |
 | **Limpieza de disco antes de writers en nueva corrida** | Ver `GENERATION_WIPE_OUTPUTS_BEFORE_WRITERS` |
-| **Este SUPER ISSUE** | Pospuesto explícitamente |
+| **Este SUPER ISSUE** | Gate 5 implementado; smoke UI licitación nueva pendiente |
 | **Agenda HITL económico (A–D)** | [`AGENDA_POST_CHECKPOINT1_HITL_ECONOMICO.md`](AGENDA_POST_CHECKPOINT1_HITL_ECONOMICO.md) |
 | **Issue matriz + captura económica universal (D)** | [`ISSUE_HITL_MATRIZ_CAPTURA_ECONOMICA_UNIVERSAL.md`](ISSUE_HITL_MATRIZ_CAPTURA_ECONOMICA_UNIVERSAL.md) — **sin hardcode por licitación** |
 

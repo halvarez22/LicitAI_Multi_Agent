@@ -81,6 +81,10 @@ jobs:
             tests/test_economic_validation_service.py \
             tests/test_chat_intent_battery.py \
             tests/test_chat_user_intent.py \
+            tests/test_chat_gate5.py \
+            tests/test_hitl_queue_isapeg_fiscal_dedup.py \
+            tests/test_conversational_price_reference.py \
+            tests/test_conversational_price_utterances.py \
             -v -q --tb=short
 
   # Noche o manual: suite completa + JUnit (artefacto). No bloquea merge hasta que esté verde.

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from app.services.document_deliverable_filter import normalize_deliverable_key
 
@@ -204,8 +204,24 @@ def dedupe_pending_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, 
 
 
 def sort_pending_questions_priority(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Ordena: económico → bloqueos perfil → resto → intake tipo B al final."""
-    return sorted(list(questions or []), key=_question_sort_key)
+    """Ordena: económico → bloqueos perfil → resto → intake tipo B al final (estable dentro de cada tier)."""
+    indexed = list(enumerate(questions or []))
+
+    def _key(entry: tuple[int, Dict[str, Any]]) -> tuple:
+        _pos, question = entry
+        qtype = str(question.get("type") or "").lower()
+        if qtype in _ECONOMIC_TYPES:
+            tier = 0
+        elif qtype in _HIGH_PRIORITY_TYPES:
+            tier = 1
+        elif str(question.get("question_id") or "").startswith(_INTAKE_B_PREFIX):
+            tier = 3
+        else:
+            tier = 2
+        blocking = 0 if question.get("blocking") else 1
+        return (tier, blocking, _pos)
+
+    return [q for _, q in sorted(indexed, key=_key)]
 
 
 def sanitize_chat_pending_questions(

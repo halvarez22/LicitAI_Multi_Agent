@@ -32,6 +32,15 @@ STOP_REASON_HUMAN: Dict[str, str] = {
         "Faltan formatos administrativos por generar o contienen datos incompletos. "
         "Revisa los anexos omitidos y vuelve a ejecutar la generación."
     ),
+    "ECONOMIC_PRICES_INCOMPLETE": "Faltan precios unitarios obligatorios. Completa la matriz o responde los pendientes en el chat.",
+    "ECONOMIC_AGENT_ERROR": "Hubo un error al calcular la propuesta económica. Reintenta la cotización.",
+    "GO_NO_GO_PENDING": "Falta cerrar la evaluación de viabilidad (Go/No-Go) antes de continuar.",
+    "MINI_DICTAMEN_BLOCKED": "El mini dictamen de anexos tiene hallazgos que bloquean la generación.",
+    "PACKAGING_INCOMPLETE_SOBRES": "Faltan archivos en uno o más sobres del expediente.",
+    "MISSING_COMPANY_ID": "Selecciona o vincula la empresa licitante antes de continuar.",
+    "MISSING_PRIOR_ANALYSIS": "Primero hay que completar el análisis de bases.",
+    "ANALYSIS_REHYDRATE_INCOMPLETE": "El análisis de bases no se rehidrató por completo. Vuelve a ejecutar el análisis.",
+    "INVALID_MODE": "El modo de ejecución solicitado no es válido para esta sesión.",
 }
 
 

@@ -517,16 +517,9 @@ class IntakePlannerAgent(BaseAgent):
         return out
 
     def _dedupe(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        seen: Dict[str, Dict[str, Any]] = {}
-        for q in questions:
-            key = _sim_key(str(q.get("field_target", "")), str(q.get("question", "")))
-            if key not in seen:
-                seen[key] = q
-                continue
-            prev = seen[key]
-            if _priority_weight(str(q.get("priority"))) > _priority_weight(str(prev.get("priority"))):
-                seen[key] = q
-        return list(seen.values())
+        from app.services.hitl_queue_service import dedupe_pending_questions
+
+        return dedupe_pending_questions(questions)
 
     def _sort_questions(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return sorted(

@@ -148,6 +148,48 @@ def normalize_conversational_price(raw: str) -> Tuple[Optional[str], Optional[st
     return None, "no es un número válido", 0.0
 
 
+_REFERENCE_RE = re.compile(
+    r"(?i)^(?:igual\s+que|mismo\s+que|misma\s+que|como\s+(?:la|el|en)?)\s+(.+)$"
+)
+
+
+def resolve_price_reference(
+    raw: str,
+    economic_user_inputs: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str], float]:
+    """
+    Resuelve referencias tipo «igual que zona B» contra precios ya capturados.
+    """
+    text = (raw or "").strip()
+    m = _REFERENCE_RE.match(text)
+    if not m:
+        return None, None, 0.0
+    ref = re.sub(r"\s+", " ", m.group(1).strip().lower())
+    inputs = economic_user_inputs if isinstance(economic_user_inputs, dict) else {}
+    best_val: Optional[str] = None
+    best_score = 0
+    for key, val in inputs.items():
+        if str(key).startswith("_"):
+            continue
+        key_norm = re.sub(r"\s+", " ", str(key).lower())
+        score = 0
+        if ref == key_norm:
+            score = 3
+        elif ref in key_norm or key_norm in ref:
+            score = 2
+        elif any(tok in key_norm for tok in ref.split() if len(tok) > 2):
+            score = 1
+        if score > best_score:
+            try:
+                best_val = f"{float(val):g}"
+                best_score = score
+            except (TypeError, ValueError):
+                continue
+    if best_val and best_score > 0:
+        return best_val, None, 0.92
+    return None, f"No encontré un precio previo para «{m.group(1).strip()}».", 0.0
+
+
 def format_price_confirmation(label: str, canonical: str) -> str:
     """Eco humano antes de avanzar (confianza media)."""
     try:

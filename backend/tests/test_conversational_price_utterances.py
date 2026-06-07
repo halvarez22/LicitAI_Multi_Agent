@@ -33,6 +33,15 @@ _UTTERANCES_VARIOUS = [
     ("999.99", 999.99),
     ("1000000", 1000000.0),
     ("25 mil", 25000.0),
+    ("45250", 45250.0),
+    ("45,250.00", 45250.0),
+    ("45250 mxn", 45250.0),
+    ("son 35529 pesos sin iva", 35529.0),
+    ("9876.50", 9876.5),
+    ("150000", 150000.0),
+    ("$1,500.00", 1500.0),
+    ("32000", 32000.0),
+    ("no aplica", None),
 ]
 
 
@@ -44,11 +53,14 @@ def test_utterances_normalize_to_35529(utterance: str):
 
 
 @pytest.mark.parametrize("utterance,expected", _UTTERANCES_VARIOUS)
-def test_utterances_various(utterance: str, expected: float):
+def test_utterances_various(utterance: str, expected: float | None):
     val, err, _conf = normalize_conversational_price(utterance)
+    if expected is None:
+        assert err is not None, utterance
+        return
     assert err is None, utterance
     assert float(val) == expected
 
 
 def test_utterance_batch_count():
-    assert len(_UTTERANCES_EXPECT_35529) + len(_UTTERANCES_VARIOUS) >= 15
+    assert len(_UTTERANCES_EXPECT_35529) + len(_UTTERANCES_VARIOUS) >= 30

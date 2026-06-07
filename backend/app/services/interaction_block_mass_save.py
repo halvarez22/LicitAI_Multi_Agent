@@ -27,8 +27,16 @@ def _canonical_question_label(question: Dict[str, Any]) -> str:
 
 def _parse_economic_value(raw: str) -> Tuple[Optional[float], Optional[str]]:
     """Parsea valor numérico de precio; devuelve (valor, error)."""
+    from app.services.conversational_price_normalizer import normalize_conversational_price
+
     if raw is None:
         return None, "vacío"
+    conv, conv_err, confidence = normalize_conversational_price(str(raw))
+    if conv is not None and conv_err is None and confidence >= 0.75:
+        try:
+            return float(conv), None
+        except ValueError:
+            pass
     s = str(raw).strip().replace("$", "").replace("mxn", "").replace("MXN", "").replace(",", "")
     if not s:
         return None, "vacío"

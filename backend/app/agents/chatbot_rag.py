@@ -1058,120 +1058,11 @@ Genera el mensaje conversacional para solicitar este dato."""
 
     def _build_session_resume_message(self, state: Dict[str, Any]) -> str:
         """
-        Construye un mensaje proactivo de reanudación de sesión.
-        Analiza el estado persistido y devuelve un resumen de situación
-        + la siguiente acción que el usuario debe realizar.
-        No invoca al LLM: todo es determinista desde el estado.
+        Mensaje proactivo de reanudación (Gate 5: ≤3 líneas + 1 CTA).
         """
-        session_name = str(state.get("name") or "esta licitación")
-        bases_phase = self._bases_analysis_phase(state)
+        from app.services.chat_gate5_formatter import build_compact_session_resume
 
-        # --- Análisis de estado ---
-        tasks = list(state.get("tasks_completed") or [])
-        task_names = {str(t.get("task") or "") for t in tasks}
-        has_go_no_go = "go_no_go_result" in task_names
-        has_economic = "economic_proposal" in task_names
-
-        # Intro (sin afirmar éxito si el dictamen no está cerrado)
-        msg = f"¡Hola! Retomamos el trabajo en **{session_name}**.\n\n"
-        if bases_phase == "complete":
-            msg += (
-                "Hemos sincronizado el contexto de las **bases**, tu **perfil corporativo** "
-                "y la **intención de tu oferta** para garantizar una propuesta sólida.\n\n"
-            )
-        elif bases_phase == "partial":
-            msg += (
-                "Tenemos contexto parcial de las **bases** y tu **perfil corporativo**, "
-                "pero **el dictamen forense completo aún no está listo**.\n\n"
-            )
-        else:
-            msg += (
-                "Estamos preparando el contexto de las **bases** y tu **perfil corporativo**. "
-                "El dictamen forense **todavía no está disponible**.\n\n"
-            )
-
-        # Narrativa de progreso (honesta)
-        progress_bits = []
-        if bases_phase == "complete":
-            progress_bits.append("el dictamen forense de cumplimiento está listo")
-        elif bases_phase == "partial":
-            msg += (
-                "⚠️ **Avance parcial:** el extracto inicial de requisitos terminó, "
-                "pero **falta cerrar la auditoría forense (compliance)**.\n"
-            )
-        elif bases_phase == "failed":
-            msg += (
-                "❌ El último intento de auditoría forense terminó con error. "
-                "Revisa los logs o pulsa **Actualizar análisis**.\n"
-            )
-        if has_go_no_go:
-            progress_bits.append("la evaluación de viabilidad (Go/No-Go) está lista")
-
-        if progress_bits:
-            msg += f"Ya hemos avanzado: {' y '.join(progress_bits)}.\n"
-
-        # Estado Económico
-        if has_economic:
-            _eco_task = next((t for t in reversed(tasks) if t.get("task") == "economic_proposal"), None)
-            _eco_result = (_eco_task.get("result") or {}) if _eco_task else {}
-            _eco_total = float(_eco_result.get("total_base") or 0.0)
-            _eco_status = str(_eco_result.get("status") or "")
-            _allow_zero = bool((state.get("economic_user_inputs") or {}).get("allow_zero_total_base_ack"))
-            
-            if _eco_status == "complete" and (_eco_total >= 0.01 or _allow_zero):
-                msg += f"La propuesta económica está calculada con un subtotal de **${_eco_total:,.2f}**.\n"
-            else:
-                msg += "Estamos terminando de integrar los precios de la propuesta económica.\n"
-
-        # Estado de Inventario
-        inv = state.get("document_inventory") or {}
-        inv_items = inv.get("items") or []
-        docs_to_gen = [it for it in inv_items if str(it.get("tipo") or "").lower() == "generar" and (it.get("nombre") or it.get("name"))]
-        docs_missing = [it for it in inv_items if str(it.get("tipo") or "").lower() != "generar" and str(it.get("status") or "").lower() == "pending" and (it.get("nombre") or it.get("name"))]
-
-        if docs_to_gen:
-            msg += f"Tenemos **{len(docs_to_gen)} anexos** listos para ser proyectados.\n"
-        
-        if docs_missing:
-            msg += f"Aún tenemos **{len(docs_missing)} requisitos administrativos** por completar para blindar el expediente.\n"
-
-        # Llamado a la acción (Call to Action)
-        pending = list(state.get("pending_questions") or [])
-        eco_pending = [q for q in pending if q.get("type") == "economic_price"]
-        
-        msg += "\n---\n**¿Continuamos?** "
-        _eco_ready = False
-        if has_economic:
-            _eco_task_cta = next((t for t in reversed(tasks) if t.get("task") == "economic_proposal"), None)
-            _eco_res_cta = (_eco_task_cta.get("result") or {}) if _eco_task_cta else {}
-            _eco_ready = str(_eco_res_cta.get("status") or "") == "complete" and (
-                float(_eco_res_cta.get("total_base") or 0.0) >= 0.01
-                or bool((state.get("economic_user_inputs") or {}).get("allow_zero_total_base_ack"))
-            )
-        if bases_phase != "complete":
-            msg += (
-                "Primero hay que **cerrar el análisis de bases** (dictamen forense). "
-                "No cotices ni generes documentos hasta ver el dictamen actualizado en el panel central."
-            )
-        elif _eco_ready and not eco_pending:
-            msg += (
-                "La cotización económica ya está lista. Pulsa **Generar** en el panel principal "
-                "para crear el expediente (técnica, formatos y empaquetado), "
-                "o escribe `generar propuesta económica` solo si necesitas recalcular precios."
-            )
-        elif eco_pending:
-            msg += f"Necesito que confirmemos los últimos {len(eco_pending)} precios para cerrar el cálculo."
-        elif docs_missing:
-            msg += "Sugiero que terminemos de revisar los documentos administrativos pendientes."
-        elif not has_economic:
-            msg += (
-                "Escribe `generar propuesta económica` en este chat para calcular la cotización; "
-                "después pulsa **Generar** en el panel para los documentos."
-            )
-        else:
-            msg += "Escribe `generar propuesta económica` para cerrar o recalcular la cotización."
-
-        return msg
+        return build_compact_session_resume(state)
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
@@ -1374,8 +1265,10 @@ Genera el mensaje conversacional para solicitar este dato."""
             if not has_forensic:
                 planner_qs = self._pending_from_intake_plan(intake_plan)
                 if planner_qs:
+                    from app.services.hitl_queue_service import merge_pending_queues
+
                     logger.info("chatbot_final_guard_injection", session_id=session_id, added=len(planner_qs))
-                    pending_questions = planner_qs + pending_questions
+                    pending_questions = merge_pending_queues(planner_qs, pending_questions)
                     session_state["pending_questions"] = pending_questions
                     session_state["current_question_index"] = 0
                     await self.context_manager.memory.save_session(session_id, session_state)
@@ -2633,11 +2526,35 @@ Genera el mensaje conversacional para solicitar este dato."""
             return await self._handle_meta_query(session_id, user_query, session_state, correlation_id)
 
         if mode == "QUERY" and pending_questions:
+            from app.services.chat_user_intent import is_bases_query
+
             fresh_s = await self.context_manager.memory.get_session(session_id) or {}
             p_list = list(fresh_s.get("pending_questions") or pending_questions)
             c_idx = int(fresh_s.get("current_question_index") or current_idx)
-            
-            # Ahora permitimos RAG siempre, pero cargamos el contexto de bloqueo si existe
+            cur_q = p_list[c_idx] if 0 <= c_idx < len(p_list) else {}
+            cur_type = str(cur_q.get("type") or "")
+            eco_active_types = (
+                "economic_price",
+                "economic_price_matrix",
+            )
+            if cur_type in eco_active_types and not is_bases_query(user_query):
+                from app.services.hitl_queue_ux_messages import message_for_economic_pending_redirect
+
+                msg = message_for_economic_pending_redirect(
+                    cur_q,
+                    total=len(p_list),
+                    index=c_idx,
+                )
+                await self._save_chat_history(session_id, user_query, msg)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=msg,
+                    confianza="Alta",
+                    tipo="clarification_needed",
+                    intake_active=True,
+                )
+
             return await self._handle_rag_query(
                 session_id,
                 user_query,
@@ -3378,12 +3295,18 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             from app.services.conversational_price_normalizer import (
                 format_price_confirmation,
                 normalize_conversational_price,
+                resolve_price_reference,
             )
 
             work_input, schedule_tail = self._split_economic_price_reply(work_input)
             strict_val, strict_err = self._parse_strict_economic_price(work_input)
             if strict_err:
-                conv_val, conv_err, confidence = normalize_conversational_price(work_input)
+                eco_inputs = session_state.get("economic_user_inputs") or {}
+                ref_val, ref_err, ref_conf = resolve_price_reference(work_input, eco_inputs)
+                if ref_val and not ref_err:
+                    conv_val, conv_err, confidence = ref_val, ref_err, ref_conf
+                else:
+                    conv_val, conv_err, confidence = normalize_conversational_price(work_input)
                 if conv_err or not conv_val:
                     if str(session_state.get("economic_capture_mode") or "") == "matrix":
                         blocks = session_state.get("capture_matrix_blocks") or []
@@ -8699,6 +8622,9 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         # Hito 1.4: Arquitectura Universal de Metadatos
         # Defensa: Asegurar que respuesta nunca sea None para evitar ValidationError 500
         safe_reply = str(respuesta or "").strip()
+        from app.services.chat_stop_reason_map import sanitize_user_visible_text
+
+        safe_reply = sanitize_user_visible_text(safe_reply)
         
         payload: Dict[str, Any] = {
             "respuesta": safe_reply,
@@ -9296,9 +9222,14 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             )
 
         if resolved.intent == UserChatIntent.VER_ESTADO and not is_gen_request:
-            return await self._handle_meta_query(
-                session_id, user_query, session_state, correlation_id
+            has_blocking_eco = any(
+                str(q.get("type") or "") == "economic_validation_blocking"
+                for q in (pending_questions or [])
             )
+            if not has_blocking_eco:
+                return await self._handle_meta_query(
+                    session_id, user_query, session_state, correlation_id
+                )
 
         if resolved.intent == UserChatIntent.AYUDA and company_id:
             return await self._handle_user_confusion_help(
@@ -9312,9 +9243,12 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             )
 
         if resolved.intent == UserChatIntent.GENERAR_EXPEDIENTE and company_id:
-            msg = (
-                "Para **generar el expediente** (técnica, formatos y empaquetado), "
-                "usa el botón **Generar** en el panel principal cuando la cotización económica esté lista."
+            from app.services.chat_gate5_formatter import format_gate5_message
+            from app.services.chat_stop_reason_map import single_cta_for_context
+
+            msg = format_gate5_message(
+                status="Puedes generar el expediente cuando la cotización económica esté lista.",
+                cta=single_cta_for_context(stop_reason="IDLE", has_economic_pending=False),
             )
             await self._save_chat_history(session_id, user_query, msg)
             return self._format_response(
@@ -9332,42 +9266,18 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         return None
 
     async def _handle_meta_query(self, session_id: str, query: str, session_state: Dict, correlation_id: str = "") -> AgentOutput:
-        """Explica el estado del sistema basándose en la conciencia del orquestador (Hito 8)."""
-        from app.services.chat_stop_reason_map import (
-            humanize_stop_reason,
-            sanitize_user_visible_text,
-            single_cta_for_context,
-        )
+        """Explica el estado del sistema (Gate 5: ≤3 líneas + 1 CTA)."""
+        from app.services.chat_gate5_formatter import build_compact_meta_status
 
         decision = session_state.get("last_orchestrator_decision", {})
         stop_reason = decision.get("stop_reason", "IDLE")
-        explanation = humanize_stop_reason(stop_reason)
-        
-        # Si hay campos faltantes, listarlos
         missing = session_state.get("pending_questions", [])
         cur_i = int(session_state.get("current_question_index") or 0)
-        missing_text = ""
-        if missing:
-            idx = max(0, min(cur_i, len(missing) - 1))
-            q = missing[idx]
-            rest = max(0, len(missing) - idx - 1)
-            missing_text = (
-                f"\n\n**Dato pendiente actual ({idx + 1} de {len(missing)}):**\n* {q.get('label', 'Campo')}"
-            )
-            if rest:
-                missing_text += f"\n\n_(Después: {rest} en cola.)_"
-        
-        pending_eco = [
-            q for q in (session_state.get("pending_questions") or [])
-            if str(q.get("type") or "") in ("economic_price", "economic_validation_blocking", "economic_price_matrix")
-        ]
-        cta = single_cta_for_context(
-            stop_reason=stop_reason,
-            has_economic_pending=bool(pending_eco),
-        )
 
-        bot_msg = sanitize_user_visible_text(
-            f"**Estado:** {explanation}{missing_text}\n\n**Siguiente paso:** {cta}"
+        bot_msg = build_compact_meta_status(
+            stop_reason=stop_reason,
+            pending_questions=missing,
+            current_idx=cur_i,
         )
 
         await self._save_chat_history(session_id, query, bot_msg)

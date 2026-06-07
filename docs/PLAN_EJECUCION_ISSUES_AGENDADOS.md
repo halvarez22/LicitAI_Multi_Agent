@@ -196,15 +196,15 @@ Ejecutar **en paralelo ligero** desde Fase 1; cerrar del todo al final.
 
 | ID | Tarea | Relación |
 |----|-------|----------|
-| S.1 | [ ] Enum intención: `COTIZAR`, `GENERAR_EXPEDIENTE`, `RESPONDER_PENDIENTE`, `PREGUNTAR_BASES`, `VER_ESTADO`, `AYUDA` | P0 SUPER ISSUE |
-| S.2 | [ ] `generar` solo → desambiguación 1 pregunta (no META forense) | chatbot |
-| S.3 | [ ] Prohibir volcado compliance/gates/`stop_reason` crudo en chat usuario | `_handle_meta_query` |
-| S.4 | [ ] Mapa `stop_reason` → español + un CTA | Central UX |
-| S.5 | [ ] Con `pending_questions` económico activo: priorizar `RESPONDER_PENDIENTE` sobre RAG | Orden ramas |
-| S.6 | [ ] Batería 100–200 utterances (archivo fixtures) + CI sin `MISSING_`/`Gate 12.1` en respuesta usuario | Tests |
-| S.7 | [ ] Keys React únicas `DocumentCandidatePanel` | Frontend P1 |
+| S.1 | [x] Enum intención: `COTIZAR`, `GENERAR_EXPEDIENTE`, `RESPONDER_PENDIENTE`, `PREGUNTAR_BASES`, `VER_ESTADO`, `AYUDA` | P0 SUPER ISSUE |
+| S.2 | [x] `generar` solo → desambiguación 1 pregunta (no META forense) | chatbot |
+| S.3 | [x] Prohibir volcado compliance/gates/`stop_reason` crudo en chat usuario | `_format_response` + sanitize |
+| S.4 | [x] Mapa `stop_reason` → español + un CTA | `chat_gate5_formatter.py` |
+| S.5 | [x] Con `pending_questions` económico activo: bloqueo RAG salvo bases | FASE 3B chatbot |
+| S.6 | [x] Batería 295 utterances + CI Gate 5 | Tests smoke pytest |
+| S.7 | [x] Keys React únicas `DocumentCandidatePanel` | `stableReactKey.js` |
 
-**Gate 5:** Criterio cierre SUPER ISSUE (3 líneas + 1 CTA + cero códigos crudos).
+**Gate 5:** Implementado en código (2026-06-02); validar utterances de cierre en UI licitación nueva.
 
 ---
 

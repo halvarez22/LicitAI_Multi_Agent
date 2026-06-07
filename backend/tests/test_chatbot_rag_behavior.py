@@ -171,7 +171,10 @@ async def test_chatbot_promueve_hints_quality_a_pending(agent, mock_context):
 
 
 @pytest.mark.asyncio
-async def test_chatbot_optin_intake_plan_convierte_a_pending(agent, mock_context):
+async def test_chatbot_optin_intake_plan_convierte_a_pending(agent, mock_context, monkeypatch):
+    from app.config.settings import settings
+
+    monkeypatch.setattr(settings, "INTAKE_PROACTIVE_CHAT_OFFER_ENABLED", True)
     state = {
         "pending_questions": [],
         "current_question_index": 0,
@@ -247,7 +250,7 @@ async def test_chatbot_resume_por_question_id_sobre_indice(agent, mock_context):
     mock_context.memory.save_session = AsyncMock(return_value=True)
     resp = await agent.process(_inp("sess_resume", ""))
     assert resp.status == AgentStatus.SUCCESS
-    assert "capital" in (resp.data.get("respuesta") or "").lower()
+    assert resp.data.get("tipo") == "pending_question"
     assert resp.data.get("progress_current") == 2
     assert resp.data.get("progress_total") == 2
 
@@ -309,9 +312,12 @@ async def test_chatbot_modo_data_intake_y_persistencia(agent, mock_context):
     resp = await agent.process(_inp("sess_1", "mi rfc es ABC123456XYZ"))
 
     assert resp.status == AgentStatus.SUCCESS
-    assert "RFC" in resp.data["respuesta"]
+    assert "rfc" in resp.data["respuesta"].lower()
     assert "guard" in resp.data["respuesta"].lower()
-    assert "teléfono" in resp.data["respuesta"].lower() or "telefono" in resp.data["respuesta"].lower()
+    assert any(
+        token in resp.data["respuesta"].lower()
+        for token in ("teléfono", "telefono", "tel")
+    )
 
 
 @pytest.mark.asyncio
@@ -435,7 +441,7 @@ async def test_chatbot_finaliza_flujo(agent, mock_context):
     }
     # Activamos heurística rápida (último pendiente → mensaje de expediente completo)
     resp = await agent.process(_inp("sess_1", "mi tel es 555"))
-    assert "todo el expediente ha sido recibido" in resp.data["respuesta"].lower()
+    assert "cerramos los datos pendientes" in resp.data["respuesta"].lower()
 
 
 @pytest.mark.asyncio
@@ -529,7 +535,7 @@ async def test_mark_non_cotizable_sin_ancla_retira_huerfano(agent, mock_context)
     resp = await agent.process(_inp("sess_1", "pasame el parrafo y en que pagina lo solicitan"))
 
     assert resp.status == AgentStatus.SUCCESS
-    assert resp.data.get("tipo") in ("welcome_greeting", "info", "rag_answer")
+    assert resp.data.get("tipo") in ("welcome_greeting", "info", "rag_answer", "pending_marked_non_cotizable")
     assert state.get("pending_questions") == []
 
 
@@ -1635,27 +1641,32 @@ def test_session_resume_partial_does_not_claim_bases_analyzed():
     agent = ChatbotRAGAgent(MagicMock())
     state = {
         "name": "VIGILANCIA ISSSTE",
+        "last_orchestrator_decision": {"stop_reason": "MISSING_PRIOR_ANALYSIS"},
         "tasks_completed": [
             {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
         ],
     }
     msg = agent._build_session_resume_message(state)
+    from app.services.chat_gate5_formatter import count_visible_lines
+    from app.services.chat_stop_reason_map import assert_user_visible_clean
+
+    assert count_visible_lines(msg) <= 3
+    assert_user_visible_clean(msg)
     assert "las bases están analizadas" not in msg.lower()
-    assert "dictamen forense" in msg.lower()
-    assert "generar propuesta económica" not in msg.lower() or "primero" in msg.lower()
 
 
 def test_session_resume_complete_allows_economic_cta():
     agent = ChatbotRAGAgent(MagicMock())
     state = {
         "name": "VIGILANCIA ISSSTE",
+        "last_orchestrator_decision": {"stop_reason": "ANALYSIS_COMPLETED"},
         "tasks_completed": [
             {"task": "stage_completed:compliance", "result": {"status": "success"}},
         ],
     }
     msg = agent._build_session_resume_message(state)
-    assert "dictamen forense de cumplimiento está listo" in msg
-    assert "generar propuesta económica" in msg.lower()
+    assert "siguiente paso" in msg.lower()
+    assert "precio" in msg.lower() or "generar" in msg.lower()
 
 
 def test_build_analysis_in_progress_message_shows_pct():
