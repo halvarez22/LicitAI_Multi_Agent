@@ -1,12 +1,97 @@
 import logging
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+from pydantic import BaseModel, Field
+
 from app.agents.base_agent import BaseAgent
 from app.agents.mcp_context import MCPContextManager
 from app.core.observability import get_logger, agent_span
 from app.contracts.agent_contracts import AgentInput, AgentOutput, AgentStatus
 
 logger = get_logger(__name__)
+
+
+class Conflict(BaseModel):
+    """Conflicto detectado en validación cruzada Analyst ↔ Compliance."""
+
+    type: str
+    description: str = ""
+
+
+class ValidationReport(BaseModel):
+    """Reporte determinístico para backtracking (Fase 3)."""
+
+    consistent: bool = True
+    conflicts: List[Conflict] = Field(default_factory=list)
+    requires_compliance_revision: bool = False
+    requires_analyst_revision: bool = False
+    suggested_corrections: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _unwrap_agent_payload(value: Any) -> Dict[str, Any]:
+    """Normaliza salida de agente (``AgentOutput``, dict anidado o plano)."""
+    if value is None:
+        return {}
+    if isinstance(value, AgentOutput):
+        data = value.data
+        return data if isinstance(data, dict) else {}
+    if isinstance(value, dict):
+        nested = value.get("data")
+        if isinstance(nested, dict):
+            return nested
+        return value
+    return {}
+
+
+def _collect_requirement_ids(payload: Dict[str, Any]) -> Set[str]:
+    ids: Set[str] = set()
+    for item in payload.get("requirements") or []:
+        if isinstance(item, dict) and item.get("id"):
+            ids.add(str(item["id"]))
+    return ids
+
+
+def _collect_compliance_ids(payload: Dict[str, Any]) -> Set[str]:
+    ids: Set[str] = set()
+    for bucket in ("administrativo", "tecnico", "formatos"):
+        for item in payload.get(bucket) or []:
+            if isinstance(item, dict) and item.get("id"):
+                ids.add(str(item["id"]))
+    return ids
+
+
+class ValidatorAgent:
+    """
+    Validación cruzada determinística entre Analyst y Compliance.
+
+    Usado por el orquestador cuando ``BACKTRACKING_ENABLED`` está activo.
+    """
+
+    def validate(self, analyst_out: Any, compliance_out: Any) -> ValidationReport:
+        analyst_data = _unwrap_agent_payload(analyst_out)
+        compliance_data = _unwrap_agent_payload(compliance_out)
+        req_ids = _collect_requirement_ids(analyst_data)
+        covered_ids = _collect_compliance_ids(compliance_data)
+        missing = sorted(req_ids - covered_ids)
+
+        if not missing:
+            return ValidationReport(consistent=True, conflicts=[])
+
+        conflicts = [
+            Conflict(
+                type="missing_coverage",
+                description=f"Requisito {rid} sin cobertura en compliance",
+            )
+            for rid in missing
+        ]
+        return ValidationReport(
+            consistent=False,
+            conflicts=conflicts,
+            requires_compliance_revision=True,
+            suggested_corrections={rid: "Revisar cobertura en compliance" for rid in missing},
+        )
+
 
 class RequirementValidatorAgent(BaseAgent):
     """
