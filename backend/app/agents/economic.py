@@ -2643,6 +2643,7 @@ Genera un JSON ESTRICTO con la siguiente estructura:
             try:
                 from app.services.economic_capture_matrix_service import (
                     build_capture_matrix_blocks,
+                    build_capture_matrix_meta,
                 )
 
                 line_items = fresh.get("session_line_items") or []
@@ -2651,6 +2652,9 @@ Genera un JSON ESTRICTO con la siguiente estructura:
                 )
                 if matrices:
                     updates["capture_matrix_blocks"] = matrices
+                    updates["capture_matrix_meta"] = build_capture_matrix_meta(
+                        matrices, line_items
+                    )
             except Exception:
                 pass
 

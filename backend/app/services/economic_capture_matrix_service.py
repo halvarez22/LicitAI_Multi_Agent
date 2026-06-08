@@ -16,6 +16,15 @@ from app.services.economic_column_roles import (
 from app.services.structured_economic_price_mapper import build_structured_price_slots
 
 MATRIX_CAPTURE_MIN_ITEMS = 5
+CAPTURE_MATRIX_META_SCHEMA = "1.0.0"
+
+_CHANNEL_BADGES = {
+    "detected": "detectado",
+    "user_tsv": "pegado chat",
+    "user_csv": "import csv",
+    "user_block": "bloque ui",
+    "user_direct": "usuario",
+}
 
 _ECON_PENDING_TYPES = frozenset(
     {"economic_price", "economic_price_matrix", "economic_validation_blocking"}
@@ -91,6 +100,141 @@ def economic_capture_status(session_state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_cell_provenance_ui(
+    *,
+    source_file: str,
+    sheet_name: Optional[str] = None,
+    row_index: Optional[int] = None,
+    col_index: Optional[int] = None,
+    column_role: Optional[str] = None,
+    channel: str = "detected",
+    filled: bool = False,
+) -> Dict[str, Any]:
+    """
+    Procedencia auditable por celda (estándar HITL — Ítem D.13).
+
+    ``channel``: detected | user_tsv | user_csv | user_block | user_direct
+    """
+    role = str(column_role or ROLE_UNIT_PRICE_EXCL_IVA)
+    badge = _CHANNEL_BADGES.get(channel, channel)
+    return {
+        "source": channel if channel.startswith("user") else "document_detected",
+        "channel": channel,
+        "badge": badge,
+        "label": human_role_label(role),
+        "source_file": str(source_file or "").strip()[:255],
+        "sheet": str(sheet_name or "").strip()[:128] or None,
+        "row": int(row_index) if row_index is not None else None,
+        "col": int(col_index) if col_index is not None else None,
+        "column_role": role,
+        "filled": bool(filled),
+    }
+
+
+def attach_provenance_to_matrix_blocks(
+    blocks: List[Dict[str, Any]],
+    *,
+    economic_user_inputs: Optional[Dict[str, Any]] = None,
+    default_channel: str = "detected",
+) -> List[Dict[str, Any]]:
+    """Añade ``provenance_ui`` a cada fila de matriz para API y paneles."""
+    inputs = economic_user_inputs if isinstance(economic_user_inputs, dict) else {}
+    out: List[Dict[str, Any]] = []
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        nb = dict(block)
+        source = str(block.get("source_file") or "")
+        role = str(block.get("column_role") or ROLE_UNIT_PRICE_EXCL_IVA)
+        price_col_idx = block.get("price_column_index")
+        rows_out: List[Dict[str, Any]] = []
+        for row in block.get("matrix_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            nr = dict(row)
+            field = str(nr.get("field") or "").strip()
+            filled = bool(field and field in inputs and str(inputs.get(field) or "").strip() != "")
+            channel = str(nr.get("capture_channel") or default_channel)
+            nr["provenance_ui"] = build_cell_provenance_ui(
+                source_file=source,
+                sheet_name=nr.get("sheet_name"),
+                row_index=nr.get("row_index"),
+                col_index=nr.get("price_column_index") or price_col_idx,
+                column_role=role,
+                channel=channel,
+                filled=filled,
+            )
+            rows_out.append(nr)
+        nb["matrix_rows"] = rows_out
+        out.append(nb)
+    return out
+
+
+def build_capture_matrix_meta(
+    blocks: List[Dict[str, Any]],
+    line_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Layout detectado versionado en sesión (Ítem D.4).
+
+    Resume archivos, roles de columna y dimensión de fila sin hardcode por licitación.
+    """
+    layouts: List[Dict[str, Any]] = []
+    template_kinds: set[str] = set()
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        rows = block.get("matrix_rows") or []
+        if any("|" in str(r.get("label") or "") for r in rows):
+            dim = "zona_horario"
+        elif block.get("column_role") == ROLE_UNIT_PRICE_IVA_INCLUDED:
+            dim = "localidades"
+        else:
+            dim = "conceptos"
+        layouts.append(
+            {
+                "source_file": block.get("source_file"),
+                "column_role": block.get("column_role"),
+                "column_label": block.get("column_label"),
+                "row_dimension": dim,
+                "row_count": len(rows),
+                "block_group_key": block.get("block_group_key"),
+            }
+        )
+    for row in line_items or []:
+        if not isinstance(row, dict):
+            continue
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        tk = str(extra.get("template_kind") or "").strip()
+        if tk:
+            template_kinds.add(tk)
+    return {
+        "schema_version": CAPTURE_MATRIX_META_SCHEMA,
+        "block_count": len(blocks or []),
+        "total_rows": sum(len(b.get("matrix_rows") or []) for b in (blocks or []) if isinstance(b, dict)),
+        "template_kinds": sorted(template_kinds),
+        "layouts": layouts,
+    }
+
+
+def format_capture_summary_message(status: Dict[str, Any]) -> str:
+    """Resumen unificado «capturaste X de Y» (Ítem D.12)."""
+    filled = int(status.get("filled") or 0)
+    total = int(status.get("total") or 0)
+    if total <= 0:
+        return "Aún no hay filas de precio detectadas en la matriz."
+    if status.get("capture_complete"):
+        return (
+            f"Capturaste **{filled}** de **{total}** precio(s) unitario(s). "
+            "La cotización está lista para generar la propuesta económica."
+        )
+    missing = max(0, total - filled)
+    return (
+        f"Capturaste **{filled}** de **{total}** precio(s) unitario(s). "
+        f"Faltan **{missing}** por completar."
+    )
+
+
 def hydrate_matrix_blocks_with_inputs(
     blocks: List[Dict[str, Any]],
     economic_user_inputs: Optional[Dict[str, Any]] = None,
@@ -113,7 +257,7 @@ def hydrate_matrix_blocks_with_inputs(
             rows.append(nr)
         nb["matrix_rows"] = rows
         out.append(nb)
-    return out
+    return attach_provenance_to_matrix_blocks(out, economic_user_inputs=inputs)
 
 
 def build_capture_matrix_blocks_from_pending(
@@ -212,12 +356,15 @@ def build_capture_matrix_blocks(
             },
         )
         row_label = str(slot.get("concept_label") or slot.get("label") or "").strip()
+        extra_rows = slot.get("rows") or []
+        row_ref = extra_rows[0] if extra_rows and isinstance(extra_rows[0], dict) else {}
         bucket["rows"].append(
             {
                 "field": slot.get("field"),
                 "label": row_label,
-                "sheet_name": slot.get("sheet_name"),
-                "row_index": slot.get("row_index"),
+                "sheet_name": slot.get("sheet_name") or row_ref.get("sheet_name"),
+                "row_index": slot.get("row_index") or row_ref.get("row_index"),
+                "price_column_index": slot.get("price_column_index"),
             }
         )
 
@@ -239,10 +386,18 @@ def build_capture_matrix_blocks(
             {"key": "price", "title": bucket["column_label"]},
         ]
         bucket["matrix_rows"] = [
-            {"label": r.get("label"), "price": "", "field": r.get("field")} for r in rows_meta
+            {
+                "label": r.get("label"),
+                "price": "",
+                "field": r.get("field"),
+                "sheet_name": r.get("sheet_name"),
+                "row_index": r.get("row_index"),
+                "price_column_index": r.get("price_column_index"),
+            }
+            for r in rows_meta
         ]
         blocks.append(bucket)
-    return blocks
+    return attach_provenance_to_matrix_blocks(blocks)
 
 
 def parse_tsv_price_block(

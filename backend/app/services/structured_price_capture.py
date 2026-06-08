@@ -11,7 +11,10 @@ from app.services.chat_economic_matrix import (
     build_proactive_economic_matrix_welcome,
     should_use_matrix_capture,
 )
-from app.services.economic_capture_matrix_service import build_capture_matrix_blocks
+from app.services.economic_capture_matrix_service import (
+    build_capture_matrix_blocks,
+    build_capture_matrix_meta,
+)
 
 
 def prepare_structured_price_capture(
@@ -34,6 +37,7 @@ def prepare_structured_price_capture(
     }
     if matrices:
         updates["capture_matrix_blocks"] = matrices
+        updates["capture_matrix_meta"] = build_capture_matrix_meta(matrices, line_items)
 
     if should_use_matrix_capture(
         total,

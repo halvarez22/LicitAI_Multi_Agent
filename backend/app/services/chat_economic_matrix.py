@@ -231,4 +231,9 @@ def apply_tsv_bulk_to_inputs(
                 continue
             economic_user_inputs[field] = float(val)
             applied[field] = val
+            for block in blocks or []:
+                for row in block.get("matrix_rows") or []:
+                    if isinstance(row, dict) and str(row.get("field") or "") == field:
+                        row["capture_channel"] = "user_tsv"
+                        row["price"] = float(val)
     return {"applied": applied, "errors": errors, "skipped": 0}

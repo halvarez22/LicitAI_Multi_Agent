@@ -38,7 +38,10 @@ PYTEST_FILES = [
     "tests/test_economic_column_roles.py",
     "tests/test_structured_location_price_slots.py",
     "tests/test_chat_economic_matrix.py",
+    "tests/test_economic_capture_tri_channel.py",
+    "tests/test_capture_matrix_meta.py",
     "tests/test_economic_coverage_gate.py",
+    "tests/test_tabular_line_item_extract.py::test_extract_line_items_location_price_grid_zb_style",
     "tests/test_excel_filling_service.py",
     "tests/test_document_deliverable_filter.py",
 ]

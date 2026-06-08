@@ -190,6 +190,36 @@ def test_extract_line_items_transposed_material_support_matrix(tmp_path):
     assert alcohol["precio_unitario"] == 0.0
 
 
+def test_extract_line_items_location_price_grid_zb_style(tmp_path):
+    """Regresión layout localidades × precio IVA incluido (estilo ZB, Ítem D.20)."""
+    path = tmp_path / "anexo_zb.xlsx"
+    df = pd.DataFrame(
+        [
+            ["", "ANEXO III PARTIDA 2 ZB — PROPUESTA ECONÓMICA", "", ""],
+            ["", "LOCALIDAD", "NÚM. DE ELEMENTOS", "COSTO POR ELEMENTO I.V.A INCLUIDO"],
+            ["", "Acambaro", 1, ""],
+            ["", "Celaya", 1, ""],
+            ["", "Salamanca", 1, ""],
+            ["", "Leon", 1, ""],
+            ["", "Irapuato", 1, ""],
+            ["", "Silao", 1, ""],
+        ]
+    )
+    with pd.ExcelWriter(path, engine="openpyxl") as w:
+        df.to_excel(w, sheet_name="ZB", index=False, header=False)
+
+    rows = extract_line_items_from_excel_path(str(path), "33. Anexo III P1-2 ZB.xlsx")
+    assert len(rows) >= 6
+    by_concept = {r["concepto_norm"]: r for r in rows}
+    acambaro = by_concept["acambaro"]
+    assert acambaro["extra"]["template_kind"] == "location_price_grid"
+    assert acambaro["extra"]["layout"] == "structured_template"
+    header = str(acambaro["extra"].get("price_column_header") or "").lower()
+    assert "incl" in header or "i.v.a" in header
+    assert acambaro["precio_unitario"] in (None, 0.0)
+    assert acambaro["extra"].get("price_input_pending") is True
+
+
 def test_extract_line_items_material_support_list(tmp_path):
     path = tmp_path / "lista_soporte.xlsx"
     df = pd.DataFrame(

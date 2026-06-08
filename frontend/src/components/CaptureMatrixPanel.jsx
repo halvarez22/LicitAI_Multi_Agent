@@ -76,6 +76,7 @@ export default function CaptureMatrixPanel({ sessionId }) {
 
     const [copyErr, setCopyErr] = useState(null);
     const [captureStatus, setCaptureStatus] = useState(null);
+    const [captureSummary, setCaptureSummary] = useState('');
 
     const load = useCallback(async () => {
 
@@ -113,10 +114,12 @@ export default function CaptureMatrixPanel({ sessionId }) {
 
                 setExcelTsv(fromApi || buildMatrixExcelTsv(loaded));
                 setCaptureStatus(body.data.capture_status || null);
+                setCaptureSummary(String(body.data.capture_summary || '').trim());
             } else {
                 setBlocks([]);
                 setExcelTsv('');
                 setCaptureStatus(null);
+                setCaptureSummary('');
             }
 
         } catch (e) {
@@ -244,7 +247,11 @@ export default function CaptureMatrixPanel({ sessionId }) {
             </div>
 
             <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.45 }}>
-                {captureStatus?.capture_complete ? (
+                {captureSummary ? (
+                    <span style={{ color: captureStatus?.capture_complete ? '#86efac' : undefined }}>
+                        {captureSummary.replace(/\*\*/g, '')}
+                    </span>
+                ) : captureStatus?.capture_complete ? (
                     <span style={{ color: '#86efac' }}>
                         Cotización lista: <strong>{captureStatus.filled}</strong> /{' '}
                         <strong>{captureStatus.total}</strong> precios. Usa <strong>Generar propuesta</strong>.
@@ -334,6 +341,31 @@ export default function CaptureMatrixPanel({ sessionId }) {
 
                                             >
 
+                                                {col.key === 'label' && row.provenance_ui?.badge ? (
+                                                    <span
+                                                        title={[
+                                                            row.provenance_ui.source_file,
+                                                            row.provenance_ui.sheet,
+                                                            row.provenance_ui.row != null
+                                                                ? `fila ${row.provenance_ui.row}`
+                                                                : '',
+                                                        ]
+                                                            .filter(Boolean)
+                                                            .join(' · ')}
+                                                        style={{
+                                                            marginRight: 6,
+                                                            fontSize: 9,
+                                                            padding: '1px 5px',
+                                                            borderRadius: 4,
+                                                            background: row.provenance_ui.filled
+                                                                ? 'rgba(34,197,94,0.2)'
+                                                                : 'rgba(148,163,184,0.15)',
+                                                            color: row.provenance_ui.filled ? '#86efac' : '#94a3b8',
+                                                        }}
+                                                    >
+                                                        {row.provenance_ui.badge}
+                                                    </span>
+                                                ) : null}
                                                 {row[col.key] ?? '—'}
 
                                             </td>
