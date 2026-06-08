@@ -1149,6 +1149,16 @@ async def get_capture_matrix_blocks(session_id: str):
                     rebuilt, session.get("economic_user_inputs")
                 )
         cap = economic_capture_status({**session, "capture_matrix_blocks": blocks})
+        from app.services.economic_capture_matrix_service import (
+            build_capture_matrix_meta,
+            format_capture_summary_message,
+        )
+
+        meta = session.get("capture_matrix_meta")
+        if not isinstance(meta, dict) or not meta:
+            meta = build_capture_matrix_meta(
+                blocks, list(session.get("session_line_items") or [])
+            )
         excel_tsv = ""
         if blocks:
             from app.services.chat_economic_matrix import format_matrix_blocks_excel_tsv
@@ -1162,6 +1172,8 @@ async def get_capture_matrix_blocks(session_id: str):
                 "count": len(blocks),
                 "excel_clipboard_tsv": excel_tsv,
                 "capture_status": cap,
+                "capture_summary": format_capture_summary_message(cap),
+                "capture_matrix_meta": meta,
             },
         )
     except Exception as e:
