@@ -377,6 +377,28 @@ async def process_document(
                 await sync_economic_pending_after_tabular_ingest(memory, session_id)
             except Exception as e:
                 print(f"WARN: re-ingest DOCX line_items failed: {e}")
+        elif filename_check.lower().endswith((".pdf", ".txt")):
+            from app.services.document_text_economic_ingest import (
+                persist_text_blob_economic_rows,
+            )
+            from app.services.economic_tabular_ingest_sync import (
+                sync_economic_pending_after_tabular_ingest,
+            )
+
+            extracted = str(doc_data.get("content", {}).get("extracted_text") or "")
+            ext_kind = filename_check.lower().rsplit(".", 1)[-1]
+            try:
+                await persist_text_blob_economic_rows(
+                    memory,
+                    session_id,
+                    doc_id,
+                    extracted,
+                    filename_check,
+                    source_type=ext_kind,
+                )
+                await sync_economic_pending_after_tabular_ingest(memory, session_id)
+            except Exception as e:
+                print(f"WARN: re-ingest {ext_kind} line_items failed: {e}")
         sync = await _sync_pending_after_analysis(memory, session_id, company_id)
         await memory.disconnect()
         filename_check = doc_data.get("content", {}).get("filename", "")
@@ -556,9 +578,32 @@ async def process_document(
             catalog_exc,
         )
 
+    # ── TextEconomicHook: PDF/TXT nativo → partidas estructuradas (HRU) ──
+    if ext in ("pdf", "txt") and raw_text.strip():
+        try:
+            from app.services.document_text_economic_ingest import (
+                persist_text_blob_economic_rows,
+            )
+
+            await persist_text_blob_economic_rows(
+                memory,
+                session_id,
+                doc_id,
+                raw_text,
+                filename,
+                source_type=ext,
+            )
+        except Exception as text_eco_exc:
+            logger.warning(
+                "text_economic_ingest_failed session=%s doc=%s err=%s",
+                session_id,
+                doc_id,
+                text_eco_exc,
+            )
+
     # ── TabularEconomicHook: cerrar price_source si el archivo trae precios ──
     tabular_eco_sync: Dict[str, Any] = {}
-    if ext in ("xlsx", "xls", "docx"):
+    if ext in ("xlsx", "xls", "docx", "csv", "pdf", "txt"):
         try:
             from app.services.economic_tabular_ingest_sync import (
                 sync_economic_pending_after_tabular_ingest,

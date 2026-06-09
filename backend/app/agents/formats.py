@@ -39,7 +39,12 @@ from app.utils.doc_formatting import (
     is_markdown_table_line,
     parse_markdown_table,
 )
-from app.services.document_date_resolver import resolve_addressee_lines, resolve_document_date
+from app.services.document_date_resolver import (
+    normalize_body_spanish_dates,
+    normalize_docx_spanish_dates,
+    resolve_addressee_lines,
+    resolve_document_date,
+)
 from app.services.document_contamination_gate import is_apu_document, strip_llm_meta_leaks
 from app.core.template_engine import LegalTemplateEngine, TemplateIntegrityError
 from app.services.resilient_llm import ResilientLLMClient
@@ -723,6 +728,40 @@ class FormatsAgent(BaseAgent):
                     session_id=session_id,
                     error=str(exc)[:120],
                 )
+        try:
+            from app.services.convocante_resolver import (
+                extract_convocante_from_text,
+                merge_convocante_into_session_patch,
+            )
+
+            conv_hint = str(session_state.get("bases_corpus_hint") or "")
+            if len(conv_hint) < 800:
+                conv_res = self.vector_db.query_texts(
+                    session_id,
+                    "H. Ayuntamiento Dirección General convocante licitación pública número comité",
+                    n_results=20,
+                )
+                conv_hint = "\n".join(
+                    d for d in (conv_res.get("documents") or []) if d
+                )[:120000]
+            patch = merge_convocante_into_session_patch(session_state, conv_hint)
+            if not patch.get("convocante"):
+                patch = extract_convocante_from_text(conv_hint)
+            if patch.get("convocante"):
+                la = dict(session_state.get("last_analysis") or {})
+                for k, v in patch.items():
+                    if v and not str(la.get(k) or "").strip():
+                        la[k] = v
+                session_state["last_analysis"] = la
+                if patch.get("destinatario"):
+                    session_state["destinatario"] = patch["destinatario"]
+                session_state["convocante"] = patch.get("convocante") or session_state.get("convocante")
+        except Exception as conv_exc:
+            logger.warning(
+                "formats_convocante_enrich_failed",
+                session_id=session_id,
+                error=str(conv_exc)[:120],
+            )
         _date_info = resolve_document_date(session_state)
         _fecha_f = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
 
@@ -735,7 +774,9 @@ class FormatsAgent(BaseAgent):
         )
 
         _letter_meta = resolve_letter_session_metadata(session_state)
-        _ciudad = resolve_document_ciudad(master_profile, str(_dom_fiscal))
+        _ciudad = resolve_document_ciudad(
+            master_profile, str(_dom_fiscal), letter_meta=_letter_meta
+        )
         doc_metadata = {
             "logo_path": logo_path,
             "tender_name": session_id.replace("_", " ").upper(),
@@ -754,6 +795,8 @@ class FormatsAgent(BaseAgent):
                 session_state, agent_input.triage_context if hasattr(agent_input, "triage_context") else None
             ),
             "convocante": _letter_meta.get("convocante", ""),
+            "entidad": _letter_meta.get("entidad", ""),
+            "dependencia": _letter_meta.get("dependencia", ""),
             "concurso_label": _letter_meta.get("concurso_label", ""),
             "ciudad": _ciudad,
             "formal_closing": True,
@@ -1311,6 +1354,9 @@ class FormatsAgent(BaseAgent):
                         profile_fill,
                         fill_profile=True,
                     )
+                canon_fecha = str(doc_metadata.get("fecha") or "").strip()
+                if canon_fecha and meta.get("ruta"):
+                    normalize_docx_spanish_dates(str(meta["ruta"]), canon_fecha)
                 generated_files.append(
                     attach_traceability(
                         {
@@ -1432,13 +1478,51 @@ class FormatsAgent(BaseAgent):
                     f"\nFRAGMENTO LITERAL DE BASES (respeta estructura y cláusulas):\n"
                     f"{req_snippet.strip()[:2000]}\n"
                 )
+
+            from app.services.administrative_letter_clauses import (
+                is_obra_tabular_annex,
+                is_short_acceptance_annex,
+                resolve_letter_session_metadata,
+                strip_redundant_signature_blocks,
+                try_build_clause_markdown,
+            )
+
+            req_letter_meta = resolve_letter_session_metadata(
+                session_state,
+                triage_context=agent_input.triage_context if hasattr(agent_input, "triage_context") else None,
+                req_snippet=req_snippet or req_desc,
+            )
+            req_doc_metadata = {
+                **doc_metadata,
+                **{k: v for k, v in req_letter_meta.items() if v},
+                "req_snippet": req_snippet or req_desc,
+            }
+            req_doc_metadata["obra_tabular"] = is_obra_tabular_annex(raw_name)
+            if req_doc_metadata.get("obra_tabular"):
+                req_doc_metadata["ciudad"] = resolve_document_ciudad(
+                    master_profile,
+                    str(_dom_fiscal),
+                    letter_meta=req_letter_meta,
+                )
+            short_acceptance = is_short_acceptance_annex(raw_name, req_desc, req_snippet)
+
+            acceptance_rule = ""
+            if short_acceptance:
+                acceptance_rule = (
+                    "REGLA ESPECIAL: Este anexo solo requiere una carta breve de aceptación o negativa "
+                    "del documento publicado en las bases. NO redactes un aviso de privacidad completo, "
+                    "ni políticas extensas, ni listas de finalidades. Máximo dos párrafos sustantivos. "
+                    "NO incluyas bloque de firma al final (el sistema lo agrega).\n"
+                )
             prompt = (
                 f"Genera el contenido legal oficial para el requisito {req.get('id')}: {req_nombre}\n"
                 f"Descripción: {req_desc}\nEmpresa: {razon_social}\n"
                 f"Representante: {representante}\nRFC: {rfc}\n"
                 f"Domicilio: {master_profile.get('domicilio_fiscal', '')}\n"
+                f"Destinatario: {req_doc_metadata.get('destinatario', '')}\n"
                 f"{snippet_block}{bases_context_block}\n"
                 f"{economic_block}\n{hint_line}\n"
+                f"{acceptance_rule}"
                 "OBLIGATORIO: Redacta como concursante (quien suscribe / mi representada). "
                 "Incluye al menos un párrafo con «bajo protesta de decir verdad» o «manifiesto». "
                 "No devuelvas solo títulos ni encabezados."
@@ -1446,12 +1530,11 @@ class FormatsAgent(BaseAgent):
 
             content = ""
             materialization_route = "generate_controlled"
-            from app.services.administrative_letter_clauses import try_build_clause_markdown
 
             clause_body = try_build_clause_markdown(
                 req_label=raw_name,
                 master_profile=master_profile,
-                doc_metadata={**doc_metadata, "req_snippet": req_snippet or req_desc},
+                doc_metadata=req_doc_metadata,
                 req_snippet=req_snippet or req_desc,
             )
             if clause_body and not template_id:
@@ -1487,12 +1570,18 @@ class FormatsAgent(BaseAgent):
             content = _sanitize_legal_content(
                 content,
                 session_id=session_id,
-                metadata=doc_metadata,
+                metadata=req_doc_metadata,
             )
+            content = strip_redundant_signature_blocks(content)
 
             from app.services.document_body_quality import is_substantive_markdown
 
-            if not template_id and materialization_route != "deterministic_clause" and not is_substantive_markdown(content):
+            if (
+                not template_id
+                and materialization_route != "deterministic_clause"
+                and not short_acceptance
+                and not is_substantive_markdown(content)
+            ):
                 retry_prompt = (
                     f"{prompt}\n\nREINTENTO OBLIGATORIO: Redacta el cuerpo legal completo "
                     "(declaración o carta bajo protesta de decir verdad) con al menos tres "
@@ -1509,9 +1598,15 @@ class FormatsAgent(BaseAgent):
                     content = _sanitize_legal_content(
                         content,
                         session_id=session_id,
-                        metadata=doc_metadata,
+                        metadata=req_doc_metadata,
                     )
-            if not template_id and materialization_route != "deterministic_clause" and not is_substantive_markdown(content):
+                    content = strip_redundant_signature_blocks(content)
+            if (
+                not template_id
+                and materialization_route != "deterministic_clause"
+                and not short_acceptance
+                and not is_substantive_markdown(content)
+            ):
                 from app.services.legal_document_fallback import (
                     build_administrative_fallback_markdown,
                 )
@@ -1521,7 +1616,7 @@ class FormatsAgent(BaseAgent):
                     req_desc=req_desc,
                     req_snippet=req_snippet,
                     master_profile=master_profile,
-                    doc_metadata=doc_metadata,
+                    doc_metadata=req_doc_metadata,
                     session_state=session_state,
                 )
                 logger.warning(
@@ -1533,7 +1628,7 @@ class FormatsAgent(BaseAgent):
 
             filepath = os.path.join(output_dir_early, f"{filename}.docx")
             try:
-                _save_docx(display_title, content, filepath, doc_metadata)
+                _save_docx(display_title, content, filepath, req_doc_metadata)
                 try:
                     from docx import Document as DocxDocument
 
@@ -1798,15 +1893,18 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     htable = header.add_table(1, 2, Inches(6.5))
     
     # Logo
-    if metadata and metadata.get("logo_path") and os.path.exists(metadata["logo_path"]):
-        try:
-            htable.cell(0, 0).paragraphs[0].add_run().add_picture(metadata["logo_path"], width=Inches(1.5))
-        except Exception as e:
+    if metadata and metadata.get("logo_path"):
+        from app.utils.doc_formatting import add_logo_picture_to_run
+
+        if not add_logo_picture_to_run(
+            htable.cell(0, 0).paragraphs[0].add_run(),
+            str(metadata["logo_path"]),
+            width_inches=1.5,
+        ):
             logger.warning(
                 "logo_insert_failed",
                 agent="formats_001",
                 path=(metadata or {}).get("logo_path"),
-                error=str(e),
             )
             
     # Datos Licitación
@@ -1839,12 +1937,18 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
     doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
     
-    # Destinatario (convocante desde sesión o genérico; sin hardcode por licitación)
-    dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
-    p_dest = doc.add_paragraph(f"\n{dest}")
-    p_dest.bold = True
-    
-    doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
+    obra_tabular = bool((metadata or {}).get("obra_tabular"))
+    if not obra_tabular:
+        # Destinatario (convocante desde sesión o genérico; sin hardcode por licitación)
+        dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
+        p_dest = doc.add_paragraph(f"\n{dest}")
+        p_dest.bold = True
+        
+        doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    canon_fecha = str((metadata or {}).get("fecha") or "").strip()
+    if canon_fecha and content:
+        content = normalize_body_spanish_dates(content, canon_fecha)
 
     # --- PROCESAMIENTO DE CUERPO CON SOPORTE PARA TABLAS NATIVAS ---
     raw_lines = (content or "").split("\n")
@@ -1917,3 +2021,5 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
             ).alignment = WD_ALIGN_PARAGRAPH.LEFT
     
     doc.save(file_path)
+    if canon_fecha:
+        normalize_docx_spanish_dates(file_path, canon_fecha)

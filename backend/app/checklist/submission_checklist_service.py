@@ -33,6 +33,48 @@ def _cronograma_from_analysis_result(result: Any) -> Optional[Dict[str, Any]]:
     return c if isinstance(c, dict) else None
 
 
+async def _load_bases_corpus_text(
+    memory: Any,
+    session_id: str,
+    session: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Texto concatenado de bases/convocatoria para extracción determinista de fechas."""
+    state = session if session is not None else await memory.get_session(session_id)
+    if not state:
+        return ""
+    try:
+        from app.services.junta_bases_corpus import build_bases_corpus
+
+        docs = await memory.get_documents(session_id) or []
+        corpus = build_bases_corpus(session_id, docs, session_state=state)
+        return str(corpus.combined or "")
+    except Exception as exc:
+        logger.warning(
+            "cronograma_bases_corpus_failed session=%s err=%s",
+            session_id,
+            str(exc)[:200],
+        )
+        return ""
+
+
+def _cronograma_from_bases_text(bases_text: str) -> Optional[Dict[str, str]]:
+    """
+    Cronograma determinista cuando el Analyst no persistió ``cronograma`` (p. ej. JSON parse error).
+    """
+    from app.services.cronograma_bases_extract import (
+        cronograma_has_extracted_dates,
+        extract_cronograma_from_bases_text,
+    )
+
+    blob = str(bases_text or "").strip()
+    if not blob:
+        return None
+    extracted = extract_cronograma_from_bases_text(blob)
+    if not cronograma_has_extracted_dates(extracted):
+        return None
+    return extracted
+
+
 def _hitos_to_model_list(hitos_data: List[Dict[str, Any]]) -> List[HitoModel]:
     return [HitoModel.model_validate(h) for h in hitos_data]
 
@@ -195,19 +237,18 @@ async def ensure_session_cronograma_and_checklist(
             memory, session_id, auto_sync=False, refresh_placeholders=False
         )
 
-    bases_text = ""
-    try:
-        from app.services.junta_bases_corpus import build_bases_corpus
+    bases_text = await _load_bases_corpus_text(memory, session_id, session)
 
-        docs = await memory.get_documents(session_id) or []
-        corpus = build_bases_corpus(session_id, docs, session_state=session)
-        bases_text = corpus.combined
-    except Exception as exc:
-        logger.warning(
-            "cronograma_bases_corpus_failed session=%s err=%s",
-            session_id,
-            str(exc)[:200],
-        )
+    if cron is None and bases_text.strip():
+        cron = _cronograma_from_bases_text(bases_text)
+        if cron:
+            logger.info(
+                "cronograma_bases_fallback_applied",
+                session_id=session_id,
+                hitos_con_fecha=sum(
+                    1 for v in cron.values() if str(v or "").strip()
+                ),
+            )
 
     if cron is not None and bases_text.strip():
         from app.services.cronograma_bases_extract import merge_cronograma_with_bases
@@ -306,15 +347,7 @@ async def get_submission_checklist(
     if not session:
         return None
     block = session.get(SESSION_KEY)
-    bases_text = ""
-    try:
-        from app.services.junta_bases_corpus import build_bases_corpus
-
-        docs = await memory.get_documents(session_id) or []
-        corpus = build_bases_corpus(session_id, docs, session_state=session)
-        bases_text = corpus.combined or ""
-    except Exception:
-        pass
+    bases_text = await _load_bases_corpus_text(memory, session_id, session)
     if (
         refresh_placeholders
         and isinstance(block, dict)
@@ -372,6 +405,9 @@ async def sync_checklist_from_last_analysis(
         if t.get("task") != "stage_completed:analysis":
             continue
         cron = _cronograma_from_analysis_result(t.get("result"))
+        if cron is None:
+            bases_text = await _load_bases_corpus_text(memory, session_id, session)
+            cron = _cronograma_from_bases_text(bases_text)
         if cron is None:
             return None
         had = bool(session.get(SESSION_KEY))

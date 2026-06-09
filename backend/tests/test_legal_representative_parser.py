@@ -1,6 +1,7 @@
 from app.services.legal_representative_parser import (
     detect_cif_contribuyente_name,
     detect_legal_representative,
+    strip_identity_labels_from_person_name,
 )
 
 
@@ -110,3 +111,44 @@ def test_rechaza_delegado_especial_para_que_ocurra_ante_notario():
     text = "Delegado Especial para que ocurra ante Notario Publico"
     result = detect_legal_representative(text)
     assert result["found"] is False
+
+
+def test_no_confunde_como_comisario_con_nombre():
+    """Regresión: «se designa como Comisario» no es un nombre humano."""
+    from app.services.legal_representative_parser import is_plausible_representative_name
+
+    assert is_plausible_representative_name("como Comisario") is False
+    text = "En asamblea se designa como Comisario a Roberto Sanchez Garcia quien acepta el cargo."
+    result = detect_legal_representative(text)
+    assert result["found"] is True
+    assert result["trigger"] == "se_designa_como_cargo_a"
+    assert "Roberto Sanchez Garcia" in result["representative"]
+
+
+def test_strip_identity_labels_quita_curp_colgando():
+    assert strip_identity_labels_from_person_name("Juan Carlos López Martínez CURP") == "Juan Carlos López Martínez"
+    assert (
+        strip_identity_labels_from_person_name("Ana Ruiz Mendez RFC ABC010101AA1")
+        == "Ana Ruiz Mendez"
+    )
+
+
+def test_detect_representante_sin_curp_en_cola_ocr():
+    text = (
+        "Apoderado legal: Juan Carlos Lopez Martinez CURP LOJM800101HDFRNN09 "
+        "con facultades de administracion."
+    )
+    result = detect_legal_representative(text)
+    assert result["found"] is True
+    assert result["representative"] == "Juan Carlos Lopez Martinez"
+
+
+def test_nombrar_como_administrador_unico_a_nombre():
+    text = (
+        "Los socios convienen en nombrar como Administrador Unico a "
+        "Maria Fernanda Torres Ramirez con facultades amplias."
+    )
+    result = detect_legal_representative(text)
+    assert result["found"] is True
+    assert result["trigger"] in {"nombrar_como_cargo_a", "nombrar_como_nuevo_admin_unico", "se_nombra_admin_unico"}
+    assert "Maria Fernanda Torres Ramirez" in result["representative"]

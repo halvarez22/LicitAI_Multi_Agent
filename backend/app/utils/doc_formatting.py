@@ -5,9 +5,14 @@ Elimina énfasis tipo Markdown y reglas horizontales que no aportan en DOCX.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
+from app.core.observability import get_logger
+
+logger = get_logger(__name__)
 
 # Instrucción compartida para prompts de redacción (Technical / Formats).
 ANTI_PLACEHOLDER_PROMPT_RULE = (
@@ -141,6 +146,53 @@ def repair_docx_file_placeholders(path: str) -> bool:
     return changed
 
 
+def add_logo_picture_to_run(run: Any, logo_path: str, *, width_inches: float = 1.5) -> bool:
+    """
+    Inserta un logotipo en un run de python-docx.
+
+    Intenta la ruta directa; si python-docx no reconoce el archivo (p. ej. JPEG
+    progresivo), re-codifica con Pillow a PNG en memoria.
+    """
+    from docx.shared import Inches
+
+    path = str(logo_path or "").strip()
+    if not path or not os.path.exists(path):
+        return False
+
+    width = Inches(width_inches)
+    try:
+        run.add_picture(path, width=width)
+        return True
+    except Exception as direct_err:
+        direct_error = str(direct_err) or type(direct_err).__name__
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            if im.mode in ("P", "LA"):
+                im = im.convert("RGBA")
+            elif im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGB")
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            buf.seek(0)
+        run.add_picture(buf, width=width)
+        logger.info(
+            "logo_insert_pil_fallback",
+            path=path,
+            direct_error=direct_error,
+        )
+        return True
+    except Exception as pil_err:
+        logger.warning(
+            "logo_insert_failed",
+            path=path,
+            direct_error=direct_error,
+            pil_error=str(pil_err) or type(pil_err).__name__,
+        )
+        return False
+
+
 def apply_corporate_docx_letterhead(doc: Any, metadata: Optional[Dict[str, Any]] = None) -> None:
     """
     Inserta membrete corporativo (logo en encabezado + pie) en un Document de python-docx.
@@ -156,11 +208,12 @@ def apply_corporate_docx_letterhead(doc: Any, metadata: Optional[Dict[str, Any]]
     htable = header.add_table(1, 2, Inches(6.5))
 
     logo_path = str(meta.get("logo_path") or "").strip()
-    if logo_path and os.path.exists(logo_path):
-        try:
-            htable.cell(0, 0).paragraphs[0].add_run().add_picture(logo_path, width=Inches(1.5))
-        except Exception:
-            pass
+    if logo_path:
+        add_logo_picture_to_run(
+            htable.cell(0, 0).paragraphs[0].add_run(),
+            logo_path,
+            width_inches=1.5,
+        )
 
     p_info = htable.cell(0, 1).paragraphs[0]
     p_info.alignment = WD_ALIGN_PARAGRAPH.RIGHT

@@ -4,9 +4,44 @@ from typing import Any, Dict, List, Optional, Tuple
 
 NAME_PATTERN = r"([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+){1,5})"
 
+# Cargos societarios que suelen ir entre «como … a» y el nombre humano (no son representante).
+_CORPORATE_ROLE_TOKEN = (
+    r"comisario|administrador(?:a)?(?:\s+[úu]nico)?|presidente(?:e)?|vicepresidente|"
+    r"tesorero|secretario|vocal|gerente|director(?:a)?(?:\s+general)?|apoderado(?:\s+legal)?|"
+    r"delegado(?:\s+especial)?|representante(?:\s+legal)?|consejero|síndico|sindico|"
+    r"prosecretario|pro\s*tesorero|mesa\s+directiva"
+)
+
+_ROLE_WORDS = frozenset({
+    "como", "comisario", "administrador", "administradora", "presidente", "presidenta",
+    "vicepresidente", "tesorero", "secretario", "secretaria", "vocal", "gerente", "director",
+    "directora", "apoderado", "apoderada", "delegado", "representante", "consejero",
+    "sindico", "síndico", "prosecretario", "unico", "único", "general", "legal", "especial",
+    "mesa", "directiva", "cargo", "nuevo", "nueva",
+})
+
 
 def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+_IDENTITY_LABEL_SPLIT_RE = re.compile(
+    r"\s+(?:CURP|RFC|R\.F\.C\.|CLAVE\s+DE\s+ELECTOR|CLAVE\s+ELECTOR|"
+    r"IDENTIFICACI[OÓ]N(?:\s+OFICIAL)?|N[UÚ]MERO\s+DE\s+IDENTIFICACI[OÓ]N|"
+    r"DOMICILIO|NACIONALIDAD|ESTADO\s+CIVIL|INE)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_identity_labels_from_person_name(name: str) -> str:
+    """
+    Quita etiquetas de identidad que el OCR/LLM pegan al nombre (p. ej. «… Martínez CURP»).
+    Patrón universal: cualquier expediente con bloques CURP/RFC/INE en la misma línea.
+    """
+    s = _normalize_spaces(name or "")
+    if not s:
+        return s
+    return _normalize_spaces(_IDENTITY_LABEL_SPLIT_RE.split(s, maxsplit=1)[0])
 
 
 def _trim_name_candidate(candidate: str) -> str:
@@ -20,7 +55,7 @@ def _trim_name_candidate(candidate: str) -> str:
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
-    return _normalize_spaces(cut)
+    return strip_identity_labels_from_person_name(cut)
 
 
 def _looks_like_person_name(candidate: str) -> bool:
@@ -34,6 +69,8 @@ def _looks_like_person_name(candidate: str) -> bool:
     lower_c = (candidate or "").strip().lower()
     if lower_c.startswith("para que ") or lower_c.startswith("a fin de ") or lower_c.startswith("a efecto de "):
         return False
+    if lower_c.startswith("como "):
+        return False
 
     bad_words = {
         "quien", "acepta", "dicho", "nombramiento", "otorga", "declara", "manifiesta", "acuerda",
@@ -45,6 +82,12 @@ def _looks_like_person_name(candidate: str) -> bool:
     if not tokens or len(tokens) < 2:
         return False
     if any(word in bad_words for word in tokens):
+        return False
+    if all(word in _ROLE_WORDS for word in tokens):
+        return False
+    if any(word in _ROLE_WORDS for word in tokens) and not any(
+        word not in _ROLE_WORDS and word not in bad_words for word in tokens
+    ):
         return False
     if any(word in lower_c for word in ("notario publico", "notario público", "para que ocurra")):
         return False
@@ -130,10 +173,31 @@ def detect_legal_representative(text: str) -> Dict[str, Any]:
             "confidence": 0.964,
             "regex": rf"presidente\s+de\s+la\s+mesa\s+directiva\w*\s*,\s*(?:el\s+)?(?:c\.\s*)?{NAME_PATTERN}",
         },
+        # «se designa como Comisario a NOMBRE» — el cargo no es el representante.
+        {
+            "trigger": "se_designa_como_cargo_a",
+            "confidence": 0.97,
+            "regex": (
+                rf"se\s+designa\s+como\s+(?:{_CORPORATE_ROLE_TOKEN})\s+"
+                rf"(?:a|al)\s+(?:la\s+|el\s+)?(?:c\.\s*)?{NAME_PATTERN}"
+            ),
+        },
+        {
+            "trigger": "nombrar_como_cargo_a",
+            "confidence": 0.97,
+            "regex": (
+                rf"(?:convienen\s+en\s+)?nombrar(?:\s+como)?\s+(?:{_CORPORATE_ROLE_TOKEN})\s+"
+                rf"(?:a|al)\s+(?:la\s+|el\s+)?(?:c\.\s*)?{NAME_PATTERN}"
+            ),
+        },
         {
             "trigger": "se_designa",
             "confidence": 0.95,
-            "regex": rf"(?:se\s+designa(?:\s+como)?|designando\s+para\s+tal\s+cargo\s+a)\s+(?:la|el|al|a)?\s*(?:c\.\s*)?{NAME_PATTERN}",
+            "regex": (
+                rf"(?:se\s+designa(?!\s+como\s+(?:{_CORPORATE_ROLE_TOKEN}))\s*"
+                rf"|designando\s+para\s+tal\s+cargo\s+a\s+)"
+                rf"(?:la|el|al|a)?\s*(?:c\.\s*)?{NAME_PATTERN}"
+            ),
         },
         # Escritura pública / acta: "ADMINISTRADOR ÚNICO, recayendo (dicho) nombramiento en el señor NOMBRE"
         {

@@ -37,6 +37,7 @@ from app.agents.enhanced_models import (
 )
 from app.agents.enhanced_consolidator import consolidate_checklist
 from app.services.analyst_participacion_enrichment import enrich_analyst_participacion_output
+from app.services.convocante_resolver import enrich_analysis_with_convocante
 
 # Logger estructurado
 logger = get_logger(__name__)
@@ -960,6 +961,7 @@ Responde con este JSON:
                     participacion_context=search_participacion,
                     full_context=context_str,
                 )
+                enrich_analysis_with_convocante(extracted_data, context_str)
 
             # --- FASE 1: Cálculo de Confianza ---
             confidence_obj = None

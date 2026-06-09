@@ -22,11 +22,13 @@ from app.services.fisica_profile_extract import (
 )
 from app.services.legal_representative_parser import (
     detect_legal_representative,
+    strip_identity_labels_from_person_name,
     is_constancia_cif_text,
     is_plausible_representative_name,
     resolve_rfc_persona_moral,
 )
 from app.utils.ocr_quality import looks_like_low_signal_ocr
+from app.utils.rfc_normalizer import normalize_rfc_sat
 
 router = APIRouter()
 
@@ -188,7 +190,9 @@ def _gather_cif_text_blobs(company: Dict[str, Any], runtime_blobs: List[str]) ->
 
 def _sanitize_representante_legal_field(profile_data: Dict[str, Any]) -> None:
     """Descarta frases notariales o boilerplate que se cuelan como representante."""
-    rep = (profile_data.get("representante_legal") or "").strip()
+    rep = strip_identity_labels_from_person_name(profile_data.get("representante_legal") or "")
+    if rep:
+        profile_data["representante_legal"] = rep
     if not rep or rep.lower() in {"no encontrado", "...", "no especificado"}:
         return
     if not is_plausible_representative_name(rep):
@@ -285,7 +289,7 @@ def _apply_fisica_identity_patch(
     if "rfc" not in locked:
         final_rfc = (rfc_resolution.get("value") or "").strip()
         if final_rfc:
-            profile_data["rfc"] = final_rfc.upper()
+            profile_data["rfc"] = _canonicalize_profile_rfc(final_rfc)
 
     name_hit = resolve_fisica_full_name(
         ine_blob=ine_blob,
@@ -460,6 +464,14 @@ def _coerce_profile_field_to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _canonicalize_profile_rfc(value: Any) -> str:
+    """RFC en forma SAT compacta cuando el valor lo permite; si no, mayúsculas sin perder dato."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return normalize_rfc_sat(raw) or raw.upper()
+
+
 def _normalize_profile_scalar_fields(profile_data: Dict[str, Any]) -> None:
     """Asegura que campos de perfil expuestos a la UI sean texto, no JSON anidado."""
     for field in (
@@ -473,7 +485,11 @@ def _normalize_profile_scalar_fields(profile_data: Dict[str, Any]) -> None:
         if field not in profile_data:
             continue
         coerced = _coerce_profile_field_to_text(profile_data.get(field))
-        if coerced:
+        if not coerced:
+            continue
+        if field == "rfc":
+            profile_data[field] = _canonicalize_profile_rfc(coerced)
+        else:
             profile_data[field] = coerced
 
 
@@ -589,6 +605,8 @@ _MORAL_PARSER_TRIGGERS_OVERRIDE_LLM = frozenset(
         "presidente_asamblea_el_c",
         "presidente_mesa_directiva_el_c",
         "se_designa",
+        "se_designa_como_cargo_a",
+        "nombrar_como_cargo_a",
         "admin_unico_recayendo_nombramiento",
         "admin_unico_nombramiento_en_c",
         "administrador_unico",
@@ -1094,9 +1112,9 @@ async def _run_company_analysis(company_id: str, force_refresh: bool = False):
             if "rfc" not in locked_fields:
                 final_rfc = (rfc_resolution.get("value") or "").strip()
                 if final_rfc:
-                    profile_data["rfc"] = final_rfc.upper()
+                    profile_data["rfc"] = _canonicalize_profile_rfc(final_rfc)
             elif existing_profile.get("rfc"):
-                profile_data["rfc"] = existing_profile.get("rfc")
+                profile_data["rfc"] = _canonicalize_profile_rfc(existing_profile.get("rfc"))
 
         # Preservar campos de dirección si ya existían (adicionados manualmente)
         for field in ["calle", "numero", "colonia", "ciudad", "cp", "telefono", "web", "logo", "tipo"]:
@@ -1110,7 +1128,9 @@ async def _run_company_analysis(company_id: str, force_refresh: bool = False):
 
         # Limpiar honoríficos del nombre del representante legal
         if profile_data.get("representante_legal"):
-            profile_data["representante_legal"] = _strip_honorifics(profile_data["representante_legal"])
+            profile_data["representante_legal"] = strip_identity_labels_from_person_name(
+                _strip_honorifics(profile_data["representante_legal"])
+            )
 
         representative_value = profile_data.get("representante_legal")
         representative_meta: Dict[str, Any] = {}

@@ -306,11 +306,18 @@ def _economic_company_data_for_run(
     agent_input: AgentInput,
     *,
     extra: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Datos de empresa para EconomicAgent; en generación no aplica silencio por inventario legal."""
     cd = dict(agent_input.company_data or {})
     if extra:
         cd.update(extra)
+    if not cd.get("compliance_master_list") and session_state:
+        cm = session_state.get("compliance_master_list") or session_state.get(
+            "master_compliance_list"
+        )
+        if cm:
+            cd["compliance_master_list"] = cm
     if (agent_input.mode or "") in ("generation_only", "generation"):
         cd["skip_economic_silence"] = True
     return cd
@@ -415,6 +422,7 @@ async def _ensure_economic_snapshot_ready(
                     )
                     or {},
                 },
+                session_state=session_state,
             ),
             correlation_id=agent_input.correlation_id,
             job_id=agent_input.job_id,
@@ -423,11 +431,43 @@ async def _ensure_economic_snapshot_ready(
         econ_result = await EconomicAgent(context_manager).process(econ_input)
 
         if econ_result.status == AgentStatus.SUCCESS:
-            logger.info(
-                "orchestrator_economic_agent_rerun_success",
-                session_id=session_id,
+            fresh_session = await context_manager.memory.get_session(session_id) or {}
+            snap = _economic_proposal_snapshot(fresh_session)
+            fresh_allow_zero = bool(
+                (fresh_session.get("economic_user_inputs") or {}).get(
+                    "allow_zero_total_base_ack"
+                )
             )
-            return True, None
+            snap_ready = bool(
+                snap
+                and str(snap.get("status") or "") == "complete"
+                and (_economic_snapshot_has_line_items(snap) or fresh_allow_zero)
+                and (
+                    float(snap.get("total_base") or 0) >= 0.01
+                    or fresh_allow_zero
+                )
+            )
+            if snap_ready:
+                logger.info(
+                    "orchestrator_economic_agent_rerun_success",
+                    session_id=session_id,
+                )
+                return True, None
+            logger.info(
+                "orchestrator_economic_agent_success_without_snapshot",
+                session_id=session_id,
+                message=str(econ_result.message or "")[:120],
+            )
+            return False, {
+                "status": "waiting_for_data",
+                "stop_reason": "MISSING_ECONOMIC_PROPOSAL",
+                "message": (
+                    "Antes de generar documentos debes armar la cotización económica. "
+                    "Escribe **`generar propuesta económica`** en el chat y captura los precios "
+                    "del catálogo de conceptos o sube tu Excel de cotización."
+                ),
+                "data": econ_result.data if isinstance(econ_result.data, dict) else {},
+            }
 
         # EconomicAgent retornó WAITING_FOR_DATA: hay precios pendientes
         missing = []

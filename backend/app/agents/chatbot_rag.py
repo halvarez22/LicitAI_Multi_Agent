@@ -1174,8 +1174,34 @@ Genera el mensaje conversacional para solicitar este dato."""
         # =====================================================================
         session_state = await self.context_manager.memory.get_session(session_id) or {}
 
+        if user_query:
+            from app.services.document_date_resolver import apply_document_date_override_from_chat
+
+            _date_hitl = apply_document_date_override_from_chat(session_state, user_query)
+            if _date_hitl.get("applied"):
+                session_state.update(_date_hitl.get("session_patch") or {})
+                await self.context_manager.memory.save_session(session_id, session_state)
+                _ack = str(_date_hitl.get("message") or "").strip()
+                await self._save_chat_history(session_id, user_query, _ack)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=_ack,
+                    confianza="Alta",
+                    tipo="document_date_override_saved",
+                    suggested_actions=[
+                        {"label": "Volver a generar", "payload": "CMD_TRIGGER_GENERATION", "style": "primary"},
+                    ],
+                )
+
         # Interceptor de Entrevista Laboral (Error 412 Preventivo - Vía A)
-        if session_state.get("labor_compliance_interview_step") and user_query:
+        from app.economic_validation.profiles import session_requires_fsr_labor_profile
+
+        _fsr_labor_required = session_requires_fsr_labor_profile(session_state, session_id)
+        if session_state.get("labor_compliance_interview_step") and not _fsr_labor_required:
+            session_state["labor_compliance_interview_step"] = None
+            await self.context_manager.memory.save_session(session_id, session_state)
+        elif session_state.get("labor_compliance_interview_step") and user_query:
             interview_res = await self._handle_labor_compliance_interview(
                 session_id=session_id,
                 company_id=company_id,
@@ -1632,33 +1658,42 @@ Genera el mensaje conversacional para solicitar este dato."""
         if is_gen_request and company_id and not _eco_price_pending:
             logger.info("chatbot_explicit_generation_trigger", session_id=session_id)
             
-            # --- FORENSIC CHECK: Labor Compliance Data ---
+            # --- FORENSIC CHECK: Labor Compliance Data (solo licitaciones con FSR) ---
             try:
-                company = await self.context_manager.memory.get_company(company_id)
-                mp = company.get("master_profile", {}) if company else {}
-                labor = mp.get("labor_compliance", {})
-                
-                # Si el estado es PENDING_INPUT o los valores son 0, bloqueamos con Error 412 e iniciamos la entrevista interactiva
-                if not labor or labor.get("status") == "PENDING_INPUT" or (float(labor.get("base_salary_per_day", 0)) <= 0 and not labor.get("daily_fsr")):
-                    session_state["labor_compliance_interview_step"] = "step_1_base_salary"
-                    await self.context_manager.memory.save_session(session_id, session_state)
-                    
-                    error_msg = (
-                        "⚠️ **Error Code 412: Missing Payroll Base Profile for FSR Calculation.**\n\n"
-                        "No puedo generar la propuesta económica porque tu perfil corporativo no tiene configurados "
-                        "los costos de nómina (Salario Base, Prima de Riesgo IMSS, etc.) exigidos en el **Anexo 9**.\n\n"
-                        "Para facilitar tu cotización, **iniciemos la configuración rápida en este chat**.\n\n"
-                        "**Paso 1 de 4:** Por favor, indícame: **¿Cuál es el Salario Base Diario en pesos para tus elementos de vigilancia?** (Ejemplo: `374.89` o `300.00`)"
-                    )
-                    await self._save_chat_history(session_id, user_query, error_msg)
-                    return self._format_response(
-                        session_id=session_id,
-                        correlation_id=correlation_id,
-                        respuesta=error_msg,
-                        confianza="Alta",
-                        tipo="labor_compliance_interview",
-                        activity_state="active"
-                    )
+                if _fsr_labor_required:
+                    company = await self.context_manager.memory.get_company(company_id)
+                    mp = company.get("master_profile", {}) if company else {}
+                    labor = mp.get("labor_compliance", {})
+
+                    if (
+                        not labor
+                        or labor.get("status") == "PENDING_INPUT"
+                        or (
+                            float(labor.get("base_salary_per_day", 0)) <= 0
+                            and not labor.get("daily_fsr")
+                        )
+                    ):
+                        session_state["labor_compliance_interview_step"] = "step_1_base_salary"
+                        await self.context_manager.memory.save_session(session_id, session_state)
+
+                        error_msg = (
+                            "⚠️ **Error Code 412: Missing Payroll Base Profile for FSR Calculation.**\n\n"
+                            "No puedo generar la propuesta económica porque tu perfil corporativo no tiene configurados "
+                            "los costos de nómina (Salario Base, Prima de Riesgo IMSS, etc.) exigidos para el "
+                            "**Factor de Salario Real (FSR)** de esta licitación.\n\n"
+                            "Para facilitar tu cotización, **iniciemos la configuración rápida en este chat**.\n\n"
+                            "**Paso 1 de 4:** ¿Cuál es el **Salario Base Diario** en pesos que usarás en el anexo FSR? "
+                            "(Ejemplo: `374.89` o `300.00`)"
+                        )
+                        await self._save_chat_history(session_id, user_query, error_msg)
+                        return self._format_response(
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            respuesta=error_msg,
+                            confianza="Alta",
+                            tipo="labor_compliance_interview",
+                            activity_state="active",
+                        )
             except Exception as e:
                 logger.error(f"Error in forensic labor check: {e}")
 

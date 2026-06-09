@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.economic_validation.profiles import detect_profile
+from app.economic_validation.profiles import detect_profile, session_requires_fsr_labor_profile
 
 
 def _load_run_agnosticism():
@@ -24,6 +24,37 @@ def test_detect_profile_sector_salud_sin_issste_en_nombre() -> None:
 
 def test_detect_profile_imss_en_reglas() -> None:
     assert detect_profile({"modalidad": "Concurso IMSS obra civil"}, "") == "perfil_con_salario_real_v1"
+
+
+def test_session_requires_fsr_false_for_obra_barda_sin_reglas_salud() -> None:
+    state = {
+        "tasks_completed": [
+            {
+                "task": "analisis_bases",
+                "result": {
+                    "reglas_economicas": {
+                        "modalidad": "Licitación pública obra civil tipo B",
+                        "tipo_contrato": "Precios unitarios",
+                    }
+                },
+            }
+        ]
+    }
+    assert session_requires_fsr_labor_profile(state, "barda_primaria_lopez_rayon") is False
+
+
+def test_session_requires_fsr_true_for_sector_salud() -> None:
+    state = {
+        "tasks_completed": [
+            {
+                "task": "analisis_bases",
+                "result": {
+                    "reglas_economicas": {"sector": "servicios de salud IMSS-BIENESTAR"},
+                },
+            }
+        ]
+    }
+    assert session_requires_fsr_labor_profile(state, "isapeg_limpieza_2026") is True
 
 
 def test_scan_app_tree_critical_on_session_slug(tmp_path: Path) -> None:

@@ -662,7 +662,11 @@ class EconomicAgent(BaseAgent):
                         break
         
         if not master_list:
-            master_list = session_state.get("master_compliance_list", {})
+            master_list = (
+                session_state.get("compliance_master_list")
+                or session_state.get("master_compliance_list")
+                or {}
+            )
 
         # 2. Recuperar Catálogo de Precios de la Empresa y partidas tabulares de la sesión (Excel)
         company_catalog = await self._get_company_catalog(company_id)
@@ -801,6 +805,15 @@ class EconomicAgent(BaseAgent):
 
         if not tech_requirements:
             price_source_blocking = _build_price_source_blocking_items(excluded_as_docs)
+            if not price_source_blocking:
+                formatos_econ_sources = list(master_list.get("formatos") or []) + list(
+                    master_list.get("economico")
+                    or master_list.get("económico")
+                    or []
+                )
+                price_source_blocking = _build_price_source_blocking_items(
+                    formatos_econ_sources
+                )
             if price_source_blocking:
                 print("    [-] No hay ítems cotizables, pero sí referencias a fuente económica real.", flush=True)
                 if missing_structured_price_slots:
@@ -1211,6 +1224,21 @@ class EconomicAgent(BaseAgent):
             if k != "concept_prices" and v is not None:
                 reglas_bases[f"chat_override_{k}"] = f"{k}: {v}"
 
+        # Pie de catálogo de obra (indirectos/utilidad %) para perfil obra_publica_v1
+        try:
+            docs_all = await self.context_manager.memory.get_documents(session_id) or []
+            for doc_row in docs_all:
+                content = doc_row.get("content") or {}
+                fname = str(content.get("filename") or "").lower()
+                if "catalogo" not in fname and "catálogo" not in fname:
+                    continue
+                tail = str(content.get("extracted_text") or "")[-1500:]
+                if tail.strip():
+                    reglas_bases["catalogo_obra_footer"] = tail
+                break
+        except Exception:
+            pass
+
         def _recompute_from_current_draft(
             items: List[Dict[str, Any]],
         ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], float, float, Dict[str, Any]]:
@@ -1419,6 +1447,8 @@ class EconomicAgent(BaseAgent):
             reglas_economicas=reglas_bases,
             session_name=session_name_for_profile,
             allow_zero_total_base=allow_zero_total_base,
+            costos_directos=float(totals.get("costos_directos") or 0) or None,
+            subtotal_antes_iva=float(totals.get("subtotal_antes_iva") or 0) or None,
         )
         if validation_result.blocking_issues:
             validation_events: List[Dict[str, Any]] = []
@@ -1772,7 +1802,7 @@ class EconomicAgent(BaseAgent):
                 },
                 correlation_id=correlation_id,
             )
-        final_result = {
+        final_result: Dict[str, Any] = {
             "status": "complete",
             "currency": "MXN",
             "items": proposal_draft,
@@ -1788,6 +1818,13 @@ class EconomicAgent(BaseAgent):
                 "formula_set": totals.get("formula_set"),
                 "fsr": totals.get("fsr"),
                 "blocking_issues": calc_blocking_issues,
+                "costos_directos": totals.get("costos_directos"),
+                "costos_indirectos": totals.get("costos_indirectos"),
+                "utilidad": totals.get("utilidad"),
+                "subtotal_antes_iva": totals.get("subtotal_antes_iva"),
+                "iva_amount": totals.get("iva_amount"),
+                "indirectos_rate": totals.get("indirectos_rate"),
+                "utilidad_rate": totals.get("utilidad_rate"),
             },
             "quadrature_report": quadrature_report,
             "contexto_bases_analista": {
@@ -1796,6 +1833,17 @@ class EconomicAgent(BaseAgent):
                 "datos_tabulares": dict(datos_tab),
             },
         }
+        for key in (
+            "costos_directos",
+            "costos_indirectos",
+            "utilidad",
+            "subtotal_antes_iva",
+            "iva_amount",
+            "indirectos_rate",
+            "utilidad_rate",
+        ):
+            if totals.get(key) is not None:
+                final_result[key] = totals.get(key)
 
         await self.context_manager.record_task_completion(session_id, "economic_proposal", final_result)
         print(f"💰 [Económico] Propuesta Calculada: ${final_result['grand_total']:.2f}")

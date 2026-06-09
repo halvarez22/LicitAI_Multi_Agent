@@ -212,15 +212,42 @@ def merge_normalized_payload(
     # Recalcular resumen agregado de sesión
     total_docs = 0
     total_items = 0
-    total_amount = 0.0
     category_totals: Dict[str, float] = {}
+    def _canonical_source_rank(payload: Dict[str, Any]) -> tuple[int, float]:
+        """Mayor rank = más probable catálogo PU (vs carta resumen)."""
+        summ = payload.get("summary") or {}
+        items_n = int(summ.get("items_count") or 0)
+        doc_total = float(summ.get("total_detected") or 0.0)
+        src_type = str(payload.get("source_type") or "").lower()
+        fname = str(payload.get("source_filename") or "").lower()
+        rank = items_n
+        if src_type in ("excel", "csv", "text_catalog", "docx"):
+            rank += 8
+        if any(k in fname for k in ("catalogo", "catálogo", "concepto", "apu", "cotiz")):
+            rank += 6
+        if "propuesta" in fname and "econom" in fname and "catalogo" not in fname:
+            rank -= 4
+        return rank, doc_total
+
+    priced_doc_totals: List[tuple[str, float, int, int]] = []
     for payload in docs.values():
         if not isinstance(payload, dict):
             continue
         total_docs += 1
         summ = payload.get("summary") or {}
-        total_items += int(summ.get("items_count") or 0)
-        total_amount += float(summ.get("total_detected") or 0.0)
+        items_n = int(summ.get("items_count") or 0)
+        total_items += items_n
+        doc_total = float(summ.get("total_detected") or 0.0)
+        if items_n >= 2 and doc_total > 0:
+            rank, _ = _canonical_source_rank(payload)
+            priced_doc_totals.append(
+                (
+                    str(payload.get("source_filename") or payload.get("document_id") or ""),
+                    doc_total,
+                    items_n,
+                    rank,
+                )
+            )
         ct = summ.get("category_totals") or {}
         if isinstance(ct, dict):
             for k, v in ct.items():
@@ -229,6 +256,39 @@ def merge_normalized_payload(
                 except (TypeError, ValueError):
                     continue
 
+    # Total de sesión: priorizar el documento con más partidas (catálogo > carta resumen)
+    if priced_doc_totals:
+        priced_doc_totals.sort(key=lambda x: (x[3], x[2], x[1]), reverse=True)
+        total_amount = priced_doc_totals[0][1]
+    else:
+        # Documentos con una sola partida o totales parciales
+        partial_totals = [
+            float((p.get("summary") or {}).get("total_detected") or 0.0)
+            for p in docs.values()
+            if isinstance(p, dict)
+        ]
+        total_amount = max(partial_totals) if partial_totals else 0.0
+
+    source_conflicts: List[Dict[str, Any]] = []
+    if len(priced_doc_totals) >= 2:
+        canon_name, canon_total, _, _ = priced_doc_totals[0]
+        for alt_name, alt_total, alt_items, _ in priced_doc_totals[1:]:
+            if not alt_name or alt_total <= 0:
+                continue
+            rel = abs(alt_total - canon_total) / max(canon_total, 1.0)
+            if rel > 0.15:
+                source_conflicts.append(
+                    {
+                        "canonical_source": canon_name,
+                        "canonical_total": round(canon_total, 2),
+                        "alternate_source": alt_name,
+                        "alternate_total": round(alt_total, 2),
+                        "alternate_items": alt_items,
+                        "relative_delta": round(rel, 4),
+                        "error_type": "economic_source_total_conflict",
+                    }
+                )
+
     root["documents"] = docs
     root["summary"] = {
         "documents_count": total_docs,
@@ -236,6 +296,8 @@ def merge_normalized_payload(
         "total_detected": round(total_amount, 2),
         "category_totals": category_totals,
         "updated_at": _utc_iso_now(),
+        "canonical_source": priced_doc_totals[0][0] if priced_doc_totals else None,
+        "source_total_conflicts": source_conflicts,
     }
     root["schema_version"] = "1.0.0"
     state["economic_normalized_data"] = root

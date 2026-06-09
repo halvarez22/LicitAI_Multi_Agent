@@ -96,13 +96,95 @@ _ARABIC_TO_ROMAN_ANEXO = {
     "15": "XV",
 }
 
+_OBRA_FILENAME_ALIASES: tuple[tuple[str, str], ...] = (
+    (r"modelo\s+de\s+contrato|modelo\s+contrato", "obra|T3"),
+    (r"bases\s+y\s+requisitos.*firmad|firmad.*conformidad.*bases", "obra|T4"),
+    (r"visita\s+del\s+sitio|visita\s+al\s+sitio|acta.*visita|junta\s+de\s+aclaraciones.*acta", "obra|T5"),
+    (r"cumplimiento.*obligaciones\s+contractuales", "obra|T6"),
+    (r"partes.*obra.*subcontr|subcontrataci[oó]n", "obra|T7"),
+    (r"relaci[oó]n.*contratos.*obras", "obra|T2"),
+    (r"acreditaci[oó]n.*propiedad.*maquinaria", "obra|T1_ACRED"),
+    (r"relaci[oó]n.*maquinaria|maquinaria.*equipo", "obra|T1"),
+    (r"carta.*compromiso.*proposici", "obra|E1"),
+    (r"carta.*compromiso.*precio", "obra|E2"),
+    (
+        r"anexo\s+ae|propuesta\s+econ[oó]mica|cat[aá]logo.*conceptos.*firmad|"
+        r"precios.*firmad.*servidor\s+p[uú]blico",
+        "obra|E2",
+    ),
+    (r"an[aá]lisis.*precios|precios\s+unitarios|tabla.*precios", "obra|E3"),
+    (r"programa.*obra.*gantt|gantt|programa.*montos\s+mensuales", "obra|E4"),
+    (r"anexo.*materiales|cotizaciones.*materiales", "obra|E5"),
+    (r"capital\s+contable|liquidez\s+comprometida|cargo\s+por\s+utilidad|cuadro\s+de\s+finiquito", "obra|T_B_SOLVENCIA"),
+)
+
+_OBRA_TE_ANNEXO_BLOCK_RE = re.compile(
+    r"\banexo\s+"
+    r"(?P<code>t[\s_.-]*(?:b[\s_.-]*)?\d{1,2}|e[\s_.-]*\d{1,2})"
+    r"\b\s*"
+    r"(?P<body>.{12,6500}?)"
+    r"(?=\banexo\s+(?:t[\s_.-]*(?:b[\s_.-]*)?\d{1,2}|e[\s_.-]*\d{1,2})\b|\Z|---\s*PÁGINA|\n\s*II\.-)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _normalize_label_blob(label: str) -> str:
+    """Texto uniforme para reglas de anexo (guión/underscore → espacio)."""
+    norm = re.sub(r"[_\-.]+", " ", str(label or "").strip().lower())
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return re.sub(r"(?i)\.docx$", "", norm).strip()
+
+
+def obra_te_dedupe_key(label: str) -> Optional[str]:
+    """
+    Clave estable obra|T{n}/obra|E{n} desde nombre de archivo o etiqueta de bases.
+
+    Returns:
+        Clave ``obra|…`` o None si no aplica a anexos T/E de obra pública.
+    """
+    norm = _normalize_label_blob(label)
+
+    if re.search(r"aviso\s+de\s+privacidad", norm):
+        return "obra|T8_PRIVACIDAD"
+
+    m_tb = re.search(r"(?i)\b(?:anexo|formato)\s+t[\s]*b[\s]*(\d+)\b", norm)
+    if m_tb:
+        return f"obra|T-B-{m_tb.group(1)}"
+
+    m_t = re.search(r"(?i)\b(?:anexo|formato)\s+t[\s]*(\d{1,2})\b", norm)
+    if m_t:
+        return f"obra|T{int(m_t.group(1))}"
+
+    m_e = re.search(r"(?i)\b(?:anexo|formato)\s+e[\s]*(\d{1,2})\b", norm)
+    if m_e:
+        return f"obra|E{int(m_e.group(1))}"
+
+    for pat, key in _OBRA_FILENAME_ALIASES:
+        if re.search(pat, norm):
+            return key
+
+    for code in extract_template_codes(str(label or "")):
+        cu = code.upper().replace("-", "")
+        if re.match(r"^T\d", cu):
+            if cu == "T8" and re.search(r"privacidad", norm):
+                return "obra|T8_PRIVACIDAD"
+            return f"obra|{cu}"
+        if re.match(r"^E\d", cu):
+            return f"obra|{cu}"
+
+    return None
+
 
 def _anexo_key_from_label(label: str) -> Optional[str]:
+    obra = obra_te_dedupe_key(label)
+    if obra:
+        return obra
+    raw = str(label or "")
     m = re.search(
         r"(?i)\banexo[\s_.-]+"
         r"(XIII|XIV|XV|XII|XI|X|IX|VIII|VII|VI|V|IV|III|II|I|\d{1,2})"
         r"(?=[_.\W]|$)",
-        str(label or ""),
+        raw,
     )
     if m:
         num = m.group(1).upper()
@@ -162,6 +244,92 @@ def _sobre_for_anexo(num: str, body: str) -> str:
     return "sobre_1_tecnico"
 
 
+def _canonical_obra_te_label(code: str, body: str) -> str:
+    """Etiqueta «Anexo T-n: …» / «Anexo E-n: …» desde inventario de bases."""
+    short = re.sub(r"\s+", " ", str(body or "").strip())
+    short = re.split(r"[.;]\s", short, maxsplit=1)[0].strip(" ,;")
+    if len(short) > 130:
+        short = short[:130].rsplit(" ", 1)[0] + "…"
+    code_disp = re.sub(r"\s+", "-", str(code or "").strip().upper())
+    code_disp = re.sub(r"[-]+", "-", code_disp)
+    return f"Anexo {code_disp}: {short}" if short else f"Anexo {code_disp}"
+
+
+def _sobre_for_obra_te_code(code: str, body: str) -> str:
+    """Sobre CompraNet inferido para anexos T/E de obra pública."""
+    c = re.sub(r"[\s_.-]+", "", str(code or "").lower())
+    if c.startswith("e"):
+        return "sobre_3_economico"
+    if re.search(r"(?i)propuesta\s+econ|cat[aá]logo|precios|programa", body):
+        return "sobre_3_economico"
+    return "sobre_1_administrativo"
+
+
+def _valid_obra_te_inventory_body(code: str, body: str) -> bool:
+    """Descarta menciones laterales o fragmentos de párrafo (no inventario real)."""
+    b = re.sub(r"\s+", " ", str(body or "").strip())
+    if len(b) < 18:
+        return False
+    if re.match(r"^[\),;:\.]+\s*", b):
+        return False
+    if re.match(r"(?i)^de las bases de licitaci[oó]n\.?$", b):
+        return False
+    code_norm = re.sub(r"[\s_.-]+", "", str(code or "").lower())
+    if code_norm.startswith("tb"):
+        m_num = re.search(r"tb(\d+)", code_norm)
+        if m_num:
+            n = m_num.group(1)
+            if not re.search(rf"(?i)\bt[\s_-]*b[\s_-]*{n}\b", b):
+                return False
+    return True
+
+
+def extract_obra_te_annexes_from_bases_corpus(corpus: Any) -> List[Dict[str, Any]]:
+    """
+    Inventario de anexos T-1…T-8 y E-1…E-5 descritos en bases de obra pública.
+    """
+    combined = str(getattr(corpus, "combined", "") or "")
+    if not combined.strip():
+        return []
+
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for m in _OBRA_TE_ANNEXO_BLOCK_RE.finditer(combined):
+        code = re.sub(r"\s+", "-", m.group("code").strip().upper())
+        code = re.sub(r"[-]+", "-", code)
+        body = re.sub(r"\s+", " ", m.group("body")).strip()
+        body_head = body[:360]
+        if len(body_head) < 12 or not _valid_obra_te_inventory_body(code, body_head):
+            continue
+        label = _canonical_obra_te_label(code, body_head)
+        key = obra_te_dedupe_key(label) or pliego_format_dedupe_key(label)
+        if key in seen:
+            continue
+        seen.add(key)
+        sobre = _sobre_for_obra_te_code(code, body_head)
+        out.append(
+            {
+                "id": f"obra-{code.lower().replace('-', '')}",
+                "nombre_canonico": label,
+                "nombre": label,
+                "snippet_representativo": _pliego_snippet_for_panel(body_head),
+                "dedupe_key": key,
+                "tipo": "generar",
+                "tipo_accion_final": "generar",
+                "tipo_accion_propuesto": "generar",
+                "confidence": 0.94,
+                "sobre_clasificado": sobre,
+                "from_document_inventory": True,
+                "provenance_ui": {
+                    "source": "bases_corpus",
+                    "reason": "obra_te_annex_inventory",
+                    "section": f"Anexo {code}",
+                },
+            }
+        )
+    return out
+
+
 def extract_pliego_anexos_from_bases_corpus(corpus: Any) -> List[Dict[str, Any]]:
     """
     Inventario de anexos I–XV (y arábigos) descrito en el corpus de bases.
@@ -219,11 +387,19 @@ def _pliego_snippet_for_panel(body: str) -> str:
 def pliego_format_dedupe_key(label: str) -> str:
     """Fusión por código de forma/anexo o firma de propuesta."""
     raw = str(label or "").strip()
-    norm = re.sub(r"\s+", " ", raw.lower())
-    if re.match(r"(?i)^carta[_\s-]*compromiso(?:\.docx)?$", raw) or re.match(
-        r"(?i)^carta[_\s-]*compromiso$", norm
-    ):
+    norm = _normalize_label_blob(raw)
+
+    obra_key = obra_te_dedupe_key(label)
+    if obra_key:
+        return obra_key
+
+    if re.search(r"(?i)carta\s*compromiso", norm):
+        if re.search(r"proposici", norm):
+            return "obra|E1"
+        if re.search(r"precio", norm):
+            return "obra|E2"
         return "pliego|ANEXO_VI"
+
     anexo_key = _anexo_key_from_label(label)
     if anexo_key:
         return anexo_key
@@ -242,6 +418,7 @@ def pliego_format_dedupe_key(label: str) -> str:
         (r"propuesta\s+econ", "pliego|propuesta_economica"),
         (r"proposici[oó]n\s+econ", "pliego|propuesta_economica"),
         (r"cat[aá]logo\s+de\s+conceptos", "pliego|catalogo_conceptos"),
+        (r"aviso\s+de\s+privacidad", "obra|T8_PRIVACIDAD"),
         (r"relaci[oó]n.*costos.*luminarias", "pliego|analisis_costos"),
         (r"programa\s+de\s+suministro", "pliego|programa_suministro"),
         (r"listado\s+de\s+insumos", "pliego|listado_insumos"),
@@ -251,7 +428,14 @@ def pliego_format_dedupe_key(label: str) -> str:
             return key
     codes = extract_template_codes(label)
     if codes:
-        return f"pliego|{codes[0].replace('-', '').upper()}"
+        cu = codes[0].replace("-", "").upper()
+        if re.match(r"^T\d", cu):
+            if cu == "T8" and re.search(r"privacidad", norm):
+                return "obra|T8_PRIVACIDAD"
+            return f"obra|{cu}"
+        if re.match(r"^E\d", cu):
+            return f"obra|{cu}"
+        return f"pliego|{cu}"
     toks = [t for t in norm.split() if len(t) > 3][:5]
     return "pliego|" + "_".join(toks) if toks else norm[:48]
 
@@ -260,8 +444,14 @@ def extract_pliego_generables_from_bases_corpus(corpus: Any) -> List[Dict[str, A
     """Lista ítems generables: inventario de anexos + §5–8 del corpus indexado."""
     from app.services.compliance_consolidation_service import classify_deliverable_sobre
 
-    out: List[Dict[str, Any]] = list(extract_pliego_anexos_from_bases_corpus(corpus))
+    out: List[Dict[str, Any]] = list(extract_obra_te_annexes_from_bases_corpus(corpus))
     seen: Set[str] = {pliego_format_dedupe_key(r["nombre_canonico"]) for r in out}
+    for row in extract_pliego_anexos_from_bases_corpus(corpus):
+        key = pliego_format_dedupe_key(row["nombre_canonico"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
 
     combined = str(getattr(corpus, "combined", "") or "")
     if not combined.strip():

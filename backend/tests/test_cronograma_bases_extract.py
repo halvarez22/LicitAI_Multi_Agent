@@ -1,4 +1,5 @@
 from app.services.cronograma_bases_extract import (
+    cronograma_has_extracted_dates,
     extract_cronograma_from_bases_text,
     extract_cronograma_from_calendar_table,
     merge_cronograma_with_bases,
@@ -81,6 +82,36 @@ def test_parse_spanish_date_del_anio():
     )
     assert dt is not None
     assert dt.year == 2026 and dt.month == 1 and dt.day == 30
+
+
+BARDA_GUANAJUATO_SNIPPET = """
+VISITA AL SITIO NOVENA. - De la visita al sitio. - los participantes podrán realizar conjuntamente
+con el servidor público que designe la convocante una visita al sitio donde se ejecutará la obra,
+misma que será el día 10 de diciembre del año 2025, siendo el lugar de la cita en: en la Dirección
+de Costos y Presupuestos a las 10:00 horas.
+JUNTA DE ACLARACIONES Para tratar lo relacionado con el objeto del mismo procedimiento de adjudicación,
+se convoca a todos los participantes para su desahogo el día 10 de diciembre del año 2025 a las 10:30 hrs
+en la Dirección de Costos y Presupuestos.
+fecha y hora para tal efecto: en la Dirección de Costos y Presupuestos.
+El día 19 de diciembre del 2025, a las 9:30 horas.
+El acto de fallo y adjudicación del contrato se dictará el día 26 de diciembre del 2025 a las 10:10 horas
+en la Dirección de Costos y Presupuestos.
+"""
+
+
+def test_extract_barda_guanajuato_del_ano_y_presentacion():
+    out = extract_cronograma_from_bases_text(BARDA_GUANAJUATO_SNIPPET)
+    assert cronograma_has_extracted_dates(out, min_dates=4)
+    assert "10 de diciembre del año 2025" in out["visita_instalaciones"]
+    assert "10 de diciembre del año 2025" in out["junta_aclaraciones"]
+    assert "19 de diciembre del 2025" in out["presentacion_proposiciones"]
+    assert "26 de diciembre del 2025" in out["fallo"]
+
+
+def test_cronograma_has_extracted_dates_rejects_empty():
+    assert cronograma_has_extracted_dates({}) is False
+    assert cronograma_has_extracted_dates({"fallo": "Fecha no especificada"}) is False
+    assert cronograma_has_extracted_dates({"fallo": "26 de diciembre del 2025"}) is True
 
 
 ISSSTE_NARRATIVE_JUNTA_FALSE_POSITIVE = """

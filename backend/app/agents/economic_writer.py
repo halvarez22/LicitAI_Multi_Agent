@@ -65,6 +65,63 @@ class EconomicWriterAgent(BaseAgent):
         )
         self.excel_filler = ExcelFillingService()
 
+    def _build_economic_resumen(
+        self, economic_data: Dict[str, Any], calc_directos: float
+    ) -> Dict[str, Any]:
+        """Arma resumen fiscal; incluye indirectos/utilidad cuando el motor obra lo provee."""
+        calc = economic_data.get("calculator_result") or {}
+        directos = float(
+            economic_data.get("costos_directos")
+            or calc.get("costos_directos")
+            or calc_directos
+            or 0.0
+        )
+        indirectos = economic_data.get("costos_indirectos")
+        if indirectos is None:
+            indirectos = calc.get("costos_indirectos")
+        utilidad = economic_data.get("utilidad")
+        if utilidad is None:
+            utilidad = calc.get("utilidad")
+        subtotal_antes_iva = economic_data.get("subtotal_antes_iva")
+        if subtotal_antes_iva is None:
+            subtotal_antes_iva = calc.get("subtotal_antes_iva")
+        iva_amount = economic_data.get("iva_amount")
+        if iva_amount is None:
+            iva_amount = calc.get("iva_amount")
+        ind_rate = economic_data.get("indirectos_rate")
+        if ind_rate is None:
+            ind_rate = calc.get("indirectos_rate")
+        util_rate = economic_data.get("utilidad_rate")
+        if util_rate is None:
+            util_rate = calc.get("utilidad_rate")
+
+        has_obra = indirectos is not None and utilidad is not None
+        if has_obra:
+            subtotal = float(subtotal_antes_iva or economic_data.get("total_base") or 0.0)
+            total = float(economic_data.get("grand_total") or 0.0)
+            iva = float(iva_amount if iva_amount is not None else round(total - subtotal, 2))
+            return {
+                "costos_directos": round(directos, 2),
+                "costos_indirectos": round(float(indirectos), 2),
+                "utilidad": round(float(utilidad), 2),
+                "indirectos_rate": float(ind_rate or 0.10),
+                "utilidad_rate": float(util_rate or 0.05),
+                "subtotal": round(subtotal, 2),
+                "iva": round(iva, 2),
+                "total": round(total, 2),
+                "obra_breakdown": True,
+            }
+
+        subtotal = float(economic_data.get("total_base") or calc_directos)
+        total = float(economic_data.get("grand_total") or (subtotal * 1.16))
+        iva = round(total - subtotal, 2)
+        return {
+            "subtotal": round(subtotal, 2),
+            "iva": iva,
+            "total": round(total, 2),
+            "obra_breakdown": False,
+        }
+
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
         correlation_id = agent_input.correlation_id or "no-id"
@@ -232,16 +289,10 @@ class EconomicWriterAgent(BaseAgent):
             
         # Fallback de sumatoria si el motor no proporcionó totales
         calc_subtotal = sum(i["importe"] for i in mapeo_items)
-        
-        # 1. Obtener totales maestros desde el motor económico (Prioridad absoluta)
-        subtotal = float(economic_data.get("total_base") or calc_subtotal)
-        total = float(economic_data.get("grand_total") or (subtotal * 1.16))
-        
-        # 2. Re-calcular IVA como la diferencia si no viene explícito (Maneja IVA 0%, 8%, 16%, etc.)
-        iva = round(total - subtotal, 2)
-        
-        subtotal = round(subtotal, 2)
-        total = round(total, 2)
+        resumen = self._build_economic_resumen(economic_data, calc_subtotal)
+        subtotal = float(resumen.get("subtotal") or 0.0)
+        total = float(resumen.get("total") or 0.0)
+        iva = float(resumen.get("iva") or 0.0)
         
         allow_zero = bool(economic_data.get("allow_zero_total_base_ack"))
         if subtotal < 0.01 and not allow_zero:
@@ -264,15 +315,14 @@ class EconomicWriterAgent(BaseAgent):
         )
         perfil_usado = str(validation_result.get("perfil_usado") or "generic")
         _date_info = resolve_document_date(session_state)
-        resumen = {
-            "subtotal": round(subtotal, 2),
-            "iva": iva,
-            "total": total,
-            "moneda": economic_data.get("currency", "MXN"),
-            "fecha": _date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
-            "fecha_es": _date_info.get("fecha_es") or "",
-            "perfil_usado": perfil_usado,
-        }
+        resumen.update(
+            {
+                "moneda": economic_data.get("currency", "MXN"),
+                "fecha": _date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
+                "fecha_es": _date_info.get("fecha_es") or "",
+                "perfil_usado": perfil_usado,
+            }
+        )
         
         # 4. Generación de Archivos (misma raíz que TechnicalWriter/FormatsAgent)
         output_base_dir = os.path.join("/data", "outputs", session_id, "2.propuesta_economica")
@@ -910,13 +960,29 @@ class EconomicWriterAgent(BaseAgent):
             current_row += 1
             
         # Totales desde resumen (calculados en Fase 1, no se recalculan)
-        ws.cell(row=current_row + 1, column=5, value="SUBTOTAL:").font = Font(bold=True)
-        ws.cell(row=current_row + 1, column=6, value=resumen["subtotal"]).font = Font(bold=True)
+        total_row = current_row + 1
+        if resumen.get("obra_breakdown"):
+            ind_pct = round(float(resumen.get("indirectos_rate") or 0.10) * 100, 2)
+            util_pct = round(float(resumen.get("utilidad_rate") or 0.05) * 100, 2)
+            blocks = [
+                ("SUBTOTAL COSTOS DIRECTOS:", resumen.get("costos_directos")),
+                (f"COSTOS INDIRECTOS ({ind_pct:g}%):", resumen.get("costos_indirectos")),
+                (f"UTILIDAD ({util_pct:g}%):", resumen.get("utilidad")),
+                ("SUBTOTAL ANTES DE IVA:", resumen.get("subtotal")),
+            ]
+            for label, amount in blocks:
+                ws.cell(row=total_row, column=5, value=label).font = Font(bold=True)
+                ws.cell(row=total_row, column=6, value=amount).font = Font(bold=True)
+                total_row += 1
+        else:
+            ws.cell(row=total_row, column=5, value="SUBTOTAL:").font = Font(bold=True)
+            ws.cell(row=total_row, column=6, value=resumen["subtotal"]).font = Font(bold=True)
+            total_row += 1
         iva_pct = (resumen['iva'] / resumen['subtotal'] * 100) if resumen['subtotal'] > 0 else 16.0
-        ws.cell(row=current_row + 2, column=5, value=f"IVA ({iva_pct:g}%):").font = Font(bold=True)
-        ws.cell(row=current_row + 2, column=6, value=resumen["iva"]).font = Font(bold=True)
-        ws.cell(row=current_row + 3, column=5, value="TOTAL:").font = Font(bold=True)
-        ws.cell(row=current_row + 3, column=6, value=resumen["total"]).font = Font(bold=True)
+        ws.cell(row=total_row, column=5, value=f"IVA ({iva_pct:g}%):").font = Font(bold=True)
+        ws.cell(row=total_row, column=6, value=resumen["iva"]).font = Font(bold=True)
+        ws.cell(row=total_row + 1, column=5, value="TOTAL:").font = Font(bold=True)
+        ws.cell(row=total_row + 1, column=6, value=resumen["total"]).font = Font(bold=True)
 
         if billing_spec and billing_spec.get("days_divisor"):
             tarifa_ref = (
@@ -996,8 +1062,22 @@ class EconomicWriterAgent(BaseAgent):
                 f"Días de ejemplo: {dias} | Importe proporcional: ${monto:,.2f} MXN"
             )
 
-        doc.add_paragraph(f"\nSUBTOTAL: ${resumen['subtotal']:,.2f}")
-        # Calculamos el porcentaje real para mostrarlo en el documento
+        if resumen.get("obra_breakdown"):
+            ind_pct = round(float(resumen.get("indirectos_rate") or 0.10) * 100, 2)
+            util_pct = round(float(resumen.get("utilidad_rate") or 0.05) * 100, 2)
+            doc.add_paragraph(
+                f"\nSUBTOTAL COSTOS DIRECTOS: ${float(resumen.get('costos_directos') or 0):,.2f}"
+            )
+            doc.add_paragraph(
+                f"COSTOS INDIRECTOS ({ind_pct:g}%): "
+                f"${float(resumen.get('costos_indirectos') or 0):,.2f}"
+            )
+            doc.add_paragraph(
+                f"UTILIDAD ({util_pct:g}%): ${float(resumen.get('utilidad') or 0):,.2f}"
+            )
+            doc.add_paragraph(f"SUBTOTAL ANTES DE IVA: ${resumen['subtotal']:,.2f}")
+        else:
+            doc.add_paragraph(f"\nSUBTOTAL: ${resumen['subtotal']:,.2f}")
         iva_pct = (resumen['iva'] / resumen['subtotal'] * 100) if resumen['subtotal'] > 0 else 16.0
         doc.add_paragraph(f"I.V.A. ({iva_pct:g}%): ${resumen['iva']:,.2f}")
         para_total = doc.add_paragraph(f"TOTAL DE LA PROPUESTA: ${resumen['total']:,.2f}")

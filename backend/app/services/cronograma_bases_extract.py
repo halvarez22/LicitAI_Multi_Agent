@@ -7,15 +7,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Dict, Optional, Pattern, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple
 
 from app.agents.analyst import normalize_cronograma_dict
 from app.services.cronograma_enrichment_service import is_placeholder_cronograma_value
 
-# Fragmento de fecha en español (MX): «26 de enero del 2026», con hora opcional.
+# Fragmento de fecha en español (MX): «26 de enero del 2026», «10 de diciembre del año 2025», hora opcional.
 _DATE_ES = (
-    r"\d{1,2}\s+de\s+[a-záéíóúñü]+\s+(?:de|del)\s+20\d{2}"
-    r"(?:\s*(?:,|\s+)?(?:a\s+las\s+)?\d{1,2}[:h]\d{2}(?:\s*(?:a\.?m\.?|p\.?m\.?|horas?)?)?)?"
+    r"\d{1,2}\s+de\s+[a-záéíóúñü]+\s+(?:de|del)\s+(?:año\s+)?20\d{2}"
+    r"(?:\s*(?:,|\s+)?(?:a\s+las\s+)?\d{1,2}[:h]\d{2}(?:\s*(?:a\.?m\.?|p\.?m\.?|horas?|hrs?\.?)?)?)?"
 )
 
 _RE_DATE_ES = re.compile(_DATE_ES, re.IGNORECASE)
@@ -83,6 +83,7 @@ _SECTION_ANCHORS: Dict[str, Tuple[str, ...]] = {
     ),
     "presentacion_proposiciones": (
         r"(?is)\b(?:acto\s+de\s+)?presentaci[oó]n\s+y\s+apertura\s+de\s+proposiciones\b",
+        r"(?is)\bfecha\s+y\s+hora\s+para\s+tal\s+efecto\b",
     ),
     "fallo": (
         r"(?is)\bacto\s+de\s+fallo\b",
@@ -109,6 +110,48 @@ _SENTENCE_PATTERNS: Tuple[Pattern[str], ...] = (
     ),
 )
 
+_HITO_GENERIC_SENTENCE_RE: Dict[str, Pattern[str]] = {
+    "publicacion_convocatoria": re.compile(
+        rf"(?is)((?:publicaci[oó]n|convocatoria)[^.]{{0,120}}?{_DATE_ES}[^.]+\.)"
+    ),
+    "visita_instalaciones": re.compile(
+        rf"(?is)((?:visita|visitas)[^.]{{0,160}}?{_DATE_ES}[^.]+\.)"
+    ),
+    "junta_aclaraciones": re.compile(
+        rf"(?is)(junta[^.]{{0,160}}?{_DATE_ES}[^.]+\.)"
+    ),
+    "presentacion_proposiciones": re.compile(
+        rf"(?is)((?:presentaci[oó]n|entregarse)[^.]{{0,200}}?{_DATE_ES}[^.]+\.)"
+    ),
+    "fallo": re.compile(rf"(?is)(fallo[^.]{{0,200}}?{_DATE_ES}[^.]+\.)"),
+    "firma_contrato": re.compile(
+        rf"(?is)((?:firma\s+del\s+contrato|firmar\s+el\s+contrato)[^.]{{0,160}}?{_DATE_ES}[^.]+\.)"
+    ),
+}
+
+
+def _patterns_for_hito(hito_id: Optional[str]) -> Tuple[Pattern[str], ...]:
+    """Patrones de oración acotados al acto; evita arrastrar «acto de fallo» a otros hitos."""
+    if not hito_id:
+        return _SENTENCE_PATTERNS
+    out: List[Pattern[str]] = []
+    if hito_id == "visita_instalaciones":
+        out.extend((_RE_VISITAS_PLURAL, _RE_SE_LLEVARA))
+    elif hito_id == "junta_aclaraciones":
+        out.append(_RE_SE_LLEVARA)
+    elif hito_id == "presentacion_proposiciones":
+        out.extend((_RE_ENTREGARSE, _RE_SE_LLEVARA))
+    elif hito_id == "fallo":
+        out.extend((_RE_ACTO_FALLO, _RE_SE_LLEVARA))
+    elif hito_id == "firma_contrato":
+        out.append(_RE_SE_LLEVARA)
+    else:
+        out.append(_RE_SE_LLEVARA)
+    generic = _HITO_GENERIC_SENTENCE_RE.get(hito_id)
+    if generic is not None:
+        out.append(generic)
+    return tuple(out)
+
 
 def _clean_sentence(text: str, max_len: int = 420) -> str:
     s = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -117,10 +160,10 @@ def _clean_sentence(text: str, max_len: int = 420) -> str:
     return s
 
 
-def _extract_in_window(window: str) -> Optional[str]:
+def _extract_in_window(window: str, hito_id: Optional[str] = None) -> Optional[str]:
     if not window or not window.strip():
         return None
-    for pat in _SENTENCE_PATTERNS:
+    for pat in _patterns_for_hito(hito_id):
         m = pat.search(window)
         if m:
             cleaned = _clean_sentence(m.group(1))
@@ -148,7 +191,7 @@ def extract_hito_from_bases_text(hito_id: str, blob: str) -> Optional[str]:
     if not blob or not hito_id:
         return None
     for anchor in _SECTION_ANCHORS.get(hito_id, ()):
-        found = _extract_in_window(_window_after_anchor(blob, anchor))
+        found = _extract_in_window(_window_after_anchor(blob, anchor), hito_id=hito_id)
         if found:
             return found
     return None
@@ -362,6 +405,22 @@ def extract_cronograma_from_calendar_table(blob: str) -> Dict[str, str]:
         if sentence:
             out[hito_id] = sentence
     return out
+
+
+def cronograma_has_extracted_dates(cronograma: object, *, min_dates: int = 1) -> bool:
+    """True si el dict normalizado tiene al menos ``min_dates`` actos con fecha real (no placeholder)."""
+    norm = normalize_cronograma_dict(cronograma)
+    count = 0
+    for val in norm.values():
+        s = str(val or "").strip()
+        if not s:
+            continue
+        if parse_spanish_date_fragment(s) is not None:
+            count += 1
+            continue
+        if not is_placeholder_cronograma_value(s):
+            count += 1
+    return count >= min_dates
 
 
 def extract_cronograma_from_bases_text(blob: str) -> Dict[str, str]:

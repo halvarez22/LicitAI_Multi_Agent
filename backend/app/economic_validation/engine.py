@@ -89,10 +89,22 @@ def validate_economic_proposal(
     reglas_economicas: Dict[str, str],
     session_name: str = "",
     allow_zero_total_base: bool = False,
+    costos_directos: Optional[float] = None,
+    subtotal_antes_iva: Optional[float] = None,
 ) -> EconomicValidationResult:
     profile_name = detect_profile(reglas_economicas or {}, session_name=session_name)
     profile = get_profile(profile_name)
     out = EconomicValidationResult(perfil_usado=profile_name)
+    cotizable_base = (
+        float(costos_directos)
+        if costos_directos is not None and costos_directos > 0
+        else float(total_base)
+    )
+    iva_base = (
+        float(subtotal_antes_iva)
+        if subtotal_antes_iva is not None and subtotal_antes_iva > 0
+        else float(total_base)
+    )
 
     # 1) Precios nulos/negativos
     bad_prices = []
@@ -134,9 +146,9 @@ def validate_economic_proposal(
             severidad=1,
             fuente="session.economic_user_inputs.allow_zero_total_base_ack",
             formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY} OR allow_zero_total_base",
-            valor={"total_base": total_base, "allow_zero_total_base": True},
+            valor={"total_base": cotizable_base, "allow_zero_total_base": True},
         )
-    elif total_base >= _MIN_TOTAL_BASE_MONETARY:
+    elif cotizable_base >= _MIN_TOTAL_BASE_MONETARY:
         _add(
             out,
             regla="total_base_cotizable",
@@ -145,7 +157,7 @@ def validate_economic_proposal(
             severidad=1,
             fuente="proposal_totals",
             formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY}",
-            valor={"total_base": total_base},
+            valor={"total_base": cotizable_base},
         )
     else:
         _add(
@@ -153,14 +165,14 @@ def validate_economic_proposal(
             regla="total_base_cotizable",
             estado="blocking",
             evidencia=(
-                f"El importe base de la propuesta ({total_base:.2f} {currency}) es cero o inferior "
+                f"El importe base de la propuesta ({cotizable_base:.2f} {currency}) es cero o inferior "
                 f"a {_MIN_TOTAL_BASE_MONETARY:.2f}; no hay cotización accionable sin confirmación explícita."
             ),
             severidad=3,
             fuente="proposal_totals",
             formula=f"total_base >= {_MIN_TOTAL_BASE_MONETARY} OR allow_zero_total_base",
             valor={
-                "total_base": total_base,
+                "total_base": cotizable_base,
                 "currency": currency,
                 "items_count": len(proposal_items or []),
             },
@@ -196,9 +208,9 @@ def validate_economic_proposal(
             valor=True,
         )
 
-    # 3) IVA / total esperado (sobre total_base)
+    # 3) IVA / total esperado (sobre subtotal antes de IVA en obra; directos en genérico)
     iva_rate = _to_float(profile.get("iva_rate"), 0.16)
-    expected_grand = round(total_base * (1.0 + iva_rate), 2)
+    expected_grand = round(iva_base * (1.0 + iva_rate), 2)
     if abs(expected_grand - grand_total) > 0.05:
         _add(
             out,

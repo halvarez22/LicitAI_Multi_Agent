@@ -44,6 +44,46 @@ def _agent_input(
 
 
 @pytest.mark.asyncio
+async def test_obra_formatos_en_compliance_master_list_pide_fuente_precios():
+    """Obra pública: catálogo/APU en formatos debe activar captura, no SUCCESS vacío."""
+    mem = _memory_stub(
+        session={
+            "tasks_completed": [],
+            "compliance_master_list": {
+                "tecnico": [],
+                "formatos": [
+                    {
+                        "id": "f_cat",
+                        "nombre": "Catálogo de conceptos con cantidades y precios unitarios",
+                        "descripcion": "Deberá incluir los detalles del catálogo.",
+                        "source": "bases.pdf",
+                        "page": 40,
+                        "snippet": "Catálogo de conceptos con cantidades y precios unitarios.",
+                    },
+                    {
+                        "id": "f_apu",
+                        "nombre": "Análisis de precios unitarios",
+                        "descripcion": "Análisis de precios unitarios",
+                        "source": "bases.pdf",
+                        "page": 41,
+                    },
+                ],
+            },
+        },
+        company={"id": "co_obra", "master_profile": {"catalog": []}},
+    )
+    ctx = MCPContextManager(mem)
+    agent = EconomicAgent(ctx)
+
+    out = await agent.process(_agent_input("s-obra-formatos", company_id="co_obra"))
+
+    assert out.status == AgentStatus.WAITING_FOR_DATA
+    assert "fuente real de precios" in str(out.message or "").lower() or (
+        (out.data or {}).get("missing")
+    )
+
+
+@pytest.mark.asyncio
 async def test_sin_requisitos_tecnico_devuelve_success_sin_llm():
     ctx = MCPContextManager(_memory_stub())
     agent = EconomicAgent(ctx)

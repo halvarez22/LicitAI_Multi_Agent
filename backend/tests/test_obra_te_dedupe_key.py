@@ -1,0 +1,128 @@
+"""Mapeo universal obra|T/E desde nombres de archivo y corpus."""
+from __future__ import annotations
+
+from app.services.administrative_letter_clauses import (
+    resolve_document_ciudad,
+    try_build_clause_markdown,
+)
+from app.services.pliego_formats_enrichment_service import (
+    obra_te_dedupe_key,
+    pliego_format_dedupe_key,
+)
+
+
+def test_anexo_t1_underscore_filename():
+    assert pliego_format_dedupe_key("Anexo_T-1.docx") == "obra|T1"
+    assert obra_te_dedupe_key("3. Anexo T-1") == "obra|T1"
+
+
+def test_anexo_e5_materiales():
+    assert pliego_format_dedupe_key("Anexo_E-5_Materiales.docx") == "obra|E5"
+
+
+def test_modelo_contrato_maps_t3():
+    assert pliego_format_dedupe_key(
+        "Modelo_de_Contrato_utilizado_por_la_Dirección_General_de_Obr.docx"
+    ) == "obra|T3"
+
+
+def test_carta_compromiso_proposicion_maps_e1():
+    assert pliego_format_dedupe_key("Carta-Compromiso_de_la_Proposición.docx") == "obra|E1"
+
+
+def test_manifestacion_cumplimiento_not_t6_via_alias():
+    key = pliego_format_dedupe_key(
+        "Manifestación_de_Cumplimiento_de_Obligaciones_Contractuales.docx"
+    )
+    assert key == "obra|T6"
+
+
+def test_anexo_ae_maps_e2():
+    assert pliego_format_dedupe_key("01_ANEXO_AE_PROPUESTA_ECONOMICA.docx") == "obra|E2"
+    assert pliego_format_dedupe_key("03_CARTA_COMPROMISO_PRECIOS.docx") == "obra|E2"
+
+
+def test_obra_t1_tabular_clause_no_contamination():
+    body = try_build_clause_markdown(
+        req_label="Anexo_T-1.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "fecha": "17 de diciembre de 2025",
+        },
+        req_snippet="ANEXO T-1 NOMBRE UBICACIÓN FÍSICA PROPIEDAD CANTIDAD",
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-1" in low
+    assert "relación de maquinaria" in low
+    assert "anexo t-2" not in low
+    assert "contrato no." not in low
+    assert "comparezco" not in low
+    assert "| ---" in body or "| --- |" in body
+
+
+def test_city_from_convocante_leon():
+    from app.services.convocante_resolver import city_from_convocante_text
+
+    lugar = city_from_convocante_text(
+        "H. AYUNTAMIENTO DE LEÓN, GTO.\nDIRECCIÓN GENERAL DE OBRA PÚBLICA"
+    )
+    assert "LEÓN" in lugar.upper()
+    assert "GTO" in lugar.upper()
+
+
+def test_resolve_document_ciudad_prefers_convocante():
+    meta = {"lugar_convocante": "León, GTO", "convocante": "H. Ayuntamiento de León, Gto."}
+    profile = {"domicilio_fiscal": "Paseo de la Reforma 123, Ciudad de México, CDMX"}
+    ciudad = resolve_document_ciudad(profile, profile["domicilio_fiscal"], letter_meta=meta)
+    assert "León" in ciudad
+    assert "CDMX" not in ciudad
+
+
+def test_obra_t2_tabular_clause_no_contamination():
+    body = try_build_clause_markdown(
+        req_label="Relación_de_contratos_de_obras_vigentes.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "fecha": "17 de diciembre de 2025",
+        },
+        req_snippet=(
+            "ANEXO T-2 CONTRATANTE DOMICILIO Y TELEFONO DEL CONTRATANTE "
+            "DESCRIPCIÓN DE LA OBRA IMPORTE DEL CONTRATO AVANCE FINANCIERO FECHA DE TERMINACION"
+        ),
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-2" in low
+    assert "relación de contratos" in low
+    assert "contrato no." not in low
+    assert "anexo t-1" not in low
+    assert "comparezco" not in low
+    assert "no se incluye" in low
+    assert "contratante" in low
+
+
+def test_t4_bases_clause():
+    body = try_build_clause_markdown(
+        req_label="Anexo T-4 Bases y Requisitos (firmados de conformidad)",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={"concurso_label": "Licitación Pública Num. D/080/2025"},
+    )
+    assert body
+    low = body.lower()
+    assert "bases y requisitos" in low
+    assert "anexo t-4" in low

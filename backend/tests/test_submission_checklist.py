@@ -18,6 +18,7 @@ from app.checklist.submission_checklist_service import (
     ensure_session_cronograma_and_checklist,
     get_submission_checklist,
     mark_hito,
+    sync_checklist_from_last_analysis,
     upsert_checklist_from_cronograma,
 )
 
@@ -281,3 +282,56 @@ async def test_cronograma_enrichment_timeout_returns_cached_checklist(monkeypatc
     assert model is not None
     assert len(model.hitos) == 1
     assert model.hitos[0].fecha_texto_raw == "15 de marzo de 2026"
+
+
+BARDA_BASES_SNIPPET = """
+VISITA AL SITIO misma que será el día 10 de diciembre del año 2025 a las 10:00 horas.
+JUNTA DE ACLARACIONES se convoca el día 10 de diciembre del año 2025 a las 10:30 hrs.
+fecha y hora para tal efecto: El día 19 de diciembre del 2025, a las 9:30 horas.
+El acto de fallo se dictará el día 26 de diciembre del 2025 a las 10:10 horas.
+"""
+
+
+@pytest.mark.asyncio
+async def test_sync_checklist_fallback_when_analyst_cronograma_missing():
+    """Sin cronograma del Analyst pero con bases legibles → checklist desde extracción determinista."""
+    store: dict = {}
+
+    class Mem:
+        def __init__(self):
+            self.get_session = AsyncMock(side_effect=lambda sid: store.get(sid))
+            self.save_session = AsyncMock(
+                side_effect=lambda sid, data: store.setdefault(sid, {}).update(data) or True
+            )
+            self.get_documents = AsyncMock(
+                return_value=[{"filename": "bases_convocatoria.pdf", "text": BARDA_BASES_SNIPPET}]
+            )
+
+    mem = Mem()
+    sid = "sess_bases_fallback"
+    await mem.save_session(
+        sid,
+        {
+            "name": "BARDA PRIMARIA",
+            "tasks_completed": [
+                {
+                    "task": "stage_completed:analysis",
+                    "result": {
+                        "data": {
+                            "error": "Error al parsear respuesta del LLM",
+                            "checklist_consolidado": [],
+                        }
+                    },
+                }
+            ],
+        },
+    )
+
+    model = await sync_checklist_from_last_analysis(mem, sid)
+    assert model is not None
+    assert len(model.hitos) == 6
+    by_id = {h.id: h.fecha_texto_raw for h in model.hitos}
+    assert "10 de diciembre del año 2025" in by_id["visita_instalaciones"]
+    assert "19 de diciembre" in by_id["presentacion_proposiciones"]
+    assert "2025" in by_id["presentacion_proposiciones"]
+    assert "26 de diciembre" in by_id["fallo"]

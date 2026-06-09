@@ -11,6 +11,7 @@ from app.api.deps import get_connected_memory
 from app.services.administrative_letter_clauses import (
     build_administrative_letter_markdown,
     extract_letter_body_from_docx,
+    is_obra_tabular_annex,
     resolve_document_ciudad,
     resolve_letter_session_metadata,
     try_build_clause_markdown,
@@ -19,6 +20,15 @@ from app.services.document_date_resolver import resolve_document_date
 from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
 CLAUSE_TARGETS = {
+    "obra|T1",
+    "obra|T2",
+    "obra|T3",
+    "obra|T4",
+    "obra|T5",
+    "obra|E4",
+    "obra|T-B-2",
+    "obra|T8_PRIVACIDAD",
+    "obra|T8",
     "pliego|ANEXO_II",
     "pliego|ANEXO_III",
     "pliego|ANEXO_IV",
@@ -46,16 +56,32 @@ async def main() -> None:
 
     session_state = dict(state)
     try:
+        from app.services.junta_bases_corpus import build_bases_corpus
+        from app.services.convocante_resolver import merge_convocante_into_session_patch
         from app.services.vector_service import VectorDbServiceClient
 
+        vdb = VectorDbServiceClient()
         if not str(session_state.get("bases_corpus_hint") or "").strip():
-            cal_res = VectorDbServiceClient().query_texts(
+            cal_res = vdb.query_texts(
                 session_id,
                 "recepción de propuestas calendario evento fecha presentación apertura proposiciones",
                 n_results=20,
             )
             cal_docs = cal_res.get("documents") or []
             session_state["bases_corpus_hint"] = "\n".join(d for d in cal_docs if d)[:120000]
+
+        docs = await mem.get_documents(session_id)
+        corpus = build_bases_corpus(session_id, docs, session_state=session_state)
+        patch = merge_convocante_into_session_patch(session_state, corpus.combined)
+        if patch.get("convocante"):
+            la = dict(session_state.get("last_analysis") or {})
+            for k, v in patch.items():
+                if v and not str(la.get(k) or "").strip():
+                    la[k] = v
+            session_state["last_analysis"] = la
+            if patch.get("destinatario"):
+                session_state["destinatario"] = patch["destinatario"]
+            session_state["convocante"] = patch.get("convocante")
     except Exception:
         pass
 
@@ -79,7 +105,7 @@ async def main() -> None:
         "destinatario": letter_meta.get("destinatario") or "A QUIEN CORRESPONDA:",
         "concurso_label": letter_meta.get("concurso_label", ""),
         "convocante": letter_meta.get("convocante", ""),
-        "ciudad": resolve_document_ciudad(mp, str(dom)),
+        "ciudad": resolve_document_ciudad(mp, str(dom), letter_meta=letter_meta),
         "empresa": mp.get("razon_social", ""),
         "rfc": mp.get("rfc", ""),
         "representante": mp.get("representante_legal") or mp.get("representante", ""),
@@ -113,11 +139,20 @@ async def main() -> None:
             if not body.strip():
                 continue
 
-        _save_docx(title, body, path, meta)
+        doc_meta = {**meta, "obra_tabular": is_obra_tabular_annex(fn)}
+        _save_docx(title, body, path, doc_meta)
         updated += 1
         print(
             f"updated {fn} key={key} lugar={meta.get('ciudad')} fecha={meta.get('fecha')}"
         )
+
+    try:
+        from app.services.obra_delivery_gap_service import sync_admin_to_sobre_administrativo
+
+        n_sync, _ = sync_admin_to_sobre_administrativo(session_id)
+        print(f"sync_sobre_admin count={n_sync}")
+    except Exception as exc:
+        print(f"sync_sobre_admin_skipped error={exc}")
 
     print(f"reapply_done count={updated}")
     sys.exit(0 if updated else 2)

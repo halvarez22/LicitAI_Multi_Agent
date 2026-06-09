@@ -440,3 +440,69 @@ def test_fill_gate_contrato_con_fuga_prompt_no_bloquea_por_na(tmp_path, monkeypa
     )
     assert out["validation_passed"] is True
     assert out["blocking_count"] == 0
+
+
+def test_cross_tender_ignores_pliego_boilerplate_materiales_anexo_dolares(tmp_path, monkeypatch):
+    """MATERIALES, ANEXO y DOLARES en paréntesis son jerga de formato, no otra licitación."""
+    monkeypatch.setattr(app_settings, "DOCUMENT_FILL_QUALITY_GATE_MODE", "enforce")
+    ctx = {
+        "source": "formats",
+        "confidence": 0.95,
+        "session_hint": "barda_primaria_lopez_rayon D/080/2025",
+    }
+    for name, lines in (
+        (
+            "Anexo_E-5_Materiales.docx",
+            ["Anexo E-5 (MATERIALES)", "Detalle (MATERIALES)", "Empresa SA", "RFC ACM010101AAA"],
+        ),
+        (
+            "Aviso_de_privacidad_anexo.docx",
+            ["Aviso (ANEXO)", "Referencia (ANEXO)", "Empresa SA", "RFC ACM010101AAA"],
+        ),
+        (
+            "Capital_Contable_comprometido.docx",
+            ["Capital (DOLARES)", "Importe (DOLARES)", "Empresa SA", "RFC ACM010101AAA"],
+        ),
+    ):
+        f = tmp_path / name
+        _make_docx(f, lines)
+        out = validate_generated_documents_fill(
+            stage="formats",
+            generated_documents=[{"ruta": str(f), "nombre": f.name}],
+            master_profile={"razon_social": "Empresa SA", "rfc": "ACM010101AAA"},
+            provenance_context=ctx,
+        )
+        cross = [
+            i
+            for i in out["issues"]
+            if i.get("error_type") == "cross_tender_reference"
+        ]
+        assert cross == [], f"{name} no debe marcar cross_tender: {cross}"
+
+
+def test_cross_tender_still_flags_real_zone_acronym_cinco(tmp_path, monkeypatch):
+    """Siglas de zona/institución (CINCO) siguen bloqueando si no están en la sesión."""
+    monkeypatch.setattr(app_settings, "DOCUMENT_FILL_QUALITY_GATE_MODE", "enforce")
+    f = tmp_path / "propuesta_servicio_hospital.docx"
+    _make_docx(
+        f,
+        [
+            "Proyecto (CINCO) en Guanajuato",
+            "Atención en (CINCO)",
+            "Empresa SA",
+            "RFC ACM010101AAA",
+        ],
+    )
+    out = validate_generated_documents_fill(
+        stage="formats",
+        generated_documents=[{"ruta": str(f), "nombre": f.name}],
+        master_profile={"razon_social": "Empresa SA", "rfc": "ACM010101AAA"},
+        provenance_context={
+            "source": "formats",
+            "confidence": 0.95,
+            "session_hint": "barda_primaria_lopez_rayon D/080/2025",
+        },
+    )
+    assert any(
+        i.get("error_type") == "cross_tender_reference" for i in out["issues"]
+    )

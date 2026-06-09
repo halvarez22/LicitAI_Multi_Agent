@@ -327,8 +327,9 @@ async def test_ensure_economic_snapshot_ready_complete_without_items_not_ready()
                 mock_context, "test-no-items", agent_input, session_state
             )
 
-    assert ready is True
-    assert error is None
+    assert ready is False
+    assert error is not None
+    assert error.get("stop_reason") == "MISSING_ECONOMIC_PROPOSAL"
 
 
 @pytest.mark.asyncio

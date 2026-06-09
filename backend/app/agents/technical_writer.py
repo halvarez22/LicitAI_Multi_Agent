@@ -1310,12 +1310,15 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     htable.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # Celda 1: Logo
-    if metadata and metadata.get("logo_path") and os.path.exists(metadata["logo_path"]):
-        try:
-            run_logo = htable.cell(0, 0).paragraphs[0].add_run()
-            run_logo.add_picture(metadata["logo_path"], width=Inches(1.5))
-        except Exception as e:
-            logger.warning("logo_insert_failed", path=metadata.get("logo_path"), error=str(e))
+    if metadata and metadata.get("logo_path"):
+        from app.utils.doc_formatting import add_logo_picture_to_run
+
+        if not add_logo_picture_to_run(
+            htable.cell(0, 0).paragraphs[0].add_run(),
+            str(metadata["logo_path"]),
+            width_inches=1.5,
+        ):
+            logger.warning("logo_insert_failed", path=metadata.get("logo_path"))
             
     # Celda 2: Datos (Derecha)
     p_info = htable.cell(0, 1).paragraphs[0]

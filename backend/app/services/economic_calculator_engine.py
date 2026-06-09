@@ -4,6 +4,7 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List
 
+from app.economic_validation.formulas.obra_publica_v1 import compute_obra_publica_totals
 from app.economic_validation.profiles import detect_profile, get_profile
 from app.economic_validation.formulas.salario_real_v1 import compute_fsr
 
@@ -47,6 +48,27 @@ class EconomicCalculatorEngine:
 
     def _norm_text(self, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    def _extract_obra_rates(
+        self, reglas_economicas: Dict[str, str], profile: Dict[str, Any]
+    ) -> tuple[Decimal, Decimal]:
+        """Lee % de indirectos/utilidad del catálogo o bases; perfil como fallback."""
+        blob = " ".join(str(v or "") for v in (reglas_economicas or {}).values()).lower()
+        ind_rate = Decimal(str(profile.get("indirectos_rate", 0.10)))
+        util_rate = Decimal(str(profile.get("utilidad_rate", 0.05)))
+        m_ind = re.search(r"indirectos?\s*[\(\[]?\s*(\d{1,2}(?:\.\d+)?)\s*%", blob)
+        m_util = re.search(r"utilidad\s*[\(\[]?\s*(\d{1,2}(?:\.\d+)?)\s*%", blob)
+        if m_ind:
+            try:
+                ind_rate = Decimal(m_ind.group(1)) / Decimal("100")
+            except (InvalidOperation, ValueError):
+                pass
+        if m_util:
+            try:
+                util_rate = Decimal(m_util.group(1)) / Decimal("100")
+            except (InvalidOperation, ValueError):
+                pass
+        return ind_rate, util_rate
 
     def _extract_fsr_params(self, reglas_economicas: Dict[str, str]) -> Dict[str, Any]:
         """
@@ -119,17 +141,30 @@ class EconomicCalculatorEngine:
                 total_base = self._to_decimal_money(val_override)
                 break
 
-        total_base = total_base.quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
+        costos_directos = total_base.quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
 
         profile_name = detect_profile(reglas_economicas or {}, session_name=session_name)
         profile = get_profile(profile_name)
         iva_rate = self._to_decimal_money(profile.get("iva_rate", 0.16), default="0.16")
-        grand_total = (total_base * (Decimal("1.00") + iva_rate)).quantize(
-            _MONEY_Q, rounding=ROUND_HALF_UP
-        )
+        formula_set = str(profile.get("formula_set") or "")
+        obra_breakdown: Dict[str, Any] = {}
+        if formula_set == "obra_publica_v1" and costos_directos > 0:
+            ind_rate, util_rate = self._extract_obra_rates(reglas_economicas or {}, profile)
+            obra_breakdown = compute_obra_publica_totals(
+                costos_directos,
+                indirectos_rate=ind_rate,
+                utilidad_rate=util_rate,
+                iva_rate=iva_rate,
+            )
+            total_base = self._to_decimal_money(obra_breakdown.get("subtotal_antes_iva", 0.0))
+            grand_total = self._to_decimal_money(obra_breakdown.get("grand_total", 0.0))
+        else:
+            total_base = costos_directos
+            grand_total = (total_base * (Decimal("1.00") + iva_rate)).quantize(
+                _MONEY_Q, rounding=ROUND_HALF_UP
+            )
         fsr_payload: Dict[str, Any] = {}
         blocking_issues: List[str] = []
-        formula_set = str(profile.get("formula_set") or "")
         if formula_set == "salario_real_v1" and bool(profile.get("fsr_required")):
             fsr_params = self._extract_fsr_params(reglas_economicas or {})
             fsr_result = compute_fsr(fsr_params)
@@ -139,15 +174,19 @@ class EconomicCalculatorEngine:
                 blocking_issues.append(
                     f"fsr_required_params_missing: Faltan parámetros FSR ({missing})."
                 )
-        return {
+        out: Dict[str, Any] = {
             "profile_name": profile_name,
             "iva_rate": float(iva_rate),
+            "costos_directos": float(costos_directos),
             "total_base": float(total_base),
             "grand_total": float(grand_total),
             "formula_set": formula_set or "generic_v1",
             "fsr": fsr_payload,
             "blocking_issues": blocking_issues,
         }
+        if obra_breakdown:
+            out.update(obra_breakdown)
+        return out
 
     def build_quadrature_report(
         self,

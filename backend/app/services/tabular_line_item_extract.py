@@ -946,3 +946,289 @@ def _extract_from_raw_layout(df: pd.DataFrame, sheet_name: str, filename: str) -
             "extra": {"source_filename": filename[:500], "layout": "raw_calculation"},
         })
     return out
+
+
+# --- Texto plano (TXT / PDF nativo-OCR) → partidas de catálogo obra/servicios ---
+
+_UNITS_CANONICAL = frozenset(
+    {
+        "m3",
+        "m2",
+        "m²",
+        "m³",
+        "pza",
+        "kg",
+        "lote",
+        "servicio",
+        "hora",
+        "dia",
+        "día",
+        "ml",
+        "l",
+        "ton",
+        "tonelada",
+        "global",
+        "mes",
+    }
+)
+
+_SKIP_TEXT_ROW = re.compile(
+    r"(?i)^\s*(no\.?|clave|descripci[oó]n|concepto|unidad|cantidad|precio|importe|subtotal|"
+    r"total|iva|utilidad|indirecto|gran\s*total|costos?\s+directos?|representante|fecha|"
+    r"licitaci[oó]n|cat[aá]logo|propuesta|mxn|unitario)\b"
+)
+
+_INLINE_ROW_RE = re.compile(
+    r"^(?P<partida>\d{1,3})\s+"
+    r"(?P<clave>\d{3,6})\s+"
+    r"(?P<desc>.+?)\s+"
+    r"(?P<unidad>m[²2³3]|pza|kg|lote|servicio|hora|d[ií]a|ml|l|ton|tonelada|global|mes)\s+"
+    r"(?P<cantidad>[\d.,]+)\s+"
+    r"(?P<pu>[\d.,]+)\s+"
+    r"(?P<importe>[\d.,]+)\s*$",
+    re.I,
+)
+
+
+def _is_unit_token(token: str) -> bool:
+    raw = str(token or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _UNITS_CANONICAL:
+        return True
+    return bool(re.fullmatch(r"m[²2³3]", raw))
+
+
+def _parse_qty(val: Any) -> Optional[float]:
+    p = _parse_price(val)
+    if p is not None:
+        return p
+    s = str(val or "").strip().replace(",", "")
+    if not s:
+        return None
+    try:
+        x = float(s)
+        return x if x >= 0 else None
+    except ValueError:
+        return None
+
+
+def _append_text_row(
+    out: List[Dict[str, Any]],
+    *,
+    filename: str,
+    partida: int,
+    clave: str,
+    descripcion: str,
+    unidad: str,
+    cantidad: float,
+    precio_unitario: float,
+    row_index: int,
+    layout: str,
+) -> None:
+    concept = f"{clave} {descripcion}".strip()
+    if len(concept) < 4 or precio_unitario <= 0:
+        return
+    if _SKIP_TEXT_ROW.match(concept):
+        return
+    out.append(
+        {
+            "id": str(uuid.uuid4()),
+            "concepto_raw": concept[:4000],
+            "concepto_norm": _norm_concepto(concept),
+            "precio_unitario": float(precio_unitario),
+            "unidad": (unidad or None)[:64] if unidad else None,
+            "cantidad": float(cantidad) if cantidad and cantidad > 0 else 1.0,
+            "sheet_name": "text_catalog",
+            "row_index": float(row_index),
+            "source_type": "text_catalog",
+            "moneda": "MXN",
+            "extra": {
+                "source_filename": filename[:500],
+                "layout": layout,
+                "partida": partida,
+                "clave": clave,
+            },
+        }
+    )
+
+
+def _extract_catalog_from_structured_lines(
+    lines: List[str], filename: str
+) -> List[Dict[str, Any]]:
+    """Filas en una línea (TSV, espacios múltiples o copy-paste tabular)."""
+    out: List[Dict[str, Any]] = []
+    for idx, raw in enumerate(lines):
+        line = re.sub(r"\s+", " ", str(raw or "").strip())
+        if not line or _SKIP_TEXT_ROW.match(line):
+            continue
+        m = _INLINE_ROW_RE.match(line)
+        if not m:
+            continue
+        _append_text_row(
+            out,
+            filename=filename,
+            partida=int(m.group("partida")),
+            clave=m.group("clave"),
+            descripcion=m.group("desc").strip(),
+            unidad=m.group("unidad"),
+            cantidad=float(_parse_qty(m.group("cantidad")) or 1),
+            precio_unitario=float(_parse_price(m.group("pu")) or 0),
+            row_index=idx,
+            layout="inline_row",
+        )
+    return out
+
+
+def _append_numeric_tokens_from_line(line: str, nums: List[float], *, limit: int = 3) -> int:
+    """Añade números de una línea (p. ej. ``18,500.00 37,000.00``). Devuelve cuántos se añadieron."""
+    added = 0
+    for part in str(line or "").split():
+        if len(nums) >= limit:
+            break
+        val = _parse_qty(part)
+        if val is not None:
+            nums.append(val)
+            added += 1
+    return added
+
+
+def _extract_catalog_from_ocr_lines(lines: List[str], filename: str) -> List[Dict[str, Any]]:
+    """
+    Catálogo obra con celdas en líneas separadas (típico de PDF nativo vía PyMuPDF).
+    """
+    out: List[Dict[str, Any]] = []
+    n = len(lines)
+    i = 0
+    while i < n - 4:
+        partida_s = lines[i].strip()
+        if not re.fullmatch(r"\d{1,3}", partida_s):
+            i += 1
+            continue
+        clave_line = lines[i + 1].strip() if i + 1 < n else ""
+        m_clave = re.match(r"^(\d{3,6})\b", clave_line)
+        if not m_clave:
+            i += 1
+            continue
+        clave_s = m_clave.group(1)
+        clave_tail = clave_line[m_clave.end() :].strip()
+        j = i + 2
+        desc_parts: List[str] = []
+        if clave_tail:
+            desc_parts.append(clave_tail)
+        unidad: Optional[str] = None
+        while j < n:
+            tok = lines[j].strip()
+            if not tok:
+                j += 1
+                continue
+            if _SKIP_TEXT_ROW.match(tok):
+                j += 1
+                continue
+            if _is_unit_token(tok):
+                unidad = tok
+                j += 1
+                break
+            # Unidad al final de la línea (p. ej. «colocación de puerta pza»)
+            tail_parts = tok.rsplit(None, 1)
+            if len(tail_parts) == 2 and _is_unit_token(tail_parts[1]):
+                if tail_parts[0]:
+                    desc_parts.append(tail_parts[0])
+                unidad = tail_parts[1]
+                j += 1
+                break
+            if re.fullmatch(r"[\d.,]+", tok.replace(",", "")):
+                break
+            desc_parts.append(tok)
+            j += 1
+        if j >= n or not desc_parts or not unidad:
+            i += 1
+            continue
+        nums: List[float] = []
+        while j < n and len(nums) < 3:
+            tok = lines[j].strip()
+            if not tok:
+                j += 1
+                continue
+            if _SKIP_TEXT_ROW.match(tok):
+                j += 1
+                continue
+            added = _append_numeric_tokens_from_line(tok, nums)
+            if added:
+                j += 1
+            else:
+                break
+        if len(nums) < 2:
+            i += 1
+            continue
+        cantidad, pu = nums[0], nums[1]
+        _append_text_row(
+            out,
+            filename=filename,
+            partida=int(partida_s),
+            clave=clave_s,
+            descripcion=" ".join(desc_parts),
+            unidad=unidad,
+            cantidad=cantidad,
+            precio_unitario=pu,
+            row_index=i,
+            layout="ocr_multiline",
+        )
+        i = j
+    return out
+
+
+def _extract_catalog_from_tsv_blocks(text: str, filename: str) -> List[Dict[str, Any]]:
+    """Bloques con tabuladores (exportación Excel → TXT)."""
+    out: List[Dict[str, Any]] = []
+    for block in re.split(r"\n{2,}", text):
+        if "\t" not in block:
+            continue
+        rows = [ln for ln in block.splitlines() if ln.strip()]
+        if len(rows) < 2:
+            continue
+        header = [c.strip().lower() for c in rows[0].split("\t")]
+        if not any("precio" in h or "concepto" in h or "descrip" in h for h in header):
+            continue
+        try:
+            import io
+
+            df = pd.read_csv(io.StringIO("\n".join(rows)), sep="\t")
+            df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
+            out.extend(_extract_from_df(df, "text_tsv", filename))
+        except Exception:
+            continue
+    return out
+
+
+def extract_line_items_from_text_blob(text: str, filename: str) -> List[Dict[str, Any]]:
+    """
+    Extrae partidas cotizables desde texto plano (TXT o ``extracted_text`` de PDF).
+
+    Estrategias (en orden): TSV → filas inline → layout OCR multilínea.
+    """
+    if not str(text or "").strip():
+        return []
+
+    raw = str(text)
+    # Quitar encabezados de página del pipeline híbrido PDF
+    raw = re.sub(r"---\s*PÁGINA\s+\d+\s*---", "\n", raw, flags=re.I)
+    raw = re.sub(r"###\s*ARCHIVO:.*", "\n", raw, flags=re.I)
+
+    lines = [ln.strip() for ln in raw.splitlines() if str(ln or "").strip()]
+    if not lines:
+        return []
+
+    merged: List[Dict[str, Any]] = []
+    for chunk in (
+        _extract_catalog_from_tsv_blocks(raw, filename),
+        _extract_catalog_from_structured_lines(lines, filename),
+        _extract_catalog_from_ocr_lines(lines, filename),
+    ):
+        merged.extend(chunk)
+
+    # Mínimo 2 partidas con precio para evitar falsos positivos de una celda suelta
+    priced = [r for r in merged if float(r.get("precio_unitario") or 0) > 0]
+    if len(priced) < 2:
+        return []
+    return dedupe_tabular_line_items(priced)

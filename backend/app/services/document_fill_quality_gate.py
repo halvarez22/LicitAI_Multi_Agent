@@ -10,6 +10,7 @@ from docx import Document
 from openpyxl import load_workbook
 
 from app.config.settings import settings
+from app.utils.rfc_normalizer import RFC_SAT_PATTERN, normalize_rfc_sat, rfc_present_in_text
 
 _PLACEHOLDER_PATTERNS: Sequence[str] = (
     r"\[\s*[^\]]+\s*\]",
@@ -72,24 +73,69 @@ _BLANK_SLOT_PATTERNS: Sequence[str] = (
     r"[A-ZÁÉÍÓÚÑ][^\n]{0,120}_{4,}\s*$",
 )
 
-_GENERIC_TENDER_MARKERS = {
-    "RFC",
-    "SAT",
-    "IVA",
-    "CURP",
-    "ISR",
-    "IMSS",
-    "ISSSTE",
-    "MXN",
-    "XML",
-    "PDF",
-    "ZIP",
-    "DOCX",
-    "XLSX",
-}
+_GENERIC_TENDER_MARKERS = frozenset(
+    {
+        "RFC",
+        "SAT",
+        "IVA",
+        "CURP",
+        "ISR",
+        "IMSS",
+        "ISSSTE",
+        "MXN",
+        "USD",
+        "XML",
+        "PDF",
+        "ZIP",
+        "DOCX",
+        "XLSX",
+        # Vocabulario estructural de pliegos/formatos (no códigos de otra licitación).
+        "ANEXO",
+        "MATERIALES",
+        "DOLARES",
+        "DOLAR",
+        "PESOS",
+        "MONEDA",
+        "NACIONAL",
+        "CAPITAL",
+        "CONTABLE",
+        "PRIVACIDAD",
+        "AVISO",
+        "COMPROMISO",
+        "TECNICO",
+        "ECONOMICO",
+        "ADMINISTRATIVO",
+        "LEGAL",
+        "OBRA",
+        "CONTRATO",
+        "PARTIDA",
+        "CONCEPTO",
+        "MEXICO",
+        "MUNICIPAL",
+        "ESTATAL",
+        "FEDERAL",
+        "GENERAL",
+        "INTEGRAL",
+        "TOTAL",
+        "SUBTOTAL",
+        "NETO",
+        "BRUTO",
+        "IMPORTE",
+        "CANTIDAD",
+        "UNIDAD",
+        "PRECIO",
+        "PROPUESTA",
+        "LICITANTE",
+        "OFERENTE",
+        "CONVOCANTE",
+        "REPRESENTANTE",
+        "FIRMAR",
+        "FIRMA",
+    }
+)
 
 _ECO_LABELS = ("SUBTOTAL", "IVA", "TOTAL")
-_RFC_PATTERN = r"^[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}$"
+_RFC_PATTERN = RFC_SAT_PATTERN
 
 
 @dataclass
@@ -360,9 +406,19 @@ def _is_placeholder_operational_mirror(text: str) -> bool:
     return _is_placeholder_llm_residual_only(text)
 
 
+def _is_boilerplate_parenthetic_marker(marker: str) -> bool:
+    """True si el token entre paréntesis es jerga de formato/pliego, no sigla de otra licitación."""
+    token = _normalize_token(marker)
+    if not token or len(token) < 3:
+        return True
+    return token in _GENERIC_TENDER_MARKERS
+
+
 def detect_cross_tender_marker(chunks: Sequence[str], session_hint: str) -> str | None:
     """
     Detecta referencias institucionales repetidas que no pertenecen a la sesión.
+
+    Ignora paréntesis con vocabulario universal de anexos (MATERIALES, ANEXO, DOLARES…).
     """
     hint = _normalize_token(session_hint)
     if not hint:
@@ -373,7 +429,7 @@ def detect_cross_tender_marker(chunks: Sequence[str], session_hint: str) -> str 
     norm_blob = _normalize_token(blob)
     markers = re.findall(r"\(([A-Z][A-Z0-9\-]{3,})\)", norm_blob)
     for marker in sorted(set(markers)):
-        if marker in _GENERIC_TENDER_MARKERS:
+        if _is_boilerplate_parenthetic_marker(marker):
             continue
         if norm_blob.count(marker) < 2:
             continue
@@ -574,7 +630,17 @@ def _extract_field_value(
     k = field_key.lower()
     if k in ("razon_social", "rfc", "representante_legal"):
         expected = str(master_profile.get(k) or "").strip()
-        if expected and _contains_profile_value(document_chunks, expected):
+        if k == "rfc":
+            if not expected:
+                return ""
+            canon = normalize_rfc_sat(expected)
+            if canon and any(
+                rfc_present_in_text(chunk, canon) for chunk in document_chunks if chunk
+            ):
+                return canon
+            if _contains_profile_value(document_chunks, canon or expected):
+                return canon or expected.upper()
+        elif expected and _contains_profile_value(document_chunks, expected):
             return expected
         route = str(materialization_route or "").lower()
         if route.startswith("deterministic") or route in ("mirror", "template_locked"):
@@ -630,7 +696,12 @@ def _validate_expected_type(value: str, expected_type: str, pattern: str = "") -
     if expected_type == "numeric":
         return (_as_float(value) is not None, "numeric_value_required")
     if expected_type == "identifier" and pattern:
-        ok = bool(re.match(pattern, str(value or "").strip(), flags=re.IGNORECASE))
+        candidate = str(value or "").strip()
+        if pattern == RFC_SAT_PATTERN:
+            canon = normalize_rfc_sat(candidate)
+            if canon:
+                candidate = canon
+        ok = bool(re.match(pattern, candidate, flags=re.IGNORECASE))
         return (ok, f"pattern:{pattern}")
     return (bool(str(value or "").strip()), "non_empty")
 
@@ -658,8 +729,14 @@ def validate_generated_documents_fill(
             "metrics": {"mode": _effective_gate_mode(), "stage": stage},
         }
 
+    profile = dict(master_profile or {})
+    rfc_raw = str(profile.get("rfc") or "").strip()
+    rfc_canon = normalize_rfc_sat(rfc_raw)
+    if rfc_canon:
+        profile["rfc"] = rfc_canon
+
     issues: List[FillIssue] = []
-    issues.extend(_profile_required_fields(master_profile))
+    issues.extend(_profile_required_fields(profile))
     docs_scanned = 0
     docs_with_policy = 0
     policy_miss_count = 0
@@ -926,7 +1003,7 @@ def validate_generated_documents_fill(
             for fp in policy.fields:
                 value = _extract_field_value(
                     fp.field_key,
-                    master_profile=master_profile,
+                    master_profile=profile,
                     document_chunks=materialized_chunks,
                     xlsx_labels=xlsx_labels,
                     docx_totals=docx_totals,
