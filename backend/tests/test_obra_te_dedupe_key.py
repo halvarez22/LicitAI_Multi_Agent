@@ -244,6 +244,32 @@ def test_obra_t7_subcontratacion_no_false_t2_reference():
     assert "| ---" in body or "[consignar]" in low
 
 
+def test_obra_t8_privacidad_no_false_acceptance():
+    corpus = (
+        "ANEXO T-8 Aviso de privacidad (anexo) "
+        "Anexar el documento debidamente firmado y expresando la aceptación o negativa. "
+        "ANEXO E-1 Carta-Compromiso"
+    )
+    body = try_build_clause_markdown(
+        req_label="Aviso_de_privacidad_anexo.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-8" in low
+    assert "[consignar]" in low
+    assert "acepto su contenido" not in low
+    assert "comparezco" not in low
+
+
 def test_obra_t4_pliego_bases_clause_extracts_from_corpus():
     from app.services.administrative_letter_clauses import extract_obra_t4_bases_from_corpus
 

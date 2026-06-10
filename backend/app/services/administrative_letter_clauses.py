@@ -476,7 +476,9 @@ def _body_anexo_viii(doc_metadata: Dict[str, Any]) -> str:
 
 
 OBRA_TABULAR_DEDUPE_KEYS = frozenset({"obra|T1", "obra|T2"})
-OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3", "obra|T4", "obra|T5"})
+OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset(
+    {"obra|T3", "obra|T4", "obra|T5", "obra|T8", "obra|T8_PRIVACIDAD"}
+)
 
 # Marcadores OCR frecuentes en modelos de contrato de obra (ejemplo convocante, no oferente).
 _EXAMPLE_CONTRACTOR_NAME_RE = re.compile(
@@ -923,17 +925,89 @@ def _body_obra_t2_contratos(
     return "\n".join(parts)
 
 
-def _body_obra_t8_privacidad(doc_metadata: Dict[str, Any]) -> str:
-    """Carta breve de aceptación del aviso de privacidad (obra pública, Anexo T-8)."""
-    lic = _slot(doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"), "el procedimiento de referencia")
-    return (
-        "**Bajo protesta de decir verdad**, manifiesto que he revisado y entendido el "
-        "**Aviso de Privacidad** anexo a la convocatoria y bases de "
-        f"{lic}, y que **acepto** su contenido para efectos de mi participación "
-        "en el procedimiento.\n\n"
-        "Lo anterior, en cumplimiento de lo establecido en las bases del concurso.\n\n"
-        "Protesto lo necesario."
+def _resolve_obra_t8_privacidad_stance(
+    doc_metadata: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Resuelve aceptación o negativa del aviso solo con evidencia explícita.
+
+    Returns:
+        ``accept``, ``reject`` o None (no inferir).
+    """
+    st = session_state if isinstance(session_state, dict) else {}
+    for src in (doc_metadata, st):
+        if not isinstance(src, dict):
+            continue
+        if "obra_t8_privacidad" not in src and "aviso_privacidad_stance" not in src:
+            continue
+        raw = src.get("obra_t8_privacidad", src.get("aviso_privacidad_stance"))
+        if raw is None:
+            continue
+        low = str(raw).lower()
+        if raw is True or low in {"accept", "acepta", "aceptacion", "aceptación", "si", "sí"}:
+            return "accept"
+        if raw is False or low in {"reject", "rechaza", "negativa", "no"}:
+            return "reject"
+    return None
+
+
+def _body_obra_t8_privacidad(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Anexo T-8: aviso de privacidad de la convocante + manifestación de aceptación o negativa.
+
+    El texto íntegro del aviso es documento de la convocante (HITL); no se asume aceptación sin evidencia.
+    """
+    _ = master_profile
+    lic = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "el procedimiento de referencia",
     )
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    req_line = extract_obra_annex_inventory_requirement(corpus, "T-8") or (
+        "Anexar el documento debidamente firmado y expresando la aceptación o negativa."
+    )
+    stance = _resolve_obra_t8_privacidad_stance(doc_metadata, session_state)
+    parts = [
+        "**ANEXO T-8 — AVISO DE PRIVACIDAD**\n",
+        f"**Concurso:** {lic}\n",
+        f"**Requisito publicado en bases:** {req_line}\n",
+    ]
+    if stance == "accept":
+        parts.append(
+            "\n**Bajo protesta de decir verdad**, manifiesto que he revisado el **Aviso de Privacidad** "
+            "de la convocante y **acepto** su contenido para efectos de mi participación en el procedimiento.\n"
+        )
+    elif stance == "reject":
+        parts.append(
+            "\n**Bajo protesta de decir verdad**, manifiesto que he revisado el **Aviso de Privacidad** "
+            "de la convocante y expreso mi **negativa** conforme a lo señalado en las bases.\n"
+        )
+    else:
+        parts.append(
+            "\n**Bajo protesta de decir verdad**, manifiesto que integro el **Aviso de Privacidad** de la "
+            "convocante y expreso en el documento adjunto mi **aceptación o negativa**, conforme a bases.\n"
+        )
+    parts.extend(
+        [
+            "\n**Documento requerido (no generable por el sistema):**\n",
+            "Copia del aviso de privacidad publicado por la convocante, **debidamente firmado**, "
+            "con la manifestación expresa de aceptación o negativa.\n",
+            "\n**[Consignar]** — Adjunte el aviso oficial firmado. No sustituya este anexo por una carta "
+            "sin el documento de la convocante.\n",
+            "\nLo anterior, en cumplimiento del Anexo T-8 de las bases.\n",
+            "\nProtesto lo necesario.",
+        ]
+    )
+    return "\n".join(parts)
 
 
 def _body_obra_t3_contrato(
