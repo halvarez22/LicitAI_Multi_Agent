@@ -1106,20 +1106,6 @@ class EconomicWriterAgent(BaseAgent):
             or master_profile.get("domicilio")
             or ""
         ).strip()
-        ciudad = dom.split(",")[0].strip() if dom else "México"
-        content = build_apu_markdown(
-            razon_social=str(master_profile.get("razon_social") or ""),
-            rfc=str(master_profile.get("rfc") or ""),
-            representante=str(master_profile.get("representante_legal") or ""),
-            domicilio=dom,
-            fecha_es=str(resumen.get("fecha_es") or resumen.get("fecha") or ""),
-            procedimiento=session_id.replace("_", " "),
-            subtotal=float(resumen.get("subtotal") or 0),
-            iva=float(resumen.get("iva") or 0),
-            total=float(resumen.get("total") or 0),
-            line_items=mapeo_items,
-            ciudad=ciudad,
-        )
         from app.agents.formats import _save_docx
 
         metadata = build_economic_doc_metadata(
@@ -1128,6 +1114,37 @@ class EconomicWriterAgent(BaseAgent):
             master_profile=master_profile,
             resumen=resumen,
         )
+        if resumen.get("obra_breakdown"):
+            from app.services.obra_economic_annex_clauses import build_obra_e3_annex_markdown
+
+            content = build_obra_e3_annex_markdown(
+                concurso=str(
+                    metadata.get("concurso_label")
+                    or session_id.replace("_", " ").upper()
+                ),
+                mapeo_items=mapeo_items,
+                req_snippet=str(session_state.get("bases_corpus_hint") or ""),
+            )
+            metadata = {
+                **metadata,
+                "obra_pliego_contract": True,
+                "document_title": "Análisis de Precios Unitarios",
+            }
+        else:
+            ciudad = str(metadata.get("ciudad") or "México").split(",")[0].strip()
+            content = build_apu_markdown(
+                razon_social=str(master_profile.get("razon_social") or ""),
+                rfc=str(master_profile.get("rfc") or ""),
+                representante=str(master_profile.get("representante_legal") or ""),
+                domicilio=dom,
+                fecha_es=str(resumen.get("fecha_es") or resumen.get("fecha") or ""),
+                procedimiento=session_id.replace("_", " "),
+                subtotal=float(resumen.get("subtotal") or 0),
+                iva=float(resumen.get("iva") or 0),
+                total=float(resumen.get("total") or 0),
+                line_items=mapeo_items,
+                ciudad=ciudad,
+            )
         _save_docx("ANÁLISIS DE PRECIOS UNITARIOS", content, path, metadata)
 
     def _generate_carta_compromiso(

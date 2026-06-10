@@ -477,7 +477,16 @@ def _body_anexo_viii(doc_metadata: Dict[str, Any]) -> str:
 
 OBRA_TABULAR_DEDUPE_KEYS = frozenset({"obra|T1", "obra|T2"})
 OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset(
-    {"obra|T3", "obra|T4", "obra|T5", "obra|T8", "obra|T8_PRIVACIDAD"}
+    {
+        "obra|T3",
+        "obra|T4",
+        "obra|T5",
+        "obra|T8",
+        "obra|T8_PRIVACIDAD",
+        "obra|E2",
+        "obra|E3",
+        "obra|E4",
+    }
 )
 
 # Marcadores OCR frecuentes en modelos de contrato de obra (ejemplo convocante, no oferente).
@@ -653,13 +662,19 @@ def extract_obra_annex_inventory_requirement(corpus_text: str, annex_code: str) 
     """
     raw = str(annex_code or "").strip().lower().replace("_", "-")
     digits = re.sub(r"\D", "", raw) or "0"
-    annex = f"t-{digits}"
+    family = "e" if re.match(r"^e[\s_.-]", raw) else "t"
+    annex = f"{family}-{digits}"
     text = str(corpus_text or "")
-    next_annex = f"t-{int(digits) + 1}"
+    next_annex = f"{family}-{int(digits) + 1}"
     m = re.search(
-        rf"(?is)anexo\s+{re.escape(annex)}\s+(.+?)(?=anexo\s+{re.escape(next_annex)}\b)",
+        rf"(?is)anexo\s+{re.escape(annex)}\s*[\.:\-]?\s*(.+?)(?=anexo\s+{re.escape(next_annex)}\b)",
         text,
     )
+    if not m and family == "e":
+        m = re.search(
+            rf"(?is)anexo\s+{re.escape(annex)}\s*[\.:\-]?\s*(.+?)(?=anexo\s+e[\s_.-]*{int(digits) + 1}\b)",
+            text,
+        )
     if not m:
         return ""
     return re.sub(r"\s+", " ", m.group(1)).strip(" .;")
@@ -1396,16 +1411,17 @@ def _body_obra_tb2_experiencia(doc_metadata: Dict[str, Any]) -> str:
 
 def _body_obra_e4_programa(doc_metadata: Dict[str, Any]) -> str:
     """Programas de obra en Gantt (obra pública, Anexo E-4)."""
-    return (
-        "Por medio del presente, **presento** los programas de obra exigidos en las bases:\n\n"
-        "a) **Programa de Obra físico** en barras de Gantt, por conceptos o por partidas.\n\n"
-        "b) **Programa de Obra Físico de Montos Mensuales** en barras de Gantt, por conceptos "
-        "o por partidas.\n\n"
-        "Manifiesto que los programas se elaboraron conforme al calendario de ejecución de la "
-        "obra y a los plazos establecidos en las bases del concurso.\n\n"
-        "Lo anterior, en cumplimiento del Anexo E-4 de las bases.\n\n"
-        "Protesto lo necesario."
+    from app.services.obra_economic_annex_clauses import build_obra_e4_programa_markdown
+
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
     )
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "[Número de concurso/licitación]",
+    )
+    return build_obra_e4_programa_markdown(concurso=concurso, req_snippet=corpus)
 
 
 def is_short_acceptance_annex(

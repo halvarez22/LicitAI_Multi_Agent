@@ -100,9 +100,31 @@ def load_economic_payload(
         )
 
     calc_subtotal = sum(float(i["importe"]) for i in mapeo_items)
-    subtotal = round(float(economic_data.get("total_base") or calc_subtotal), 2)
-    total = round(float(economic_data.get("grand_total") or (subtotal * 1.16)), 2)
-    iva = round(total - subtotal, 2)
+    calc = economic_data.get("calculator_result") or {}
+    directos = float(
+        economic_data.get("costos_directos")
+        or calc.get("costos_directos")
+        or calc_subtotal
+        or 0.0
+    )
+    indirectos = economic_data.get("costos_indirectos")
+    if indirectos is None:
+        indirectos = calc.get("costos_indirectos")
+    utilidad = economic_data.get("utilidad")
+    if utilidad is None:
+        utilidad = calc.get("utilidad")
+    subtotal_antes_iva = economic_data.get("subtotal_antes_iva")
+    if subtotal_antes_iva is None:
+        subtotal_antes_iva = calc.get("subtotal_antes_iva")
+    iva_amount = economic_data.get("iva_amount")
+    if iva_amount is None:
+        iva_amount = calc.get("iva_amount")
+    ind_rate = economic_data.get("indirectos_rate")
+    if ind_rate is None:
+        ind_rate = calc.get("indirectos_rate")
+    util_rate = economic_data.get("utilidad_rate")
+    if util_rate is None:
+        util_rate = calc.get("utilidad_rate")
 
     validation_result = (
         economic_data.get("validation_result")
@@ -110,15 +132,44 @@ def load_economic_payload(
         else {}
     )
     date_info = resolve_document_date(session_state)
-    resumen = {
-        "subtotal": subtotal,
-        "iva": iva,
-        "total": total,
-        "moneda": economic_data.get("currency", "MXN"),
-        "fecha": date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
-        "fecha_es": date_info.get("fecha_es") or "",
-        "perfil_usado": str(validation_result.get("perfil_usado") or "generic"),
-    }
+    perfil = str(validation_result.get("perfil_usado") or calc.get("profile_name") or "generic")
+
+    if indirectos is not None and utilidad is not None:
+        subtotal = round(float(subtotal_antes_iva or economic_data.get("total_base") or 0.0), 2)
+        total = round(float(economic_data.get("grand_total") or 0.0), 2)
+        iva = round(
+            float(iva_amount if iva_amount is not None else total - subtotal),
+            2,
+        )
+        resumen = {
+            "costos_directos": round(directos, 2),
+            "costos_indirectos": round(float(indirectos), 2),
+            "utilidad": round(float(utilidad), 2),
+            "indirectos_rate": float(ind_rate or 0.10),
+            "utilidad_rate": float(util_rate or 0.05),
+            "subtotal": subtotal,
+            "iva": iva,
+            "total": total,
+            "obra_breakdown": True,
+            "moneda": economic_data.get("currency", "MXN"),
+            "fecha": date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
+            "fecha_es": date_info.get("fecha_es") or "",
+            "perfil_usado": perfil,
+        }
+    else:
+        subtotal = round(float(economic_data.get("total_base") or calc_subtotal), 2)
+        total = round(float(economic_data.get("grand_total") or (subtotal * 1.16)), 2)
+        iva = round(total - subtotal, 2)
+        resumen = {
+            "subtotal": subtotal,
+            "iva": iva,
+            "total": total,
+            "obra_breakdown": False,
+            "moneda": economic_data.get("currency", "MXN"),
+            "fecha": date_info.get("fecha_corta") or datetime.now().strftime("%d/%m/%Y"),
+            "fecha_es": date_info.get("fecha_es") or "",
+            "perfil_usado": perfil,
+        }
     return economic_data, mapeo_items, resumen
 
 
@@ -131,12 +182,15 @@ def build_economic_doc_metadata(
     company_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Metadata compartida (logo, pie, licitación) para documentos económicos DOCX."""
-    from app.services.administrative_letter_clauses import resolve_document_ciudad
-    from app.services.document_date_resolver import resolve_addressee_lines
+    from app.services.administrative_letter_clauses import (
+        resolve_document_ciudad,
+        resolve_letter_session_metadata,
+    )
 
     dom = str(
         master_profile.get("domicilio_fiscal") or master_profile.get("domicilio") or ""
     ).strip()
+    letter_meta = resolve_letter_session_metadata(session_state)
     logo_path = _resolve_logo_path(session_state, master_profile)
     if not logo_path and company_data:
         logo_info = (company_data.get("docs") or {}).get("LOGOTIPO", {})
@@ -154,12 +208,17 @@ def build_economic_doc_metadata(
         "rfc": master_profile.get("rfc"),
         "representante": master_profile.get("representante_legal"),
         "domicilio": dom,
-        "ciudad": resolve_document_ciudad(master_profile, dom),
+        "ciudad": resolve_document_ciudad(
+            master_profile, dom, letter_meta=letter_meta
+        ),
+        "concurso_label": letter_meta.get("concurso_label", ""),
+        "convocante": letter_meta.get("convocante", ""),
         "footer_text": (
             f"{master_profile.get('razon_social', '')} | RFC: {master_profile.get('rfc', '')} "
             f"| Domicilio: {dom or 'S/D'}"
         ),
-        "destinatario": resolve_addressee_lines(session_state),
+        "destinatario": letter_meta.get("destinatario")
+        or resolve_addressee_lines(session_state),
         "formal_closing": True,
         "materialization_provenance": "deterministic_economic",
     }
@@ -213,32 +272,93 @@ def reapply_economic_documents(
     updated: List[str] = []
 
     apu_path = os.path.join(output_dir, "ANALISIS_PRECIOS_UNITARIOS.docx")
-    content = build_apu_markdown(
-        razon_social=str(master_profile.get("razon_social") or ""),
-        rfc=str(master_profile.get("rfc") or ""),
-        representante=str(master_profile.get("representante_legal") or ""),
-        domicilio=dom,
-        fecha_es=str(resumen.get("fecha_es") or resumen.get("fecha") or ""),
-        procedimiento=session_id.replace("_", " "),
-        subtotal=float(resumen.get("subtotal") or 0),
-        iva=float(resumen.get("iva") or 0),
-        total=float(resumen.get("total") or 0),
-        line_items=mapeo_items,
-        ciudad=str(doc_meta.get("ciudad") or "").split(",")[0].strip(),
-    )
-    apu_meta = {**doc_meta, "materialization_provenance": "deterministic_economic_reapply"}
+    if resumen.get("obra_breakdown"):
+        from app.services.obra_economic_annex_clauses import build_obra_e3_annex_markdown
+
+        snippet = str(
+            session_state.get("_obra_e3_snippet")
+            or session_state.get("bases_corpus_hint")
+            or ""
+        )[:120000]
+        tabla_name = ""
+        for fn in os.listdir(output_dir):
+            if fn.lower().endswith((".xlsx", ".xlsm")):
+                tabla_name = fn
+                break
+        content = build_obra_e3_annex_markdown(
+            concurso=str(
+                doc_meta.get("concurso_label")
+                or session_id.replace("_", " ").upper()
+            ),
+            mapeo_items=mapeo_items,
+            req_snippet=snippet,
+            tabla_precios_basename=tabla_name,
+        )
+        apu_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "document_title": "Análisis de Precios Unitarios",
+            "materialization_provenance": "deterministic_obra_e3_reapply",
+        }
+    else:
+        content = build_apu_markdown(
+            razon_social=str(master_profile.get("razon_social") or ""),
+            rfc=str(master_profile.get("rfc") or ""),
+            representante=str(master_profile.get("representante_legal") or ""),
+            domicilio=dom,
+            fecha_es=str(resumen.get("fecha_es") or resumen.get("fecha") or ""),
+            procedimiento=session_id.replace("_", " "),
+            subtotal=float(resumen.get("subtotal") or 0),
+            iva=float(resumen.get("iva") or 0),
+            total=float(resumen.get("total") or 0),
+            line_items=mapeo_items,
+            ciudad=str(doc_meta.get("ciudad") or "").split(",")[0].strip(),
+        )
+        apu_meta = {
+            **doc_meta,
+            "materialization_provenance": "deterministic_economic_reapply",
+        }
     _save_docx("ANÁLISIS DE PRECIOS UNITARIOS", content, apu_path, apu_meta)
     updated.append(apu_path)
 
     ae_path = os.path.join(output_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
-    agent._generate_anexo_ae(
-        ae_path,
-        mapeo_items,
-        resumen,
-        master_profile,
-        billing_spec=billing_spec,
-        doc_metadata=doc_meta,
-    )
+    if resumen.get("obra_breakdown"):
+        from app.services.obra_economic_annex_clauses import build_obra_e2_catalog_markdown
+
+        ae_body = build_obra_e2_catalog_markdown(
+            concurso=str(
+                doc_meta.get("concurso_label")
+                or session_id.replace("_", " ").upper()
+            ),
+            mapeo_items=mapeo_items,
+            resumen=resumen,
+            req_snippet=str(
+                session_state.get("_obra_e2_snippet")
+                or session_state.get("bases_corpus_hint")
+                or ""
+            ),
+        )
+        ae_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "document_title": "Catálogo de conceptos y precios unitarios",
+            "materialization_provenance": "deterministic_obra_e2_reapply",
+        }
+        _save_docx(
+            "ANEXO E-2 — CATÁLOGO DE CONCEPTOS",
+            ae_body,
+            ae_path,
+            ae_meta,
+        )
+    else:
+        agent._generate_anexo_ae(
+            ae_path,
+            mapeo_items,
+            resumen,
+            master_profile,
+            billing_spec=billing_spec,
+            doc_metadata=doc_meta,
+        )
     updated.append(ae_path)
 
     carta_path = os.path.join(output_dir, "CARTA_COMPROMISO_PRECIOS.docx")
@@ -268,6 +388,156 @@ def reapply_economic_documents(
                     updated.append(xp)
 
     return updated
+
+
+def _find_sobre_economic_path(session_id: str, dedupe_key: str) -> Optional[str]:
+    """Ruta en SOBRE_3_ECONOMICO que corresponde a una clave obra|E."""
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+    sobre = os.path.join("/data/outputs", session_id, "SOBRE_3_ECONOMICO")
+    if not os.path.isdir(sobre):
+        return None
+    for fn in sorted(os.listdir(sobre)):
+        if fn.startswith("00_CARATULA"):
+            continue
+        if pliego_format_dedupe_key(fn) == dedupe_key:
+            return os.path.join(sobre, fn)
+    return None
+
+
+def reapply_obra_economic_annexes(
+    *,
+    session_id: str,
+    session_state: Dict[str, Any],
+    master_profile: Dict[str, Any],
+    memory: Any = None,
+    gap_report: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Reaplica E-2/E-3/E-4 de obra con cláusulas HRU y sincroniza al sobre económico.
+
+    Returns:
+        Resumen con rutas actualizadas en propuesta económica y sobre.
+    """
+    import shutil
+
+    from app.agents.formats import _save_docx
+    from app.services.administrative_letter_clauses import resolve_letter_asunto
+    from app.services.obra_economic_annex_clauses import build_obra_e4_programa_markdown
+
+    economic_data, mapeo_items, resumen = load_economic_payload(
+        session_state, session_id=session_id, memory=memory
+    )
+    if not mapeo_items:
+        return {"updated": [], "error": "sin_partidas"}
+
+    session_state = dict(session_state)
+    for row in (gap_report or {}).get("rows") or []:
+        key = str(row.get("dedupe_key") or "")
+        snip = str(row.get("snippet") or "")
+        if key == "obra|E2" and snip:
+            session_state["_obra_e2_snippet"] = snip
+        if key == "obra|E3" and snip:
+            session_state["_obra_e3_snippet"] = snip
+
+    econ_dir = os.path.join("/data/outputs", session_id, "2.propuesta_economica")
+    os.makedirs(econ_dir, exist_ok=True)
+    updated = reapply_economic_documents(
+        session_id=session_id,
+        session_state=session_state,
+        master_profile=master_profile,
+        output_dir=econ_dir,
+        economic_data=economic_data or {},
+        mapeo_items=mapeo_items,
+        resumen=resumen,
+    )
+
+    snippet_by_key: Dict[str, str] = {}
+    for row in (gap_report or {}).get("rows") or []:
+        key = str(row.get("dedupe_key") or "")
+        if key:
+            snippet_by_key[key] = str(row.get("snippet") or "")
+
+    doc_meta = build_economic_doc_metadata(
+        session_id=session_id,
+        session_state=session_state,
+        master_profile=master_profile,
+        resumen=resumen,
+    )
+    concurso = str(doc_meta.get("concurso_label") or session_id.replace("_", " ").upper())
+
+    # E-4 programas Gantt
+    e4_snippet = snippet_by_key.get("obra|E4", "")
+    e4_body = build_obra_e4_programa_markdown(concurso=concurso, req_snippet=e4_snippet)
+    e4_candidates = [
+        _find_sobre_economic_path(session_id, "obra|E4"),
+        os.path.join(econ_dir, "Anexo_E-4_Programas_Obra_Gantt.docx"),
+        os.path.join(
+            "/data/outputs",
+            session_id,
+            "economic_proposal",
+            "Anexo_E-4_Programas_Obra_Gantt.docx",
+        ),
+    ]
+    for e4_path in e4_candidates:
+        if not e4_path or not os.path.isfile(e4_path):
+            continue
+        e4_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "document_title": resolve_letter_asunto(
+                os.path.basename(e4_path), e4_snippet, "obra|E4"
+            ),
+            "req_snippet": e4_snippet,
+            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+        }
+        _save_docx("ANEXO E-4 — PROGRAMAS DE OBRA", e4_body, e4_path, e4_meta)
+        if e4_path not in updated:
+            updated.append(e4_path)
+
+    # Sincronizar propuesta económica → sobre (por huella de nombre; evita colisión obra|E2)
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+    _SRC_TO_SOBRE_TOKENS = (
+        ("ANEXO_AE_PROPUESTA_ECONOMICA", ("ANEXO_AE", "PROPUESTA_ECONOMICA")),
+        ("ANALISIS_PRECIOS_UNITARIOS", ("ANALISIS_PRECIOS",)),
+        ("CARTA_COMPROMISO_PRECIOS", ("CARTA_COMPROMISO",)),
+        ("TABLA_PRECIOS_UNITARIOS", ("TABLA_PRECIOS",)),
+    )
+
+    def _match_sobre_dest(src_base: str) -> Optional[str]:
+        sobre_dir = os.path.join("/data/outputs", session_id, "SOBRE_3_ECONOMICO")
+        if not os.path.isdir(sobre_dir):
+            return None
+        src_up = src_base.upper().replace(".DOCX", "").replace(".XLSX", "")
+        for src_key, tokens in _SRC_TO_SOBRE_TOKENS:
+            if src_key in src_up:
+                for fn in sorted(os.listdir(sobre_dir)):
+                    if fn.startswith("00_CARATULA"):
+                        continue
+                    fn_up = fn.upper()
+                    if all(tok in fn_up for tok in tokens):
+                        return os.path.join(sobre_dir, fn)
+        key = pliego_format_dedupe_key(src_base)
+        if key:
+            return _find_sobre_economic_path(session_id, key)
+        return None
+
+    sobre_synced: List[str] = []
+    for path in updated:
+        src_base = os.path.basename(path)
+        dest = _match_sobre_dest(src_base)
+        if not dest or os.path.abspath(path) == os.path.abspath(dest):
+            continue
+        shutil.copy2(path, dest)
+        sobre_synced.append(dest)
+
+    return {
+        "updated": updated,
+        "sobre_synced": sobre_synced,
+        "resumen_total": resumen.get("total"),
+        "obra_breakdown": bool(resumen.get("obra_breakdown")),
+    }
 
 
 async def regenerate_all_economic_deliverables(

@@ -19,6 +19,7 @@ if str(_ROOT) not in sys.path:
 from app.api.deps import get_connected_memory
 from app.services.convocante_resolver import merge_convocante_into_session_patch
 from app.services.junta_bases_corpus import build_bases_corpus
+from app.services.economic_document_reapply import reapply_obra_economic_annexes
 from app.services.obra_delivery_gap_service import (
     build_obra_te_gap_report,
     materialize_obra_te_gaps,
@@ -74,6 +75,13 @@ async def main() -> int:
         documents=documents,
         gap_report=before,
     )
+    eco_reapply = reapply_obra_economic_annexes(
+        session_id=session_id,
+        session_state=session_state,
+        master_profile=mp,
+        memory=mem,
+        gap_report=before,
+    )
     n_admin, admin_dests = sync_admin_to_sobre_administrativo(session_id)
     n_eco, eco_dests = sync_economic_to_sobre(session_id)
 
@@ -108,6 +116,7 @@ async def main() -> int:
             "gap_count": before.get("gap_count"),
         },
         "materialize": mat,
+        "economic_reapply": eco_reapply,
         "sync_admin": n_admin,
         "sync_economic": n_eco,
         "after": {
