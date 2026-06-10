@@ -27,6 +27,8 @@ CLAUSE_TARGETS = {
     "obra|T3",
     "obra|T4",
     "obra|T5",
+    "obra|T6",
+    "obra|T7",
     "obra|E4",
     "obra|T-B-2",
     "obra|T8_PRIVACIDAD",

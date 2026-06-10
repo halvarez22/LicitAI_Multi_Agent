@@ -37,6 +37,8 @@ _CANONICAL_NEW_FILENAMES: Dict[str, str] = {
     "obra|T3": "Anexo_T-3_Modelo_de_Contrato_firmado.docx",
     "obra|T4": "Anexo_T-4_Bases_y_Requisitos_firmados.docx",
     "obra|T5": "Anexo_T-5_Acta_Visita_Junta.docx",
+    "obra|T6": "Manifestación_de_Cumplimiento_de_Obligaciones_Contractuales.docx",
+    "obra|T7": "Manifestación_de_las_partes_de_la_obra_que_pretenda_subcontr.docx",
     "obra|E4": "Anexo_E-4_Programas_Obra_Gantt.docx",
     "obra|T-B-2": "Formato_T-b_2.docx",
 }
@@ -48,6 +50,8 @@ _CLAUSE_MATERIALIZE_KEYS: Set[str] = {
     "obra|T3",
     "obra|T4",
     "obra|T5",
+    "obra|T6",
+    "obra|T7",
     "obra|T8",
     "obra|T8_PRIVACIDAD",
     "obra|E4",

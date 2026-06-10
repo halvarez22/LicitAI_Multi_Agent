@@ -642,6 +642,27 @@ def extract_obra_t4_bases_from_corpus(corpus_text: str) -> Optional[str]:
     return cleaned if len(cleaned) >= 3000 else None
 
 
+def extract_obra_annex_inventory_requirement(corpus_text: str, annex_code: str) -> str:
+    """
+    Extrae la descripción breve del inventario de anexos obra (T-6, T-7, etc.).
+
+    Returns:
+        Texto del requisito publicado en bases o cadena vacía.
+    """
+    raw = str(annex_code or "").strip().lower().replace("_", "-")
+    digits = re.sub(r"\D", "", raw) or "0"
+    annex = f"t-{digits}"
+    text = str(corpus_text or "")
+    next_annex = f"t-{int(digits) + 1}"
+    m = re.search(
+        rf"(?is)anexo\s+{re.escape(annex)}\s+(.+?)(?=anexo\s+{re.escape(next_annex)}\b)",
+        text,
+    )
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", m.group(1)).strip(" .;")
+
+
 def _sanitize_obra_contract_parties(
     contract_text: str,
     master_profile: Optional[Dict[str, Any]],
@@ -1122,6 +1143,167 @@ def _body_obra_t5_visita(
     return "\n".join(parts)
 
 
+def _body_obra_t6_obligaciones(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Manifestación de cumplimiento de obligaciones contractuales, fiscales y de previsión social.
+
+    No inventa obligaciones contractuales específicas: solo la manifestación exigida en inventario.
+    """
+    _ = master_profile
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    req_line = extract_obra_annex_inventory_requirement(corpus, "T-6")
+    if not req_line:
+        req_line = (
+            "Manifestación bajo protesta de decir verdad de encontrarse al corriente con el "
+            "cumplimiento de sus obligaciones contractuales, fiscales y de previsión social."
+        )
+    asociacion = ""
+    if re.search(r"(?i)asociaci[oó]n", req_line):
+        asociacion = (
+            "\n\n**Nota (bases):** En caso de asociación, cada asociado deberá presentar "
+            "el escrito correspondiente.\n"
+        )
+    return (
+        "**ANEXO T-6 — MANIFESTACIÓN DE CUMPLIMIENTO DE OBLIGACIONES CONTRACTUALES, "
+        "FISCALES Y DE PREVISIÓN SOCIAL**\n\n"
+        f"**Requisito publicado en bases:** {req_line}\n\n"
+        "**Bajo protesta de decir verdad**, manifiesto que mi representada se encuentra "
+        "**al corriente** en el cumplimiento de sus obligaciones **contractuales**, **fiscales** "
+        "y de **previsión social** aplicables a la fecha de presentación de la proposición, "
+        "en los términos señalados en el Anexo T-6 de las bases.\n\n"
+        "Declaro que esta manifestación refleja el estado real de cumplimiento de mi "
+        "representada y **no sustituye** los documentos probatorios que las bases exijan "
+        "por separado.\n"
+        f"{asociacion}"
+        "\nLo anterior, en cumplimiento del Anexo T-6 de las bases.\n\n"
+        "Protesto lo necesario."
+    )
+
+
+def _resolve_obra_t7_subcontratacion(
+    doc_metadata: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Resuelve si el oferente declara subcontratación solo con evidencia explícita.
+
+    Returns:
+        ``none``, ``has_parts`` o None (no inferir).
+    """
+    st = session_state if isinstance(session_state, dict) else {}
+    for src in (doc_metadata, st):
+        if not isinstance(src, dict):
+            continue
+        if "obra_t7_subcontratacion" not in src and "subcontratacion_obra" not in src:
+            continue
+        raw = src.get("obra_t7_subcontratacion", src.get("subcontratacion_obra"))
+        if raw is None:
+            continue
+        if raw is True or str(raw).lower() in {"true", "si", "sí", "has_parts", "subcontrata"}:
+            return "has_parts"
+        if raw is False or str(raw).lower() in {
+            "false",
+            "no",
+            "sin_subcontratacion",
+            "no_subcontrata",
+        }:
+            return "none"
+        if isinstance(raw, list) and raw:
+            return "has_parts"
+    return None
+
+
+def _obra_t7_subcontratacion_rows(
+    doc_metadata: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> List[List[str]]:
+    """Filas del cuadro T-7 desde perfil/sesión o placeholder HRU."""
+    st = session_state if isinstance(session_state, dict) else {}
+    raw = doc_metadata.get("obra_t7_partes") or st.get("obra_t7_partes")
+    if not isinstance(raw, list):
+        return [["[Consignar]", "[Consignar]", "[Consignar]"]]
+    rows: List[List[str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            [
+                _slot(item.get("parte") or item.get("especialidad"), "[Consignar]"),
+                _slot(item.get("alcance") or item.get("porcentaje"), "[Consignar]"),
+                _slot(item.get("subcontratista") or item.get("nombre"), "[Consignar]"),
+            ]
+        )
+    return rows or [["[Consignar]", "[Consignar]", "[Consignar]"]]
+
+
+def _body_obra_t7_subcontratacion(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Manifestación de partes de la obra que se pretenden subcontratar (Anexo T-7).
+
+    No afirma subcontratación ni ausencia de ella sin evidencia; usa [Consignar] en el cuadro.
+    """
+    _ = master_profile
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    req_line = extract_obra_annex_inventory_requirement(corpus, "T-7") or (
+        "Manifestación de las partes de la obra que pretenda subcontratar."
+    )
+    mode = _resolve_obra_t7_subcontratacion(doc_metadata, session_state)
+    cols = ("PARTE O ESPECIALIDAD", "ALCANCE O %", "SUBCONTRATISTA PROPUESTO")
+    parts = [
+        "**ANEXO T-7 — MANIFESTACIÓN DE PARTES DE LA OBRA A SUBCONTRATAR**\n",
+        f"**Requisito publicado en bases:** {req_line}\n",
+    ]
+    if mode == "none":
+        parts.append(
+            "\n**Bajo protesta de decir verdad**, manifiesto que **no pretendo subcontratar** "
+            "ninguna parte de la obra objeto del procedimiento, conforme al Anexo T-7 de las bases.\n"
+        )
+    elif mode == "has_parts":
+        rows = _obra_t7_subcontratacion_rows(doc_metadata, session_state)
+        parts.extend(
+            [
+                "\n**Bajo protesta de decir verdad**, manifiesto las **partes de la obra** que "
+                "pretendo subcontratar conforme al siguiente cuadro:\n\n",
+                _markdown_table(list(cols), rows),
+                "\n",
+            ]
+        )
+    else:
+        rows = _obra_t7_subcontratacion_rows(doc_metadata, session_state)
+        parts.extend(
+            [
+                "\n**Bajo protesta de decir verdad**, manifiesto las **partes de la obra** que "
+                "pretendo subcontratar conforme al siguiente cuadro:\n\n",
+                _markdown_table(list(cols), rows),
+                "\n**[Consignar]** — Complete el cuadro con las partes, alcance y subcontratistas "
+                "propuestos, o indique expresamente si **no subcontratará** ninguna parte, "
+                "conforme a bases.\n",
+            ]
+        )
+    parts.extend(
+        [
+            "\nLo anterior, en cumplimiento del Anexo T-7 de las bases.\n",
+            "\nProtesto lo necesario.",
+        ]
+    )
+    return "\n".join(parts)
+
+
 def _body_obra_tb2_experiencia(doc_metadata: Dict[str, Any]) -> str:
     """Formato T-b 2: experiencia técnica acreditada con actas (obra pública)."""
     return (
@@ -1428,6 +1610,8 @@ _ASUNTO_BY_DEDUPE: Dict[str, str] = {
     "obra|T3": "Modelo de Contrato (firmado de conformidad)",
     "obra|T4": "Bases y Requisitos (firmados de conformidad)",
     "obra|T5": "Acta de Visita y Junta de Aclaraciones",
+    "obra|T6": "Manifestación de cumplimiento de obligaciones contractuales, fiscales y de previsión social",
+    "obra|T7": "Manifestación de las partes de la obra que pretenda subcontratar",
     "obra|E4": "Programas de Obra en Gantt",
     "obra|T8_PRIVACIDAD": "Aceptación del Aviso de Privacidad",
     "obra|T8": "Aceptación del Aviso de Privacidad",
@@ -1466,6 +1650,8 @@ _CLAUSE_BY_DEDUPE: Dict[str, Any] = {
     "obra|T3": _body_obra_t3_contrato,
     "obra|T4": _body_obra_t4_bases,
     "obra|T5": _body_obra_t5_visita,
+    "obra|T6": _body_obra_t6_obligaciones,
+    "obra|T7": _body_obra_t7_subcontratacion,
     "obra|T-B-2": _body_obra_tb2_experiencia,
     "obra|E4": _body_obra_e4_programa,
     "obra|T8_PRIVACIDAD": _body_obra_t8_privacidad,

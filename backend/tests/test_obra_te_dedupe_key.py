@@ -188,6 +188,62 @@ def test_obra_t5_acta_attachment_no_false_attendance():
     assert "manifiesto que asistí" not in low
 
 
+def test_obra_t6_manifestacion_no_invented_contract_obligations():
+    corpus = (
+        "ANEXO T-6 Manifestación bajo protesta de decir verdad de encontrarse al corriente "
+        "con el cumplimiento de sus obligaciones contractuales, fiscales y de previsión social. "
+        "(En caso de asociación deberán presentar el escrito por cada uno de los asociados). "
+        "ANEXO T-7 Manifestación de las partes de la obra que pretenda subcontratar"
+    )
+    body = try_build_clause_markdown(
+        req_label="Manifestación_de_Cumplimiento_de_Obligaciones_Contractuales.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-6" in low
+    assert "al corriente" in low
+    assert "previsión social" in low or "prevision social" in low
+    assert "asociación" in low or "asociacion" in low
+    assert "expediente técnico" not in low
+    assert "cumplimiento ambiental" not in low
+    assert "finiquito de la obra" not in low
+
+
+def test_obra_t7_subcontratacion_no_false_t2_reference():
+    corpus = (
+        "ANEXO T-7 Manifestación de las partes de la obra que pretenda subcontratar "
+        "ANEXO T-8 Aviso de privacidad"
+    )
+    body = try_build_clause_markdown(
+        req_label="Manifestación_de_las_partes_de_la_obra_que_pretenda_subcontr.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-7" in low
+    assert "[consignar]" in low
+    assert "anexo t-2" not in low
+    assert "relación de contratos" not in low
+    assert "| ---" in body or "[consignar]" in low
+
+
 def test_obra_t4_pliego_bases_clause_extracts_from_corpus():
     from app.services.administrative_letter_clauses import extract_obra_t4_bases_from_corpus
 
