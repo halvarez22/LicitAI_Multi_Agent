@@ -471,6 +471,19 @@ def _body_anexo_viii(doc_metadata: Dict[str, Any]) -> str:
 
 
 OBRA_TABULAR_DEDUPE_KEYS = frozenset({"obra|T1", "obra|T2"})
+OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3"})
+
+# Marcadores OCR frecuentes en modelos de contrato de obra (ejemplo convocante, no oferente).
+_EXAMPLE_CONTRACTOR_NAME_RE = re.compile(
+    r"(?is)\bSOLUCIONES\s+DIOR\b|\bLUIS\s+ERNESTO\s+DIEZ\s+DE\s+SOLLANO\b"
+)
+_CONTRACTOR_PARTY_RE = re.compile(
+    r"(?is)(por la otra,?\s*(?:la\s+)?persona\s+moral:\s*)"
+    r"(.+?)"
+    r"(,\s*representada\s+en\s+este\s+acto\s+por\s+(?:el|la)\s+)"
+    r"(.+?)"
+    r"(,\s*en\s+su\s+car[aá]cter\s+de\s+representante\s+legal)",
+)
 
 _DEFAULT_T1_COLUMNS = (
     "NOMBRE",
@@ -493,6 +506,110 @@ def is_obra_tabular_annex(req_label: str = "", dedupe: str = "") -> bool:
     """True si el anexo obra es formato tabular (no carta administrativa)."""
     key = dedupe or pliego_format_dedupe_key(req_label)
     return key in OBRA_TABULAR_DEDUPE_KEYS
+
+
+def is_obra_pliego_contract_annex(req_label: str = "", dedupe: str = "") -> bool:
+    """True si el anexo obra es el modelo de contrato íntegro del pliego (T-3)."""
+    key = dedupe or pliego_format_dedupe_key(req_label)
+    return key in OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS
+
+
+def _clean_obra_contract_ocr_text(raw: str) -> str:
+    """Normaliza texto OCR del modelo de contrato sin perder párrafos."""
+    text = str(raw or "")
+    text = re.sub(r"---\s*p[aá]gina\s+\d+\s*---", "\n\n", text, flags=re.I)
+    text = re.sub(r"\|\s*---\s*\|\s*---\s*\|?", " ", text)
+    text = re.sub(r"\|\s*contrato\s+de\s+obra", "CONTRATO DE OBRA", text, flags=re.I)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _truncate_obra_contract_tail(text: str) -> str:
+    """Elimina cola del corpus que no pertenece al modelo de contrato (anti-contaminación)."""
+    body = str(text or "")
+    if len(body) < 2000:
+        return body
+    anchor = max(8000, int(len(body) * 0.65))
+    for pat in (
+        r"(?is)\bpropuesta\s+conveniente,\s*y\s+que\s+de\s+acuerdo\b",
+        r"(?is)\bde\s+acuerdo\s+a\s+la\s+evaluaci[oó]n\s+del\s+mecanismo\b",
+        r"(?is)\bmecanismo\s+de\s+puntos\s+y\s+porcentajes\b",
+        r"(?is)\bdictamen\s+de\s+evaluaci[oó]n\b",
+        r"(?is)\bcriterios\s+de\s+evaluaci[oó]n\b",
+        r"(?is)\bobjetivo\s+evaluar\s+la\s+propuesta\b",
+        r"(?is)\bel\s+comit[eé]\s+evaluar[aá]\b",
+        r"(?is)\banexo\s+t[\s_.-]*1\b.{0,160}propuesta\s+t[eé]cnica\b",
+        r"(?is)\bii\.-\s*de\s+los\s+documentos\s+y\s+requisitos\s+que\s+integran\s+la\s+propuesta\s+econ",
+    ):
+        m = re.search(pat, body[anchor:])
+        if m:
+            body = body[: anchor + m.start()].strip()
+            break
+    body = re.sub(r"(?is)\bde\s+los\s*$", "", body).strip()
+    return body
+
+
+def extract_obra_t3_contract_from_corpus(corpus_text: str) -> Optional[str]:
+    """
+    Extrae el cuerpo del modelo de contrato publicado en bases (Anexo T-3 obra).
+
+    Returns:
+        Texto del contrato o None si no hay ancla verificable en el corpus.
+    """
+    text = str(corpus_text or "")
+    if len(text) < 500:
+        return None
+    start_m = re.search(
+        r"(?is)contrato\s+para\s+la\s+ejecuci[oó]n\s+de\s+la\s+obra\s+p[uú]blica",
+        text,
+    )
+    if not start_m:
+        start_m = re.search(r"(?is)contrato\s+de\s+obra\s+n[uú]m", text)
+    if not start_m:
+        return None
+    start = start_m.start()
+    tail = text[start:]
+    end_m = re.search(
+        r"(?is)---\s*p[aá]gina\s+(?:39|40|41)\s*---",
+        tail[8000:],
+    )
+    if end_m:
+        chunk = tail[: 8000 + end_m.start()]
+    else:
+        end_inv = re.search(
+            r"(?is)\banexo\s+t[\s_.-]*4\b.{0,160}bases\s+y\s+requisitos",
+            tail[8000:],
+        )
+        if end_inv:
+            chunk = tail[: 8000 + end_inv.start()]
+        else:
+            chunk = tail[:75000]
+    cleaned = _clean_obra_contract_ocr_text(chunk)
+    cleaned = _truncate_obra_contract_tail(cleaned)
+    return cleaned if len(cleaned) >= 1200 else None
+
+
+def _sanitize_obra_contract_parties(
+    contract_text: str,
+    master_profile: Optional[Dict[str, Any]],
+) -> str:
+    """Sustituye datos de ejemplo del pliego por perfil del oferente o [Consignar]."""
+    mp = master_profile or {}
+    razon = _slot(mp.get("razon_social"), "[Consignar — razón social del contratista]")
+    rep = _slot(
+        mp.get("representante_legal") or mp.get("representante"),
+        "[Consignar — representante legal]",
+    )
+    text = str(contract_text or "")
+
+    def _party_repl(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{razon}{match.group(3)}{rep}{match.group(5)}"
+
+    text, n = _CONTRACTOR_PARTY_RE.subn(_party_repl, text, count=1)
+    if _EXAMPLE_CONTRACTOR_NAME_RE.search(text):
+        text = _EXAMPLE_CONTRACTOR_NAME_RE.sub("[Consignar — referencia ejemplo del pliego]", text)
+    return text
 
 
 def _extract_t1_table_columns(blob: str) -> List[str]:
@@ -746,16 +863,48 @@ def _body_obra_t8_privacidad(doc_metadata: Dict[str, Any]) -> str:
     )
 
 
-def _body_obra_t3_contrato(doc_metadata: Dict[str, Any]) -> str:
-    """Conformidad con el modelo de contrato (obra pública, Anexo T-3)."""
-    return (
-        "**Bajo protesta de decir verdad**, manifiesto que he revisado el **Modelo de Contrato** "
-        "publicado en las bases del concurso y que **firmo de conformidad** su contenido, "
-        "obligándome a suscribir el contrato en los términos que resulten del procedimiento "
-        "en caso de resultar adjudicado.\n\n"
-        "Lo anterior, en cumplimiento del Anexo T-3 de las bases.\n\n"
-        "Protesto lo necesario."
+def _body_obra_t3_contrato(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Modelo de contrato íntegro del pliego + manifestación de conformidad (obra pública, T-3).
+
+    No sustituye una carta administrativa de una sola hoja: reproduce el clausulado de bases
+    con datos del oferente o marcadores [Consignar].
+    """
+    mp = master_profile or {}
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "[Número de concurso/licitación]",
     )
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    contract = extract_obra_t3_contract_from_corpus(corpus)
+    cover = [
+        "**ANEXO T-3 — MODELO DE CONTRATO (FIRMADO DE CONFORMIDAD)**\n",
+        f"**Concurso:** {concurso}\n",
+        "**Bajo protesta de decir verdad**, manifiesto que he recibido, revisado y **firmo de "
+        "conformidad** el modelo de contrato que se reproduce a continuación, obligándome a "
+        "suscribir el contrato en los términos que resulten del procedimiento en caso de "
+        "resultar adjudicado.\n",
+        "El texto siguiente corresponde al clausulado publicado por la convocante en las bases, "
+        "sin alterar las obligaciones de la contratante; únicamente se actualizan los datos del "
+        "contratista conforme a la documentación de mi representada.\n",
+    ]
+    if contract:
+        body = _sanitize_obra_contract_parties(contract, mp)
+        parts = cover + ["---\n", body]
+    else:
+        parts = cover + [
+            "\n**[Consignar]** — Anexe el **Modelo de Contrato íntegro** publicado en las bases, "
+            "debidamente **firmado de conformidad** en todas sus hojas, conforme al Anexo T-3.\n",
+            "\nProtesto lo necesario.",
+        ]
+    return "\n".join(parts)
 
 
 def _body_obra_t4_bases(doc_metadata: Dict[str, Any]) -> str:
@@ -1185,7 +1334,9 @@ def try_build_clause_markdown(
     if not builder:
         return None
     body = _call_clause_builder(builder, meta, master_profile)
-    if is_obra_tabular_annex(req_label, dedupe):
+    if is_obra_tabular_annex(req_label, dedupe) or is_obra_pliego_contract_annex(
+        req_label, dedupe
+    ):
         return body
     asunto = resolve_letter_asunto(req_label, req_snippet, dedupe)
     concurso = _slot(meta.get("concurso_label") or meta.get("tender_name"))

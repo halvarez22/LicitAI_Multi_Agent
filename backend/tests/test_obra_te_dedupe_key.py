@@ -112,6 +112,54 @@ def test_obra_t2_tabular_clause_no_contamination():
     assert "contratante" in low
 
 
+def test_obra_t3_pliego_contract_clause_extracts_from_corpus():
+    from app.services.administrative_letter_clauses import (
+        extract_obra_t3_contract_from_corpus,
+        try_build_clause_markdown,
+    )
+
+    corpus = (
+        "ANEXO T-3 MODELO DE CONTRATO (FIRMADO DE CONFORMIDAD) --- PÁGINA 8 --- "
+        "Contrato para la ejecución de la obra pública a base de precios unitarios "
+        "por tiempo determinado, que celebran por una parte el Municipio de León, Gto., "
+        "representado en este acto por la Arquitecta LAURA ELENA BECERRA GARCÍA, "
+        "en su carácter de Directora General de Obra Pública a quien en lo sucesivo se le "
+        "denominará LA CONTRATANTE y por la otra, la Persona Moral: SOLUCIONES DIOR, "
+        "S.A. DE C.V., representada en este acto por el ING. LUIS ERNESTO DIEZ DE SOLLANO "
+        "TAPIA, en su carácter de representante legal a quien en adelante se le denominará "
+        "EL CONTRATISTA al tenor de lo preceptuado en los artículos 1, 4, 9, 10, 14. "
+        "D E C L A R A C I O N E S I.- DECLARA LA CONTRATANTE: A) Ser una Institución "
+        "de Orden Público. " + ("Cláusula de ejemplo. " * 400)
+        + " --- PÁGINA 39 --- ANEXO T-4 Bases y requisitos"
+    )
+    extracted = extract_obra_t3_contract_from_corpus(corpus)
+    assert extracted
+    assert "contrato para la ejecución" in extracted.lower()
+    assert "declara" in extracted.lower()
+
+    body = try_build_clause_markdown(
+        req_label="Modelo_de_Contrato_utilizado.docx",
+        master_profile={
+            "razon_social": "CONSTRUCTORA INFRAESTRUCTURA NACIONAL, S.A. DE C.V.",
+            "representante_legal": "Juan Carlos López Martínez",
+            "rfc": "CIN2506089A3",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-3" in low
+    assert "firmado de conformidad" in low
+    assert "soluciones dior" not in low
+    assert "constructora infraestructura nacional" in low
+    assert "criterios de evaluación" not in low
+    assert "comparezco" not in low
+    assert "presente.-" not in low
+
+
 def test_t4_bases_clause():
     body = try_build_clause_markdown(
         req_label="Anexo T-4 Bases y Requisitos (firmados de conformidad)",

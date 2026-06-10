@@ -11,8 +11,10 @@ from app.api.deps import get_connected_memory
 from app.services.administrative_letter_clauses import (
     build_administrative_letter_markdown,
     extract_letter_body_from_docx,
+    is_obra_pliego_contract_annex,
     is_obra_tabular_annex,
     resolve_document_ciudad,
+    resolve_letter_asunto,
     resolve_letter_session_metadata,
     try_build_clause_markdown,
 )
@@ -72,6 +74,9 @@ async def main() -> None:
 
         docs = await mem.get_documents(session_id)
         corpus = build_bases_corpus(session_id, docs, session_state=session_state)
+        combined = str(corpus.combined or "")
+        if len(combined) > len(str(session_state.get("bases_corpus_hint") or "")):
+            session_state["bases_corpus_hint"] = combined[:180000]
         patch = merge_convocante_into_session_patch(session_state, corpus.combined)
         if patch.get("convocante"):
             la = dict(session_state.get("last_analysis") or {})
@@ -139,7 +144,10 @@ async def main() -> None:
             if not body.strip():
                 continue
 
-        doc_meta = {**meta, "obra_tabular": is_obra_tabular_annex(fn)}
+        doc_meta = {**meta, "obra_tabular": is_obra_tabular_annex(fn, key)}
+        if is_obra_pliego_contract_annex(fn, key):
+            doc_meta["obra_pliego_contract"] = True
+            doc_meta["document_title"] = resolve_letter_asunto(fn, "", key)
         _save_docx(title, body, path, doc_meta)
         updated += 1
         print(

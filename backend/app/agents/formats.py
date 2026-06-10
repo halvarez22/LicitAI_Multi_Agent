@@ -1480,8 +1480,10 @@ class FormatsAgent(BaseAgent):
                 )
 
             from app.services.administrative_letter_clauses import (
+                is_obra_pliego_contract_annex,
                 is_obra_tabular_annex,
                 is_short_acceptance_annex,
+                resolve_letter_asunto,
                 resolve_letter_session_metadata,
                 strip_redundant_signature_blocks,
                 try_build_clause_markdown,
@@ -1498,7 +1500,16 @@ class FormatsAgent(BaseAgent):
                 "req_snippet": req_snippet or req_desc,
             }
             req_doc_metadata["obra_tabular"] = is_obra_tabular_annex(raw_name)
-            if req_doc_metadata.get("obra_tabular"):
+            req_doc_metadata["obra_pliego_contract"] = is_obra_pliego_contract_annex(
+                raw_name
+            )
+            if req_doc_metadata.get("obra_pliego_contract"):
+                req_doc_metadata["document_title"] = resolve_letter_asunto(
+                    raw_name, req_snippet or req_desc
+                )
+            if req_doc_metadata.get("obra_tabular") or req_doc_metadata.get(
+                "obra_pliego_contract"
+            ):
                 req_doc_metadata["ciudad"] = resolve_document_ciudad(
                     master_profile,
                     str(_dom_fiscal),
@@ -1922,8 +1933,16 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     if metadata:
         p_foot.add_run(f"{metadata.get('footer_text', '')}").font.size = Pt(7)
 
-    doc.add_heading(title.upper(), 1)
-    
+    heading = (
+        str((metadata or {}).get("document_title") or title).strip()
+        if (metadata or {}).get("obra_pliego_contract")
+        else title
+    )
+    doc.add_heading(heading.upper(), 1)
+
+    obra_tabular = bool((metadata or {}).get("obra_tabular"))
+    obra_pliego_contract = bool((metadata or {}).get("obra_pliego_contract"))
+
     # LUGAR Y FECHA
     footer_text = metadata.get("footer_text", "") if metadata else ""
     domicilio_ref = str((metadata or {}).get("domicilio") or "").strip()
@@ -1935,10 +1954,10 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     if is_invalid_letter_lugar(ciudad):
         ciudad = "México"
     doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
-    doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    
-    obra_tabular = bool((metadata or {}).get("obra_tabular"))
-    if not obra_tabular:
+    if not obra_pliego_contract:
+        doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+    if not obra_tabular and not obra_pliego_contract:
         # Destinatario (convocante desde sesión o genérico; sin hardcode por licitación)
         dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
         p_dest = doc.add_paragraph(f"\n{dest}")

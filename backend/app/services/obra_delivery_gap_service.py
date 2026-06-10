@@ -15,8 +15,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from app.agents.formats import _save_docx
 from app.services.administrative_letter_clauses import (
     build_administrative_letter_markdown,
+    is_obra_pliego_contract_annex,
     is_obra_tabular_annex,
     resolve_document_ciudad,
+    resolve_letter_asunto,
     resolve_letter_session_metadata,
     try_build_clause_markdown,
 )
@@ -212,6 +214,21 @@ def _build_letter_metadata(
     }
 
 
+def _doc_meta_for_annex(
+    filename: str,
+    meta: Dict[str, Any],
+    *,
+    snippet: str = "",
+) -> Dict[str, Any]:
+    """Flags de layout DOCX por tipo de anexo obra."""
+    key = pliego_format_dedupe_key(filename)
+    doc_meta = {**meta, "obra_tabular": is_obra_tabular_annex(filename, key)}
+    if is_obra_pliego_contract_annex(filename, key):
+        doc_meta["obra_pliego_contract"] = True
+        doc_meta["document_title"] = resolve_letter_asunto(filename, snippet, key)
+    return doc_meta
+
+
 def materialize_obra_te_gaps(
     session_id: str,
     session_state: Dict[str, Any],
@@ -228,6 +245,12 @@ def materialize_obra_te_gaps(
     """
     docs = documents if documents is not None else []
     report = gap_report or build_obra_te_gap_report(session_id, session_state, docs)
+
+    corpus = build_bases_corpus(session_id, docs, session_state=session_state)
+    combined = str(corpus.combined or "")
+    session_state = dict(session_state or {})
+    if combined:
+        session_state["bases_corpus_hint"] = combined[:180000]
 
     admin_dir = _session_root(session_id) / "3.documentos administrativos"
     admin_dir.mkdir(parents=True, exist_ok=True)
@@ -253,7 +276,11 @@ def materialize_obra_te_gaps(
                         str(row.get("nombre_canonico") or key),
                         body,
                         str(row["archivo"]),
-                        meta,
+                        _doc_meta_for_annex(
+                            str(row.get("nombre_canonico") or key),
+                            meta,
+                            snippet=str(row.get("snippet") or ""),
+                        ),
                     )
                     updated.append(str(row["archivo"]))
             continue
@@ -280,7 +307,11 @@ def materialize_obra_te_gaps(
             session_state=session_state,
             req_snippet=str(row.get("snippet") or ""),
         )
-        _save_docx(str(row.get("nombre_canonico") or target_name), body, str(out_path), meta)
+        _save_docx(str(row.get("nombre_canonico") or target_name), body, str(out_path), _doc_meta_for_annex(
+            target_name,
+            {**meta, "req_snippet": str(row.get("snippet") or "")},
+            snippet=str(row.get("snippet") or ""),
+        ))
         created.append(str(out_path))
 
     # Reaplicar cláusulas a archivos admin ya mapeados (T-3 modelo existente, T-8, etc.)
@@ -304,7 +335,12 @@ def materialize_obra_te_gaps(
         )
         if not body:
             continue
-        _save_docx(fn.replace(".docx", ""), body, str(path), meta)
+        _save_docx(
+            fn.replace(".docx", ""),
+            body,
+            str(path),
+            _doc_meta_for_annex(fn, meta, snippet=snippet),
+        )
         if str(path) not in updated:
             updated.append(str(path))
 
