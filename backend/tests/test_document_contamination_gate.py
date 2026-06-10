@@ -9,6 +9,7 @@ from docx import Document
 from app.config.settings import settings as app_settings
 from app.services.document_contamination_gate import (
     is_apu_document,
+    is_pliego_full_reproduction_annex,
     scan_text_contamination,
     strip_llm_meta_leaks,
 )
@@ -21,6 +22,18 @@ def test_llm_refusal_blocks_in_enforce_mode(monkeypatch):
     monkeypatch.setattr(app_settings, "DOCUMENT_CONTAMINATION_GATE_ENABLED", True)
     hits = scan_text_contamination("Lo siento, no puedo generar contenido legal.")
     assert any(h.error_type == "llm_refusal_detected" for h in hits)
+
+
+def test_pliego_full_reproduction_allows_evaluation_criteria_in_bases():
+    assert is_pliego_full_reproduction_annex("Anexo_T-4_Bases_y_Requisitos_firmados.docx")
+    text = (
+        "BASES Y REQUISITOS. CRITERIOS DE EVALUACIÓN: propuesta técnica 75 puntos, "
+        "propuesta económica 25 puntos."
+    )
+    hits = scan_text_contamination(
+        text, basename="Anexo_T-4_Bases_y_Requisitos_firmados.docx"
+    )
+    assert not any(h.error_type == "evaluator_perspective_detected" for h in hits)
 
 
 def test_evaluator_perspective_apu_sample():

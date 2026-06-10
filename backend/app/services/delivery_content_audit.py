@@ -199,7 +199,9 @@ def audit_delivery_files(
                 )
             )
 
-        hits = scan_text_contamination(text, basename=fpath.name, stage=stage)
+        hits = scan_text_contamination(
+            text, basename=fpath.name, stage=stage, dedupe_key=dedupe
+        )
         if relax_template:
             hits = [h for h in hits if h.error_type not in TEMPLATE_CONTAMINATION_RELAXED_ERROR_TYPES]
         for hit in hits:

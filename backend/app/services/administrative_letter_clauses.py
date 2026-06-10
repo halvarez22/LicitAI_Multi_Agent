@@ -471,7 +471,7 @@ def _body_anexo_viii(doc_metadata: Dict[str, Any]) -> str:
 
 
 OBRA_TABULAR_DEDUPE_KEYS = frozenset({"obra|T1", "obra|T2"})
-OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3"})
+OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3", "obra|T4"})
 
 # Marcadores OCR frecuentes en modelos de contrato de obra (ejemplo convocante, no oferente).
 _EXAMPLE_CONTRACTOR_NAME_RE = re.compile(
@@ -588,6 +588,53 @@ def extract_obra_t3_contract_from_corpus(corpus_text: str) -> Optional[str]:
     cleaned = _clean_obra_contract_ocr_text(chunk)
     cleaned = _truncate_obra_contract_tail(cleaned)
     return cleaned if len(cleaned) >= 1200 else None
+
+
+def extract_obra_t4_bases_from_corpus(corpus_text: str) -> Optional[str]:
+    """
+    Extrae el documento «Bases y Requisitos» publicado en el pliego (Anexo T-4 obra).
+
+    Returns:
+        Texto de bases o None si no hay ancla verificable en el corpus.
+    """
+    text = str(corpus_text or "")
+    if len(text) < 500:
+        return None
+    start_m = re.search(
+        r"(?is)bases\s+y\s+requisitos\s+tipo\s+de\s+licitaci[oó]n",
+        text,
+    )
+    if not start_m:
+        start_m = re.search(
+            r"(?is)bases\s+y\s+requisitos\s+"
+            r"(?:tipo\s+de\s+licitaci[oó]n|licitaci[oó]n\s+p[uú]blica\s+num)",
+            text,
+        )
+    if not start_m:
+        return None
+    start = start_m.start()
+    tail = text[start:]
+    # Fin del cuerpo normativo: antes del inventario de anexos T/E (pág. 39+ en pliegos tipo GTO).
+    end_m = re.search(r"(?is)---\s*p[aá]gina\s+39\s*---", tail[3000:])
+    if not end_m:
+        end_m = re.search(
+            r"(?is)\banexo\s+t[\s_.-]*1\.\s+relaci[oó]n\s+de\s+maquinaria",
+            tail[3000:],
+        )
+    if not end_m:
+        end_m = re.search(
+            r"(?is)\banexo\s+t[\s_.-]*4\.\s+bases\s+y\s+requisitos\s+de\s+concurso",
+            tail[3000:],
+        )
+    if not end_m:
+        end_m = re.search(r"(?is)\banexo\s+t[\s_.-]*5\b", tail[3000:])
+    if end_m:
+        chunk = tail[: 3000 + end_m.start()]
+    else:
+        chunk = tail[:120000]
+    cleaned = _clean_obra_contract_ocr_text(chunk)
+    cleaned = _truncate_obra_contract_tail(cleaned)
+    return cleaned if len(cleaned) >= 3000 else None
 
 
 def _sanitize_obra_contract_parties(
@@ -907,26 +954,58 @@ def _body_obra_t3_contrato(
     return "\n".join(parts)
 
 
-def _body_obra_t4_bases(doc_metadata: Dict[str, Any]) -> str:
-    """Bases y requisitos firmados de conformidad (obra pública, Anexo T-4)."""
+def _body_obra_t4_bases(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Bases y requisitos íntegras del pliego + manifestación de conformidad (obra pública, T-4).
+
+    Las bases exigen firma autógrafa en todas las hojas (HITL físico); aquí se reproduce el
+    texto normativo y la manifestación, sin inventar firmas.
+    """
+    _ = master_profile  # reservado para extensiones futuras (ej. datos en portada)
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "[Número de concurso/licitación]",
+    )
     blob = _legal_blob(doc_metadata)
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    bases_body = extract_obra_t4_bases_from_corpus(corpus)
     invitacion = ""
     if re.search(r"(?i)copia.*invitaci[oó]n|integrar.*invitaci[oó]n", blob):
         invitacion = (
-            "Declaro que, en su caso, se integra a este escrito la copia de la invitación "
-            "o convocatoria que ampara el presente procedimiento, conforme a lo señalado en "
-            "las bases.\n\n"
+            "Declaro que, en su caso, se integra la copia de la invitación o convocatoria "
+            "que ampara el presente procedimiento, conforme a lo señalado en las bases.\n\n"
         )
-    return (
+    cover = [
+        "**ANEXO T-4 — BASES Y REQUISITOS (FIRMADOS DE CONFORMIDAD)**\n",
+        f"**Concurso:** {concurso}\n",
         "**Bajo protesta de decir verdad**, manifiesto que **conozco, acepto y me sujeto** "
-        "al contenido de las **Bases y Requisitos** del concurso, sus anexos técnicos y "
-        "económicos y, en su caso, a las respuestas emitidas en la junta de aclaraciones.\n\n"
+        "al contenido de las **Bases y Requisitos** que se reproducen a continuación, sus "
+        "anexos técnicos y económicos y, en su caso, a las respuestas emitidas en la junta "
+        "de aclaraciones.\n",
         "Manifiesto que la documentación e información presentada por mi representada es "
         "veraz, auténtica y corresponde fielmente a su situación jurídica, fiscal y de "
-        "capacidad para participar en el procedimiento.\n\n"
-        f"{invitacion}"
-        "Lo anterior, en cumplimiento del Anexo T-4 de las bases.\n\n"
-        "Protesto lo necesario."
+        "capacidad para participar en el procedimiento.\n",
+        f"{invitacion}",
+        "El texto siguiente corresponde al documento de bases publicado por la convocante. "
+        "La **firma autógrafa en todas sus hojas** es responsabilidad del representante legal "
+        "antes de la entrega física del sobre técnico.\n",
+    ]
+    if bases_body:
+        return "\n".join(cover + ["---\n", bases_body])
+    return "\n".join(
+        cover
+        + [
+            "\n**[Consignar]** — Anexe el documento **Bases y Requisitos íntegro** publicado "
+            "en el pliego, **firmado de conformidad en todas sus hojas**, conforme al Anexo T-4.\n",
+            "\nProtesto lo necesario.",
+        ]
     )
 
 

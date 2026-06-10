@@ -105,6 +105,18 @@ _DATE_ES_BODY_RE = re.compile(
 
 _EMPTY_PRICE_CELL_RE = re.compile(r"(?i)\|\s*\$\s*\|\s*\$|\$\s*\|\s*\$|precio\s+unitario\s+propuesto\s*\|\s*\$")
 
+# Anexos obra con texto íntegro del pliego (T-3 contrato, T-4 bases): criterios de evaluación son norma, no contaminación.
+_PLIEGO_FULL_REPRO_DEDUPE = frozenset({"obra|T3", "obra|T4"})
+
+
+def is_pliego_full_reproduction_annex(basename: str = "", dedupe_key: str = "") -> bool:
+    """True si el entregable reproduce clausulado/bases del pliego (no carta del concursante)."""
+    if dedupe_key:
+        return dedupe_key in _PLIEGO_FULL_REPRO_DEDUPE
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+    return pliego_format_dedupe_key(basename) in _PLIEGO_FULL_REPRO_DEDUPE
+
 
 def strip_llm_meta_leaks(text: str) -> str:
     """Elimina párrafos y fragmentos de meta-instrucción del LLM antes de materializar."""
@@ -127,6 +139,7 @@ def scan_text_contamination(
     *,
     basename: str = "",
     stage: str = "",
+    dedupe_key: str = "",
 ) -> List[ContaminationHit]:
     """Escanea texto completo del documento."""
     if not text or not str(text).strip():
@@ -134,6 +147,7 @@ def scan_text_contamination(
     blob = str(text)
     low = blob.lower()
     hits: List[ContaminationHit] = []
+    pliego_repro = is_pliego_full_reproduction_annex(basename, dedupe_key)
 
     m = _LLM_REFUSAL_RE.search(blob)
     if m:
@@ -169,8 +183,9 @@ def scan_text_contamination(
             )
 
     is_apu = bool(_APU_FILENAME_RE.search(basename)) or is_apu_document(basename, blob[:500])
-    if _EVALUATOR_RE.search(blob) or (
-        is_apu and re.search(r"(?i)evaluar\s+la\s+propuesta", blob)
+    if not pliego_repro and (
+        _EVALUATOR_RE.search(blob)
+        or (is_apu and re.search(r"(?i)evaluar\s+la\s+propuesta", blob))
     ):
         m = _EVALUATOR_RE.search(blob) or re.search(r"(?i)evaluar\s+la\s+propuesta", blob)
         if m:

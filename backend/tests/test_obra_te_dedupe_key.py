@@ -160,17 +160,37 @@ def test_obra_t3_pliego_contract_clause_extracts_from_corpus():
     assert "presente.-" not in low
 
 
-def test_t4_bases_clause():
+def test_obra_t4_pliego_bases_clause_extracts_from_corpus():
+    from app.services.administrative_letter_clauses import extract_obra_t4_bases_from_corpus
+
+    corpus = (
+        "ANEXO T-4 BASES Y REQUISITOS --- PÁGINA 26 --- "
+        "BASES Y REQUISITOS TIPO DE LICITACIÓN. Licitación Pública Nacional "
+        "LICITACIÓN PÚBLICA NUM. D/080/2025 OBRA: CONSTRUCCIÓN DE BARDA. "
+        "DISPOSICIONES GENERALES PRIMERA. - Las presentes Bases se sujetarán a la LOPSRM. "
+        + ("SEGUNDA disposición normativa. " * 500)
+        + " ANEXO T-5 Copia del acta de visita"
+    )
+    extracted = extract_obra_t4_bases_from_corpus(corpus)
+    assert extracted
+    assert "disposiciones generales" in extracted.lower()
+
     body = try_build_clause_markdown(
-        req_label="Anexo T-4 Bases y Requisitos (firmados de conformidad)",
+        req_label="Anexo_T-4_Bases_y_Requisitos_firmados.docx",
         master_profile={
             "razon_social": "Constructora Demo SA de CV",
             "representante_legal": "Juan Pérez",
             "rfc": "CDM010101CDM",
         },
-        doc_metadata={"concurso_label": "Licitación Pública Num. D/080/2025"},
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
     )
     assert body
     low = body.lower()
-    assert "bases y requisitos" in low
     assert "anexo t-4" in low
+    assert "disposiciones generales" in low
+    assert "comparezco" not in low
+    assert "presente.-" not in low
+    assert "criterios de evaluación" not in low
