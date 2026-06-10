@@ -160,6 +160,34 @@ def test_obra_t3_pliego_contract_clause_extracts_from_corpus():
     assert "presente.-" not in low
 
 
+def test_obra_t5_acta_attachment_no_false_attendance():
+    corpus = (
+        "JUNTA DE ACLARACIONES se convoca el día 10 de diciembre del año 2025 a las 10:30 hrs "
+        "en la Dirección de Costos y Presupuestos. "
+        "ANEXO T-5. Copia del acta correspondiente a la Visita del Sitio de los Trabajos "
+        "y Junta de aclaraciones, expedida por un servidor público."
+    )
+    body = try_build_clause_markdown(
+        req_label="Anexo_T-5_Acta_Visita_Junta.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": corpus,
+        },
+    )
+    assert body
+    low = body.lower()
+    assert "anexo t-5" in low
+    assert "[consignar]" in low
+    assert "comparezco" not in low
+    assert "presente.-" not in low
+    assert "manifiesto que asistí" not in low
+
+
 def test_obra_t4_pliego_bases_clause_extracts_from_corpus():
     from app.services.administrative_letter_clauses import extract_obra_t4_bases_from_corpus
 

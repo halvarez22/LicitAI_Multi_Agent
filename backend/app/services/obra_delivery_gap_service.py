@@ -211,6 +211,7 @@ def _build_letter_metadata(
         "representante": master_profile.get("representante_legal") or master_profile.get("representante", ""),
         "formal_closing": True,
         "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+        "session_state": session_state,
     }
 
 

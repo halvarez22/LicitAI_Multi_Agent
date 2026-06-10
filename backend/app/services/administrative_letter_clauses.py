@@ -361,8 +361,13 @@ def _call_clause_builder(
     import inspect
 
     params = inspect.signature(builder).parameters
+    kwargs: Dict[str, Any] = {}
     if "master_profile" in params:
-        return builder(meta, master_profile=master_profile)
+        kwargs["master_profile"] = master_profile
+    if "session_state" in params:
+        kwargs["session_state"] = meta.get("session_state")
+    if kwargs:
+        return builder(meta, **kwargs)
     return builder(meta)
 
 
@@ -471,7 +476,7 @@ def _body_anexo_viii(doc_metadata: Dict[str, Any]) -> str:
 
 
 OBRA_TABULAR_DEDUPE_KEYS = frozenset({"obra|T1", "obra|T2"})
-OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3", "obra|T4"})
+OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset({"obra|T3", "obra|T4", "obra|T5"})
 
 # Marcadores OCR frecuentes en modelos de contrato de obra (ejemplo convocante, no oferente).
 _EXAMPLE_CONTRACTOR_NAME_RE = re.compile(
@@ -1009,26 +1014,112 @@ def _body_obra_t4_bases(
     )
 
 
-def _body_obra_t5_visita(doc_metadata: Dict[str, Any]) -> str:
-    """Acta de visita/junta o manifestación de obtención (obra pública, Anexo T-5)."""
+def _resolve_obra_t5_attendance(
+    doc_metadata: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Resuelve asistencia a visita/junta solo con evidencia explícita.
+
+    Returns:
+        ``asistio``, ``no_asistio`` o None (no inferir).
+    """
+    st = session_state if isinstance(session_state, dict) else {}
+    for src in (doc_metadata, st):
+        raw = src.get("obra_t5_attendance") or src.get("visita_junta_asistio")
+        if raw is True or str(raw).lower() in {"true", "asistio", "asistió", "asisti", "si", "sí"}:
+            return "asistio"
+        if raw is False or str(raw).lower() in {
+            "false",
+            "no_asistio",
+            "no asistio",
+            "no asistió",
+            "no",
+        }:
+            return "no_asistio"
     blob = _legal_blob(doc_metadata)
     if re.search(r"(?i)no\s+haber\s+asistido|en\s+caso\s+de\s+no\s+haber\s+asistido", blob):
-        return (
+        return "no_asistio"
+    return None
+
+
+def _obra_t5_schedule_lines(doc_metadata: Dict[str, Any]) -> List[str]:
+    """Fechas/lugares de visita y junta desde corpus de bases (determinista)."""
+    from app.services.cronograma_bases_extract import extract_hito_from_bases_text
+
+    blob = _legal_blob(doc_metadata)
+    lines: List[str] = []
+    for hito_id, label in (
+        ("visita_instalaciones", "Visita al sitio de los trabajos"),
+        ("junta_aclaraciones", "Junta de aclaraciones"),
+    ):
+        sentence = extract_hito_from_bases_text(hito_id, blob)
+        if sentence:
+            lines.append(f"- **{label}:** {sentence}")
+    return lines
+
+
+def _body_obra_t5_visita(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Anexo T-5: portada + manifestación + espacio para acta oficial de la convocante.
+
+    El acta es documento de la convocante (HITL físico); no se inventa ni se reproduce
+    desde el pliego cuando solo hay portada/plantilla.
+    """
+    _ = master_profile
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "[Número de concurso/licitación]",
+    )
+    attendance = _resolve_obra_t5_attendance(doc_metadata, session_state)
+    schedule = _obra_t5_schedule_lines(doc_metadata)
+
+    parts = [
+        "**ANEXO T-5 — ACTA DE VISITA AL SITIO Y JUNTA DE ACLARACIONES**\n",
+        f"**Concurso:** {concurso}\n",
+    ]
+    if schedule:
+        parts.append("**Calendario convocado en bases:**\n")
+        parts.extend(schedule)
+        parts.append("")
+
+    if attendance == "no_asistio":
+        parts.append(
             "**Bajo protesta de decir verdad**, manifiesto que **no asistí** a la visita al "
             "sitio de los trabajos y/o a la junta de aclaraciones, y que **obtendré** la copia "
             "del acta correspondiente expedida por un servidor público designado por la "
-            "convocante, conforme a lo establecido en las bases del concurso.\n\n"
-            "Lo anterior, en cumplimiento del Anexo T-5 de las bases.\n\n"
-            "Protesto lo necesario."
+            "convocante, conforme a lo establecido en las bases del concurso.\n"
         )
-    return (
-        "**Bajo protesta de decir verdad**, manifiesto que **asistí** a la visita al sitio de "
-        "los trabajos y/o a la junta de aclaraciones del procedimiento, o que **anexo** la "
-        "constancia o acta correspondiente expedida por la convocante, conforme a lo "
-        "establecido en las bases.\n\n"
-        "Lo anterior, en cumplimiento del Anexo T-5 de las bases.\n\n"
-        "Protesto lo necesario."
+    elif attendance == "asistio":
+        parts.append(
+            "**Bajo protesta de decir verdad**, manifiesto que **asistí** a la visita al sitio "
+            "de los trabajos y/o a la junta de aclaraciones del procedimiento, y que **anexo** "
+            "la copia del acta expedida por la convocante.\n"
+        )
+    else:
+        parts.append(
+            "**Bajo protesta de decir verdad**, manifiesto que integro a este anexo la **copia "
+            "oficial del acta** de visita al sitio y/o junta de aclaraciones, expedida por la "
+            "convocante, o en su caso la manifestación y trámite de obtención conforme a bases.\n"
+        )
+
+    parts.extend(
+        [
+            "\n**Documento requerido (no generable por el sistema):**\n",
+            "Copia del acta expedida por servidor público de la convocante (en su caso, "
+            "Dirección de Costos y Presupuestos u oficina señalada en el pliego).\n",
+            "\n**[Consignar]** — Adjunte aquí la copia oficial del acta. No sustituya este "
+            "anexo por una carta sin el documento de la convocante.\n",
+            "\nLo anterior, en cumplimiento del Anexo T-5 de las bases.\n",
+            "\nProtesto lo necesario.",
+        ]
     )
+    return "\n".join(parts)
 
 
 def _body_obra_tb2_experiencia(doc_metadata: Dict[str, Any]) -> str:

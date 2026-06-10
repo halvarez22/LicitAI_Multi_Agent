@@ -116,6 +116,7 @@ async def main() -> None:
         "representante": mp.get("representante_legal") or mp.get("representante", ""),
         "formal_closing": True,
         "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+        "session_state": session_state,
     }
 
     updated = 0
