@@ -30,6 +30,52 @@ def test_carta_compromiso_proposicion_maps_e1():
     assert pliego_format_dedupe_key("Carta-Compromiso_de_la_Proposición.docx") == "obra|E1"
 
 
+def test_obra_e1_clause_no_false_total():
+    from app.services.administrative_letter_clauses import try_build_clause_markdown
+
+    body = try_build_clause_markdown(
+        req_label="Carta-Compromiso_de_la_Proposición.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+            "domicilio": "Calle Demo 1",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "session_state": {
+                "master_proposal_state": {
+                    "items": [
+                        {
+                            "partida": 1,
+                            "concepto": "Obra",
+                            "cantidad": 1,
+                            "precio_unitario": 1000.0,
+                            "subtotal": 1000.0,
+                        }
+                    ],
+                    "total_base": 1150.0,
+                    "grand_total": 1334.0,
+                    "calculator_result": {
+                        "costos_directos": 1000.0,
+                        "costos_indirectos": 100.0,
+                        "utilidad": 50.0,
+                        "subtotal_antes_iva": 1150.0,
+                        "iva_amount": 184.0,
+                    },
+                }
+            },
+            "bases_corpus_hint": (
+                "ANEXO E-1 Carta-Compromiso 18 días naturales para la conclusión de la obra"
+            ),
+        },
+        req_snippet="ANEXO E-1 importe total I.V.A. 18 días naturales conclusión obra",
+    )
+    assert body
+    assert "anexo e-1" in body.lower()
+    assert "$1,334.00" in body
+
+
 def test_manifestacion_cumplimiento_not_t6_via_alias():
     key = pliego_format_dedupe_key(
         "Manifestación_de_Cumplimiento_de_Obligaciones_Contractuales.docx"
@@ -37,9 +83,12 @@ def test_manifestacion_cumplimiento_not_t6_via_alias():
     assert key == "obra|T6"
 
 
+def test_carta_compromiso_precios_not_e2_catalog():
+    assert pliego_format_dedupe_key("03_CARTA_COMPROMISO_PRECIOS.docx") != "obra|E2"
+
+
 def test_anexo_ae_maps_e2():
     assert pliego_format_dedupe_key("01_ANEXO_AE_PROPUESTA_ECONOMICA.docx") == "obra|E2"
-    assert pliego_format_dedupe_key("03_CARTA_COMPROMISO_PRECIOS.docx") == "obra|E2"
 
 
 def test_obra_t1_tabular_clause_no_contamination():

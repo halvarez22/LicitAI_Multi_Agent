@@ -44,7 +44,10 @@ async def _enrich_session_state(session_id: str, state: dict, mem) -> dict:
 
         docs = await mem.get_documents(session_id)
         corpus = build_bases_corpus(session_id, docs, session_state=session_state)
-        patch = merge_convocante_into_session_patch(session_state, corpus.combined)
+        combined = str(corpus.combined or "").strip()
+        if combined:
+            session_state["bases_corpus_hint"] = combined[:180000]
+        patch = merge_convocante_into_session_patch(session_state, combined or corpus.combined)
         if patch.get("convocante"):
             la = dict(session_state.get("last_analysis") or {})
             for k, v in patch.items():

@@ -39,7 +39,9 @@ _CANONICAL_NEW_FILENAMES: Dict[str, str] = {
     "obra|T5": "Anexo_T-5_Acta_Visita_Junta.docx",
     "obra|T6": "Manifestación_de_Cumplimiento_de_Obligaciones_Contractuales.docx",
     "obra|T7": "Manifestación_de_las_partes_de_la_obra_que_pretenda_subcontr.docx",
+    "obra|E1": "CARTA_COMPROMISO_PROPOSICION.docx",
     "obra|E4": "Anexo_E-4_Programas_Obra_Gantt.docx",
+    "obra|E5": "Anexo_E-5_Cotizaciones_Materiales.docx",
     "obra|T-B-2": "Formato_T-b_2.docx",
 }
 
@@ -54,7 +56,9 @@ _CLAUSE_MATERIALIZE_KEYS: Set[str] = {
     "obra|T7",
     "obra|T8",
     "obra|T8_PRIVACIDAD",
+    "obra|E1",
     "obra|E4",
+    "obra|E5",
     "obra|T-B-2",
 }
 
@@ -64,10 +68,11 @@ _ECONOMIC_KEY_ALIASES: Dict[str, tuple[str, ...]] = {
     "obra|E2": (
         "anexo ae",
         "propuesta economica",
-        "carta compromiso precios",
         "propuesta_economica",
+        "catalogo",
     ),
     "obra|E3": ("analisis precios", "precios unitarios", "tabla precios"),
+    "obra|E5": ("cotizaciones materiales", "materiales", "anexo e-5"),
 }
 
 # Claves de archivos ya generados que satisfacen un anexo esperado.
@@ -397,9 +402,10 @@ def sync_economic_to_sobre(session_id: str) -> Tuple[int, List[str]]:
             existing_keys.add(pliego_format_dedupe_key(p.name))
 
     sources: List[Path] = []
-    eco = root / "economic_proposal"
-    if eco.is_dir():
-        sources.extend(sorted(p for p in eco.iterdir() if p.is_file()))
+    for sub in ("economic_proposal", "2.propuesta_economica"):
+        eco = root / sub
+        if eco.is_dir():
+            sources.extend(sorted(p for p in eco.iterdir() if p.is_file()))
     admin = root / "3.documentos administrativos"
     if admin.is_dir():
         for p in admin.glob("*.docx"):

@@ -1,12 +1,45 @@
-"""Tests HRU anexos económicos obra E-2/E-3/E-4."""
+"""Tests HRU anexos económicos obra E-1/E-2/E-3/E-4."""
 from __future__ import annotations
 
 from app.services.economic_document_reapply import load_economic_payload
 from app.services.obra_economic_annex_clauses import (
+    build_obra_e1_carta_compromiso_markdown,
     build_obra_e2_catalog_markdown,
     build_obra_e3_annex_markdown,
     build_obra_e4_programa_markdown,
+    build_obra_e5_cotizaciones_markdown,
+    extract_obra_plazo_ejecucion,
 )
+
+
+def test_obra_e1_total_and_plazo_from_bases_not_placeholder_note():
+    corpus = (
+        "ANEXO E-1 Carta-Compromiso de la Proposición importe total incluyendo I.V.A. "
+        "plazo de ejecución solicitado. contando con 18 días naturales para la conclusión de la obra. "
+        "LICITACIÓN PÚBLICA NUM. D/080/2025"
+    )
+    body = build_obra_e1_carta_compromiso_markdown(
+        concurso="",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "rfc": "CDM010101CDM",
+            "representante_legal": "Juan Pérez",
+            "domicilio": "Calle Demo 1",
+        },
+        resumen={"total": 1334.0, "iva": 184.0, "moneda": "MXN"},
+        req_snippet=corpus,
+    )
+    low = body.lower()
+    assert "anexo e-1" in low
+    assert "$1,334.00" in body
+    assert "18 días naturales" in body
+    assert "deben ser reemplazado" not in low
+    assert "ciudad de méxico" not in low
+
+
+def test_extract_obra_plazo_ejecucion_universal():
+    text = "El contrato contempla 45 días naturales para la conclusión de la obra."
+    assert "45 días naturales" in extract_obra_plazo_ejecucion(text)
 
 
 def test_obra_e3_no_invented_apu_percentages():
@@ -114,3 +147,54 @@ def test_load_economic_payload_obra_breakdown_from_calculator():
     assert len(mapeo) == 1
     assert resumen.get("obra_breakdown") is True
     assert resumen.get("costos_directos") == 1000.0
+
+
+def test_obra_e5_cotizaciones_consignar_not_false_present():
+    body = build_obra_e5_cotizaciones_markdown(
+        concurso="Licitación Pública Num. D/080/2025",
+        req_snippet="ANEXO E-5 COTIZACIONES DE MATERIALES 55",
+    )
+    low = body.lower()
+    assert "anexo e-5" in low
+    assert "[consignar]" in low
+    assert "presento las cotizaciones" not in low
+
+
+def test_obra_e5_req_line_strips_descalificacion_contamination():
+    contaminated = (
+        "Deberá presentar cotizaciones de los siguientes materiales: "
+        "DE LAS CAUSAS DE DESCALIFICACION: DECIMA TERCERA."
+    )
+    body = build_obra_e5_cotizaciones_markdown(
+        concurso="Licitación Pública Num. D/080/2025",
+        req_snippet=contaminated,
+    )
+    low = body.lower()
+    assert "cotizaciones" in low
+    assert "siguientes materiales" in low or "presentar cotizaciones" in low
+    assert "descalific" not in low
+    assert "de las causas" not in low
+    assert "[consignar]" in low
+
+
+def test_obra_e5_clause_via_try_build():
+    from app.services.administrative_letter_clauses import try_build_clause_markdown
+
+    body = try_build_clause_markdown(
+        req_label="Anexo_E-5_Cotizaciones_Materiales.docx",
+        master_profile={
+            "razon_social": "Constructora Demo SA de CV",
+            "representante_legal": "Juan Pérez",
+            "rfc": "CDM010101CDM",
+        },
+        doc_metadata={
+            "concurso_label": "Licitación Pública Num. D/080/2025",
+            "bases_corpus_hint": (
+                "ANEXO E-5 Cotizaciones de los materiales a utilizar en la obra"
+            ),
+        },
+        req_snippet="ANEXO E-5 cotizaciones materiales",
+    )
+    assert body
+    assert "anexo e-5" in body.lower()
+    assert "[consignar]" in body.lower()

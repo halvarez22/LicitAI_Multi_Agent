@@ -414,7 +414,7 @@ def reapply_obra_economic_annexes(
     gap_report: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Reaplica E-2/E-3/E-4 de obra con cláusulas HRU y sincroniza al sobre económico.
+    Reaplica E-1/E-2/E-3/E-4/E-5 de obra con cláusulas HRU y sincroniza al sobre económico.
 
     Returns:
         Resumen con rutas actualizadas en propuesta económica y sobre.
@@ -423,7 +423,11 @@ def reapply_obra_economic_annexes(
 
     from app.agents.formats import _save_docx
     from app.services.administrative_letter_clauses import resolve_letter_asunto
-    from app.services.obra_economic_annex_clauses import build_obra_e4_programa_markdown
+    from app.services.obra_economic_annex_clauses import (
+        build_obra_e1_carta_compromiso_markdown,
+        build_obra_e4_programa_markdown,
+        build_obra_e5_cotizaciones_markdown,
+    )
 
     economic_data, mapeo_items, resumen = load_economic_payload(
         session_state, session_id=session_id, memory=memory
@@ -435,10 +439,14 @@ def reapply_obra_economic_annexes(
     for row in (gap_report or {}).get("rows") or []:
         key = str(row.get("dedupe_key") or "")
         snip = str(row.get("snippet") or "")
+        if key == "obra|E1" and snip:
+            session_state["_obra_e1_snippet"] = snip
         if key == "obra|E2" and snip:
             session_state["_obra_e2_snippet"] = snip
         if key == "obra|E3" and snip:
             session_state["_obra_e3_snippet"] = snip
+        if key == "obra|E5" and snip:
+            session_state["_obra_e5_snippet"] = snip
 
     econ_dir = os.path.join("/data/outputs", session_id, "2.propuesta_economica")
     os.makedirs(econ_dir, exist_ok=True)
@@ -465,6 +473,70 @@ def reapply_obra_economic_annexes(
         resumen=resumen,
     )
     concurso = str(doc_meta.get("concurso_label") or session_id.replace("_", " ").upper())
+
+    # E-1 carta-compromiso de la proposición
+    if resumen.get("obra_breakdown"):
+        e1_snippet = snippet_by_key.get("obra|E1", "")
+        e1_corpus = "\n".join(
+            p
+            for p in (
+                str(session_state.get("_obra_e1_snippet") or ""),
+                str(e1_snippet or ""),
+                str(session_state.get("bases_corpus_hint") or "")[:120000],
+            )
+            if p
+        )
+        e1_body = build_obra_e1_carta_compromiso_markdown(
+            concurso=concurso,
+            master_profile=master_profile,
+            resumen=resumen,
+            req_snippet=e1_corpus,
+        )
+        e1_candidates = [
+            _find_sobre_economic_path(session_id, "obra|E1"),
+            os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx"),
+            os.path.join(
+                "/data/outputs",
+                session_id,
+                "economic_proposal",
+                "CARTA_COMPROMISO_PROPOSICION.docx",
+            ),
+        ]
+        for e1_path in e1_candidates:
+            if not e1_path or not os.path.isfile(e1_path):
+                continue
+            e1_meta = {
+                **doc_meta,
+                "obra_pliego_contract": True,
+                "document_title": resolve_letter_asunto(
+                    os.path.basename(e1_path), e1_snippet, "obra|E1"
+                ),
+                "req_snippet": e1_snippet,
+                "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+            }
+            _save_docx(
+                "CARTA-COMPROMISO DE LA PROPOSICIÓN",
+                e1_body,
+                e1_path,
+                e1_meta,
+            )
+            if e1_path not in updated:
+                updated.append(e1_path)
+        e1_new = os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx")
+        if not os.path.isfile(e1_new):
+            e1_meta = {
+                **doc_meta,
+                "obra_pliego_contract": True,
+                "document_title": "Carta-Compromiso de la Proposición",
+                "req_snippet": e1_snippet,
+            }
+            _save_docx(
+                "CARTA-COMPROMISO DE LA PROPOSICIÓN",
+                e1_body,
+                e1_new,
+                e1_meta,
+            )
+            updated.append(e1_new)
 
     # E-4 programas Gantt
     e4_snippet = snippet_by_key.get("obra|E4", "")
@@ -495,13 +567,71 @@ def reapply_obra_economic_annexes(
         if e4_path not in updated:
             updated.append(e4_path)
 
+    # E-5 cotizaciones de materiales
+    e5_snippet = snippet_by_key.get("obra|E5", "")
+    e5_corpus = "\n".join(
+        p
+        for p in (
+            str(session_state.get("_obra_e5_snippet") or ""),
+            str(e5_snippet or ""),
+            str(session_state.get("bases_corpus_hint") or "")[:120000],
+        )
+        if p
+    )
+    e5_body = build_obra_e5_cotizaciones_markdown(
+        concurso=concurso,
+        req_snippet=e5_corpus,
+    )
+    e5_candidates = [
+        _find_sobre_economic_path(session_id, "obra|E5"),
+        os.path.join(econ_dir, "Anexo_E-5_Cotizaciones_Materiales.docx"),
+        os.path.join(
+            "/data/outputs",
+            session_id,
+            "economic_proposal",
+            "Anexo_E-5_Cotizaciones_Materiales.docx",
+        ),
+    ]
+    e5_written = False
+    for e5_path in e5_candidates:
+        if not e5_path:
+            continue
+        if not os.path.isfile(e5_path):
+            continue
+        e5_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "document_title": resolve_letter_asunto(
+                os.path.basename(e5_path), e5_snippet, "obra|E5"
+            ),
+            "req_snippet": e5_snippet,
+            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+        }
+        _save_docx("ANEXO E-5 — COTIZACIONES DE MATERIALES", e5_body, e5_path, e5_meta)
+        if e5_path not in updated:
+            updated.append(e5_path)
+        e5_written = True
+    if not e5_written:
+        e5_new = os.path.join(econ_dir, "Anexo_E-5_Cotizaciones_Materiales.docx")
+        e5_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "document_title": "Cotizaciones de Materiales",
+            "req_snippet": e5_snippet,
+            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
+        }
+        _save_docx("ANEXO E-5 — COTIZACIONES DE MATERIALES", e5_body, e5_new, e5_meta)
+        updated.append(e5_new)
+
     # Sincronizar propuesta económica → sobre (por huella de nombre; evita colisión obra|E2)
     from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
     _SRC_TO_SOBRE_TOKENS = (
         ("ANEXO_AE_PROPUESTA_ECONOMICA", ("ANEXO_AE", "PROPUESTA_ECONOMICA")),
         ("ANALISIS_PRECIOS_UNITARIOS", ("ANALISIS_PRECIOS",)),
-        ("CARTA_COMPROMISO_PRECIOS", ("CARTA_COMPROMISO",)),
+        ("CARTA_COMPROMISO_PROPOSICION", ("COMPROMISO", "PROPOSIC")),
+        ("CARTA_COMPROMISO_PRECIOS", ("CARTA_COMPROMISO", "PRECIOS")),
+        ("Anexo_E-5_Cotizaciones_Materiales", ("E-5", "MATERIAL")),
         ("TABLA_PRECIOS_UNITARIOS", ("TABLA_PRECIOS",)),
     )
 
@@ -524,8 +654,36 @@ def reapply_obra_economic_annexes(
         return None
 
     sobre_synced: List[str] = []
+
+    def _sync_to_sobre(src: str, dedupe_key: str) -> None:
+        dest = _find_sobre_economic_path(session_id, dedupe_key)
+        if not dest or not os.path.isfile(src):
+            return
+        if os.path.abspath(src) == os.path.abspath(dest):
+            return
+        shutil.copy2(src, dest)
+        if dest not in sobre_synced:
+            sobre_synced.append(dest)
+
     for path in updated:
         src_base = os.path.basename(path)
+        src_up = src_base.upper()
+        if "ANEXO_AE_PROPUESTA_ECONOMICA" in src_up:
+            _sync_to_sobre(path, "obra|E2")
+        if "CARTA_COMPROMISO_PROPOSICION" in src_up:
+            _sync_to_sobre(path, "obra|E1")
+        if "ANALISIS_PRECIOS_UNITARIOS" in src_up:
+            _sync_to_sobre(path, "obra|E3")
+        if "Anexo_E-5" in src_base or "COTIZACIONES_MATERIALES" in src_up:
+            _sync_to_sobre(path, "obra|E5")
+        if "Anexo_E-4" in src_base or "PROGRAMAS_OBRA" in src_up:
+            _sync_to_sobre(path, "obra|E4")
+
+    for path in updated:
+        src_base = os.path.basename(path)
+        src_up = src_base.upper()
+        if "CARTA_COMPROMISO_PRECIOS" in src_up:
+            continue
         dest = _match_sobre_dest(src_base)
         if not dest or os.path.abspath(path) == os.path.abspath(dest):
             continue

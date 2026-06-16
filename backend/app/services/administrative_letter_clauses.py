@@ -483,9 +483,11 @@ OBRA_PLIEGO_CONTRACT_DEDUPE_KEYS = frozenset(
         "obra|T5",
         "obra|T8",
         "obra|T8_PRIVACIDAD",
+        "obra|E1",
         "obra|E2",
         "obra|E3",
         "obra|E4",
+        "obra|E5",
     }
 )
 
@@ -587,20 +589,18 @@ def extract_obra_t3_contract_from_corpus(corpus_text: str) -> Optional[str]:
     start = start_m.start()
     tail = text[start:]
     end_m = re.search(
-        r"(?is)---\s*p[aá]gina\s+(?:39|40|41)\s*---",
+        r"(?is)\banexo\s+(?:t[\s_.-]*4|iv)\b.{0,160}bases\s+y\s+requisitos",
         tail[8000:],
     )
+    if not end_m:
+        end_m = re.search(
+            r"(?im)^\s*(?:anexo|formato)\s+(?:t[\s_.-]*\d+|e[\s_.-]*\d+)\b",
+            tail[8000:],
+        )
     if end_m:
         chunk = tail[: 8000 + end_m.start()]
     else:
-        end_inv = re.search(
-            r"(?is)\banexo\s+t[\s_.-]*4\b.{0,160}bases\s+y\s+requisitos",
-            tail[8000:],
-        )
-        if end_inv:
-            chunk = tail[: 8000 + end_inv.start()]
-        else:
-            chunk = tail[:75000]
+        chunk = tail[:75000]
     cleaned = _clean_obra_contract_ocr_text(chunk)
     cleaned = _truncate_obra_contract_tail(cleaned)
     return cleaned if len(cleaned) >= 1200 else None
@@ -630,20 +630,18 @@ def extract_obra_t4_bases_from_corpus(corpus_text: str) -> Optional[str]:
         return None
     start = start_m.start()
     tail = text[start:]
-    # Fin del cuerpo normativo: antes del inventario de anexos T/E (pág. 39+ en pliegos tipo GTO).
-    end_m = re.search(r"(?is)---\s*p[aá]gina\s+39\s*---", tail[3000:])
+    # Fin del cuerpo normativo: detecta dinámicamente el inventario de anexos T/E sin hardcodear páginas
+    end_m = re.search(
+        r"(?is)\banexo\s+t[\s_.-]*1\b[^\n]{0,80}relaci[oó]n\s+de\s+maquinaria",
+        tail[3000:],
+    )
     if not end_m:
         end_m = re.search(
-            r"(?is)\banexo\s+t[\s_.-]*1\.\s+relaci[oó]n\s+de\s+maquinaria",
+            r"(?is)\banexo\s+t[\s_.-]*4\b[^\n]{0,80}bases\s+y\s+requisitos",
             tail[3000:],
         )
     if not end_m:
-        end_m = re.search(
-            r"(?is)\banexo\s+t[\s_.-]*4\.\s+bases\s+y\s+requisitos\s+de\s+concurso",
-            tail[3000:],
-        )
-    if not end_m:
-        end_m = re.search(r"(?is)\banexo\s+t[\s_.-]*5\b", tail[3000:])
+        end_m = re.search(r"(?im)^\s*anexo\s+t[\s_.-]*[15]\b", tail[3000:])
     if end_m:
         chunk = tail[: 3000 + end_m.start()]
     else:
@@ -1424,6 +1422,48 @@ def _body_obra_e4_programa(doc_metadata: Dict[str, Any]) -> str:
     return build_obra_e4_programa_markdown(concurso=concurso, req_snippet=corpus)
 
 
+def _body_obra_e5_cotizaciones(doc_metadata: Dict[str, Any]) -> str:
+    """Cotizaciones de materiales (obra pública, Anexo E-5)."""
+    from app.services.obra_economic_annex_clauses import build_obra_e5_cotizaciones_markdown
+
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "",
+    )
+    return build_obra_e5_cotizaciones_markdown(concurso=concurso, req_snippet=corpus)
+
+
+def _body_obra_e1_carta_compromiso(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Carta-compromiso de la proposición (Anexo E-1) con montos del motor económico."""
+    from app.services.economic_document_reapply import load_economic_payload
+    from app.services.obra_economic_annex_clauses import build_obra_e1_carta_compromiso_markdown
+
+    session_state = doc_metadata.get("session_state") or {}
+    _, _, resumen = load_economic_payload(session_state)
+    corpus = " ".join(
+        str(doc_metadata.get(k) or "")
+        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    )
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "",
+    )
+    return build_obra_e1_carta_compromiso_markdown(
+        concurso=concurso,
+        master_profile=master_profile or {},
+        resumen=resumen,
+        req_snippet=corpus,
+    )
+
+
 def is_short_acceptance_annex(
     req_label: str = "",
     req_desc: str = "",
@@ -1702,7 +1742,9 @@ _ASUNTO_BY_DEDUPE: Dict[str, str] = {
     "obra|T5": "Acta de Visita y Junta de Aclaraciones",
     "obra|T6": "Manifestación de cumplimiento de obligaciones contractuales, fiscales y de previsión social",
     "obra|T7": "Manifestación de las partes de la obra que pretenda subcontratar",
+    "obra|E1": "Carta-Compromiso de la Proposición",
     "obra|E4": "Programas de Obra en Gantt",
+    "obra|E5": "Cotizaciones de Materiales",
     "obra|T8_PRIVACIDAD": "Aceptación del Aviso de Privacidad",
     "obra|T8": "Aceptación del Aviso de Privacidad",
     "pliego|ANEXO_II": "Manifiesto de conformidad con las bases del concurso",
@@ -1743,7 +1785,9 @@ _CLAUSE_BY_DEDUPE: Dict[str, Any] = {
     "obra|T6": _body_obra_t6_obligaciones,
     "obra|T7": _body_obra_t7_subcontratacion,
     "obra|T-B-2": _body_obra_tb2_experiencia,
+    "obra|E1": _body_obra_e1_carta_compromiso,
     "obra|E4": _body_obra_e4_programa,
+    "obra|E5": _body_obra_e5_cotizaciones,
     "obra|T8_PRIVACIDAD": _body_obra_t8_privacidad,
     "obra|T8": _body_obra_t8_privacidad,
     "pliego|ANEXO_II": _body_anexo_ii,

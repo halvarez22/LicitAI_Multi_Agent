@@ -1,5 +1,5 @@
 """
-Cláusulas determinísticas para anexos económicos de obra pública (E-2, E-3, E-4).
+Cláusulas determinísticas para anexos económicos de obra pública (E-1 a E-5).
 
 HRU: montos desde motor económico verificado; sin inventar desgloses APU ni programas Gantt.
 """
@@ -39,19 +39,165 @@ def _e3_subannex_checklist(snippet: str) -> List[str]:
     return found
 
 
+def extract_obra_plazo_ejecucion(corpus: str) -> str:
+    """
+    Extrae plazo de ejecución publicado en bases (sin inventar días).
+
+    Returns:
+        Fragmento breve del plazo o cadena vacía si no hay evidencia.
+    """
+    text = str(corpus or "")
+    patterns = (
+        r"(?i)(\d{1,4}\s*d[ií]as\s*(?:naturales|h[aá]biles)(?:\s+y\s+\d{1,2}\s*d[ií]as)?[^.\n]{0,90}(?:conclusi[oó]n|ejecuci[oó]n|entrega|obra))",
+        r"(?i)contando\s+con\s+(\d{1,4}\s*d[ií]as\s*(?:naturales|h[aá]biles)[^.\n]{0,90}(?:conclusi[oó]n|obra))",
+        r"(?i)(\d{1,4}\s*d[ií]as\s*(?:naturales|h[aá]biles))[^.\n]{0,70}obra",
+    )
+    for pat in patterns:
+        m = re.search(pat, text)
+        if not m:
+            continue
+        line = re.sub(r"\s+", " ", m.group(0)).strip(" .;")
+        if re.search(r"\d", line) and 8 <= len(line) <= 200:
+            return line
+    return ""
+
+
+def _resolve_concurso_label(concurso: str, corpus: str, fallback: str) -> str:
+    """Etiqueta de procedimiento desde metadata o corpus (sin hardcode por licitación)."""
+    label = str(concurso or "").strip()
+    if label:
+        return label
+    m = re.search(
+        r"(?i)licitaci[oó]n\s+p[uú]blica\s+(?:nacional\s+)?(?:num\.?\s*)?([A-Z]/\d+/\d+)",
+        str(corpus or ""),
+    )
+    if m:
+        return f"Licitación Pública Num. {m.group(1).replace(' ', '')}"
+    m2 = re.search(r"(?i)licitaci[oó]n\s+p[uú]blica[^\n,]{0,90}", str(corpus or ""))
+    if m2:
+        return re.sub(r"\s+", " ", m2.group(0)).strip()[:120]
+    return fallback
+
+
+_ECONOMIC_REQ_CONTAMINATION_RE = re.compile(
+    r"(?i)de\s+las\s+causas\s+de|descalific|desechamient|causa[s]?\s+de\s+exclusi[oó]n|"
+    r"ser[aá]\s+descalificad|no\s+se\s+aceptar[aá]n|dictamen\s+de\s+evaluaci[oó]n|"
+    r"mecanismo\s+de\s+puntos|propuesta\s+conveniente,\s*y\s+que\s+de\s+acuerdo"
+)
+
+
+def _sanitize_economic_req_line(line: str, annex_code: str) -> str:
+    """Elimina cola contaminada (p. ej. causas de descalificación pegadas al inventario)."""
+    text = re.sub(r"\s+", " ", str(line or "").strip(" .;"))
+    if not text:
+        return ""
+    if _ECONOMIC_REQ_CONTAMINATION_RE.search(text):
+        cut = _ECONOMIC_REQ_CONTAMINATION_RE.search(text)
+        if cut and cut.start() > 24:
+            text = text[: cut.start()].strip(" .;,:")
+    for cut_pat in (
+        r"(?i)\s*:\s*DE LAS CAUSAS\b",
+        r"(?i)\s+DE LAS CAUSAS\b",
+    ):
+        parts = re.split(cut_pat, text, maxsplit=1)
+        if parts and parts[0].strip():
+            text = parts[0].strip(" .;,:")
+    if annex_code.upper() == "E-5":
+        m = re.search(
+            r"(?i)(deber[aá]\s+presentar\s+cotizaciones[^:]{0,160}|"
+            r"cotizaciones?\s+de\s+(?:los\s+)?(?:siguientes\s+)?materiales[^:]{0,160})",
+            text,
+        )
+        if m:
+            text = re.sub(r"\s+", " ", m.group(1)).strip(" .;,:")
+    return text
+
+
 def _clean_economic_req_line(snippet: str, annex_code: str, fallback: str) -> str:
     """Prefiere texto breve del inventario; evita ruido OCR del corpus completo."""
-    raw = str(snippet or "").strip()
-    if raw and len(raw) < 420 and not re.search(r"(?i)\[fuente:|presupuesto\s+52", raw):
-        return re.sub(r"\s+", " ", raw).strip(" .;")
     from app.services.administrative_letter_clauses import (
         extract_obra_annex_inventory_requirement,
     )
 
-    line = extract_obra_annex_inventory_requirement(raw, annex_code)
-    if line and len(line) < 420 and not re.search(r"(?i)\[fuente:", line):
-        return line
+    raw = str(snippet or "").strip()
+    candidates: List[str] = []
+    if raw:
+        candidates.append(_sanitize_economic_req_line(raw, annex_code))
+    inv = extract_obra_annex_inventory_requirement(raw, annex_code)
+    if inv:
+        candidates.append(_sanitize_economic_req_line(inv, annex_code))
+    for line in candidates:
+        if (
+            line
+            and 12 <= len(line) <= 420
+            and not re.search(r"(?i)\[fuente:|presupuesto\s+52", line)
+            and not _ECONOMIC_REQ_CONTAMINATION_RE.search(line)
+        ):
+            return line
     return fallback
+
+
+def build_obra_e1_carta_compromiso_markdown(
+    *,
+    concurso: str,
+    master_profile: Dict[str, Any],
+    resumen: Dict[str, Any],
+    req_snippet: str = "",
+    plazo_ejecucion: str = "",
+) -> str:
+    """
+    Carta-compromiso de la proposición (Anexo E-1) con importe total e IVA desde motor.
+
+    El plazo se toma de bases; si no hay evidencia, se deja [Consignar] (HITL).
+    """
+    corpus = str(req_snippet or "")
+    req_line = _clean_economic_req_line(
+        req_snippet,
+        "E-1",
+        "Carta-compromiso en papel membretado del participante con el importe total "
+        "de la proposición (incluyendo I.V.A.) y el plazo de ejecución solicitado.",
+    )
+    concurso_label = _resolve_concurso_label(concurso, corpus, concurso)
+    razon = _slot(master_profile.get("razon_social"), "la empresa concursante")
+    rfc = _slot(master_profile.get("rfc"), "S/D")
+    rep = _slot(
+        master_profile.get("representante_legal") or master_profile.get("representante"),
+        "el representante legal",
+    )
+    domicilio = _slot(
+        master_profile.get("domicilio_fiscal") or master_profile.get("domicilio"),
+        "domicilio fiscal registrado ante el SAT",
+    )
+    total = float(resumen.get("total") or 0)
+    iva = float(resumen.get("iva") or 0)
+    moneda = str(resumen.get("moneda") or "MXN")
+    total_line = (
+        f"**{_money(total)}** ({moneda}), incluyendo I.V.A. por **{_money(iva)}**"
+        if total > 0
+        else "**[Consignar]** — importe total con I.V.A. verificado en el motor económico"
+    )
+    plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
+    plazo_line = plazo if plazo else "**[Consignar]** — plazo congruente con el programa de ejecución"
+
+    parts = [
+        "**ANEXO E-1 — CARTA-COMPROMISO DE LA PROPOSICIÓN**\n",
+        f"**Concurso:** {concurso_label}\n",
+        f"**Requisito publicado en bases:** {req_line}\n",
+        "\nNosotros, **"
+        f"{razon}**, con domicilio en {domicilio}, Registro Federal de Contribuyentes "
+        f"**{rfc}**, representados en este acto por **{rep}**, en su carácter de "
+        "Representante Legal, **bajo protesta de decir verdad**, manifestamos:\n",
+        "\n1. Presentamos la presente carta-compromiso en **papel membretado del "
+        "participante**, conforme al Anexo E-1 de las bases.\n",
+        f"\n2. **Importe total de la proposición (incluyendo I.V.A.):** {total_line}.\n",
+        f"\n3. **Plazo de ejecución solicitado:** {plazo_line}.\n",
+        "\n4. Nos obligamos a cumplir los términos de la proposición económica "
+        "presentada y a mantener los importes durante el procedimiento de adjudicación "
+        "y, en su caso, durante la vigencia del contrato respectivo.\n",
+        "\nLo anterior, en cumplimiento del Anexo E-1 de las bases.\n",
+        "\nProtesto lo necesario.",
+    ]
+    return "\n".join(parts)
 
 
 def build_obra_e2_catalog_markdown(
@@ -241,6 +387,58 @@ def build_obra_e4_programa_markdown(
     parts.extend(
         [
             "\nLo anterior, en cumplimiento del Anexo E-4 de las bases.\n",
+            "\nProtesto lo necesario.",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def build_obra_e5_cotizaciones_markdown(
+    *,
+    concurso: str,
+    req_snippet: str = "",
+    has_cotizaciones_attachments: bool = False,
+) -> str:
+    """
+    Anexo E-5: cotizaciones de materiales (HITL físico).
+
+    No afirma adjuntar cotizaciones sin evidencia documental en sesión.
+    """
+    corpus = str(req_snippet or "")
+    req_line = _clean_economic_req_line(
+        corpus,
+        "E-5",
+        "Cotizaciones de los materiales a utilizar en la obra.",
+    )
+    concurso_label = _resolve_concurso_label(concurso, corpus, concurso)
+    parts = [
+        "**ANEXO E-5 — COTIZACIONES DE MATERIALES**\n",
+        f"**Concurso:** {concurso_label}\n",
+        f"**Requisito publicado en bases:** {req_line}\n",
+    ]
+    if has_cotizaciones_attachments:
+        parts.append(
+            "\n**Bajo protesta de decir verdad**, anexo las cotizaciones de materiales "
+            "exigidas en bases, emitidas por los proveedores correspondientes.\n"
+        )
+    else:
+        parts.extend(
+            [
+                "\n**Bajo protesta de decir verdad**, integro a este anexo las cotizaciones "
+                "de materiales exigidas en las bases.\n",
+                "\n**Documentos requeridos (no generables por el sistema):**\n",
+                "- Cotizaciones de los materiales a utilizar en la obra, en original o copia "
+                "certificada conforme a bases.\n",
+                "- Deben corresponder a los insumos y costos básicos de materiales "
+                "utilizados en el Anexo E-3.\n",
+                "\n**[Consignar]** — Adjunte las cotizaciones originales en hoja membretada "
+                "de los proveedores. El sistema **no** inventa precios de proveedores "
+                "sin evidencia documental.\n",
+            ]
+        )
+    parts.extend(
+        [
+            "\nLo anterior, en cumplimiento del Anexo E-5 de las bases.\n",
             "\nProtesto lo necesario.",
         ]
     )

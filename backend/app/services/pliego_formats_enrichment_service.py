@@ -106,10 +106,9 @@ _OBRA_FILENAME_ALIASES: tuple[tuple[str, str], ...] = (
     (r"acreditaci[oó]n.*propiedad.*maquinaria", "obra|T1_ACRED"),
     (r"relaci[oó]n.*maquinaria|maquinaria.*equipo", "obra|T1"),
     (r"carta.*compromiso.*proposici", "obra|E1"),
-    (r"carta.*compromiso.*precio", "obra|E2"),
     (
-        r"anexo\s+ae|propuesta\s+econ[oó]mica|cat[aá]logo.*conceptos.*firmad|"
-        r"precios.*firmad.*servidor\s+p[uú]blico",
+        r"anexo\s+ae|propuesta\s+econ[oó]mica|cat[aá]logo.*conceptos|"
+        r"presupuesto.*conceptos|anexo\s+e[\s_.-]*2",
         "obra|E2",
     ),
     (r"an[aá]lisis.*precios|precios\s+unitarios|tabla.*precios", "obra|E3"),
@@ -397,7 +396,7 @@ def pliego_format_dedupe_key(label: str) -> str:
         if re.search(r"proposici", norm):
             return "obra|E1"
         if re.search(r"precio", norm):
-            return "obra|E2"
+            return "pliego|carta_compromiso_precios"
         return "pliego|ANEXO_VI"
 
     anexo_key = _anexo_key_from_label(label)
