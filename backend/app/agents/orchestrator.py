@@ -2182,6 +2182,29 @@ class OrchestratorAgent(BaseAgent):
                     "metadata": final_metadata,
                 }
 
+            # Intake autónomo (Semana 1): consolidar cola HITL post-análisis sin gate duro.
+            if settings.AUTONOMOUS_INTAKE_ENABLED and mode in ("full", "analysis_only"):
+                try:
+                    from app.services.autonomous_intake_coordinator import run_post_analysis_checkpoint
+
+                    _intake_snap = await run_post_analysis_checkpoint(
+                        self.context_manager.memory,
+                        session_id,
+                        mode=mode,
+                    )
+                    if _intake_snap:
+                        execution_results["autonomous_intake"] = {
+                            "status": "success",
+                            "data": _intake_snap,
+                        }
+                        session_state = await self.context_manager.memory.get_session(session_id) or session_state
+                except Exception as _aic_exc:
+                    logger.warning(
+                        "autonomous_intake_hook_failed",
+                        session_id=session_id,
+                        error=str(_aic_exc)[:200],
+                    )
+
             # Generation
             if mode in ["full", "generation", "generation_only"]:
                 input_data, agent_input = _apply_filtered_compliance_master_list(

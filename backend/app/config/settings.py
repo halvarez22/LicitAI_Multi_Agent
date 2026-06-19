@@ -99,6 +99,14 @@ class Settings(BaseSettings):
             "INTAKE_PROACTIVE_CHAT_OFFER_ENABLED",
         ),
     )
+    # Intake autónomo conversacional (Fase 1): coordinador delgado post-análisis.
+    AUTONOMOUS_INTAKE_ENABLED: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "LICITAI_AUTONOMOUS_INTAKE_ENABLED",
+            "AUTONOMOUS_INTAKE_ENABLED",
+        ),
+    )
     FAST_TRACK_DOC_CANDIDATES_ENABLED: bool = True
     FAST_TRACK_REQUIRE_HUMAN_CONFIRM: bool = True
     FAST_TRACK_LOW_CONF_THRESHOLD: float = 0.70
