@@ -3566,7 +3566,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             saved = await self._save_field_to_company(company_id, field_key, extracted_value)
 
         if not saved:
-            _raw_label_retry = str(field_label or q.get("field_target") or q.get("field") or "Campo")
+            _raw_label_retry = str(field_label or current_q.get("field_target") or current_q.get("field") or "Campo")
             retry = self.conversation_normalizer.normalize_capture_message(
                 field_label=self._humanize_field_target(_raw_label_retry),
                 question=str(current_q.get("question", "")),

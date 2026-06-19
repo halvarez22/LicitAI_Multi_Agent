@@ -131,6 +131,9 @@ _GENERIC_TENDER_MARKERS = frozenset(
         "REPRESENTANTE",
         "FIRMAR",
         "FIRMA",
+        "PORCENTAJE",
+        "BASES",
+        "GANTT",
     }
 )
 
