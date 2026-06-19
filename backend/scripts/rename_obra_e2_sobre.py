@@ -41,15 +41,33 @@ def _collect_e2_doc_meta(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _target_name(doc_meta: Dict[str, Any], current_name: str) -> str:
-    from app.services.deliverable_filename_service import resolve_deliverable_filename
+def _target_name(
+    doc_meta: Dict[str, Any],
+    session_state: Dict[str, Any],
+    session_id: str,
+    current_name: str,
+) -> str:
+    from app.services.deliverable_filename_service import (
+        pick_convocante_label,
+        resolve_deliverable_filename,
+    )
 
     ext = Path(current_name).suffix or ".docx"
+    mp = session_state.get("master_profile") if isinstance(session_state.get("master_profile"), dict) else {}
+    rfc = re.sub(r"[^A-Za-z0-9]", "", str(mp.get("rfc") or "RFC"))[:20] or "RFC"
+    lic = re.sub(r"[^A-Za-z0-9_-]", "_", session_id)[:48]
+
     resolved, _, _ = resolve_deliverable_filename(
         doc_meta,
-        fallback_stem="Anexo_E-2_Propuesta_Economica",
-        extension=ext,
+        rfc_token=rfc,
+        licitacion_token=lic,
+        sobre_label="SobreEconomica",
+        orden=3,
+        ext=ext,
     )
+    label, _ = pick_convocante_label(doc_meta)
+    if not label or _OCR_NOISE_RE.search(resolved):
+        resolved = f"Anexo_E-2_Propuesta_Economica{ext}"
     clean = _OCR_NOISE_RE.sub("Propuesta_Economica", resolved)
     clean = re.sub(r"_+", "_", clean).strip("_")
     if not clean.lower().endswith(ext.lower()):
@@ -57,7 +75,12 @@ def _target_name(doc_meta: Dict[str, Any], current_name: str) -> str:
     return clean
 
 
-def _rename_in_dir(directory: Path, doc_meta: Dict[str, Any]) -> List[Dict[str, str]]:
+def _rename_in_dir(
+    directory: Path,
+    doc_meta: Dict[str, Any],
+    session_state: Dict[str, Any],
+    session_id: str,
+) -> List[Dict[str, str]]:
     from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
     renamed: List[Dict[str, str]] = []
@@ -71,7 +94,7 @@ def _rename_in_dir(directory: Path, doc_meta: Dict[str, Any]) -> List[Dict[str, 
         if key != "obra|E2" and not _OCR_NOISE_RE.search(name):
             if "E-2" not in name.upper() and "ANEXO_AE" not in name.upper():
                 continue
-        dest_name = _target_name(doc_meta, name)
+        dest_name = _target_name(doc_meta, session_state, session_id, name)
         if dest_name == name:
             continue
         dest = path.with_name(dest_name)
@@ -100,14 +123,14 @@ async def main(session_id: str) -> int:
         ]
         all_renamed: List[Dict[str, str]] = []
         for d in dirs:
-            all_renamed.extend(_rename_in_dir(d, doc_meta))
+            all_renamed.extend(_rename_in_dir(d, doc_meta, state, session_id))
 
         # Renombrar fuente de generación si aplica
         for src in base.rglob("*"):
             if not src.is_file() or src.suffix.lower() not in (".docx", ".xlsx"):
                 continue
             if _OCR_NOISE_RE.search(src.name):
-                dest_name = _target_name(doc_meta, src.name)
+                dest_name = _target_name(doc_meta, state, session_id, src.name)
                 if dest_name != src.name:
                     dest = src.with_name(dest_name)
                     if not dest.exists():
