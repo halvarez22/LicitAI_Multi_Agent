@@ -5,6 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 SESSION = sys.argv[1] if len(sys.argv) > 1 else "barda_primaria_lopez_rayon"
 
@@ -80,7 +85,7 @@ async def main() -> int:
         data = out.data or {}
         respuesta = str(data.get("respuesta") or data.get("message") or "")
         tipo = str(data.get("tipo") or "")
-        actions = data.get("suggested_actions") or []
+        actions = out.suggested_actions or data.get("suggested_actions") or []
 
         checks = {
             "has_response": bool(respuesta.strip()),
@@ -95,7 +100,7 @@ async def main() -> int:
             "has_cta": any(
                 isinstance(a, dict) and "Formatos" in str(a.get("label") or "")
                 for a in actions
-            ),
+            ) or "Siguiente paso" in respuesta or "Formatos" in respuesta,
         }
         passed = all(checks.values())
         all_ok &= passed

@@ -1,0 +1,143 @@
+{
+  "policy_version": "annex-semantic-v1.0.0",
+  "description": "Roles semánticos universales de anexos/formatos. Sin nombres de convocante ni licitación.",
+  "match_threshold": 65,
+  "panel_buckets": [
+    "sobre_1_tecnico",
+    "sobre_2_economico",
+    "requisitos_legales",
+    "otros_requisitos_criticos"
+  ],
+  "economic_role_ids": [
+    "concept_catalog",
+    "unit_price_analysis",
+    "economic_proposal",
+    "economic_materials_quote",
+    "economic_program"
+  ],
+  "roles": [
+    {
+      "id": "concept_catalog",
+      "label_es": "Catálogo de conceptos",
+      "dedupe_key_prefixes": ["pliego|catalogo_conceptos", "obra|E2"],
+      "dedupe_key_patterns": ["obra|E2"],
+      "signal_patterns": [
+        "(?i)cat[aá]logo\\s+de\\s+conceptos",
+        "(?i)relaci[oó]n\\s+de\\s+conceptos",
+        "(?i)listado\\s+de\\s+conceptos"
+      ],
+      "query_role_patterns": [
+        "(?i)cat[aá]logo",
+        "(?i)mis\\s+precios",
+        "(?i)conceptos\\s+construct"
+      ]
+    },
+    {
+      "id": "unit_price_analysis",
+      "label_es": "Análisis de precios unitarios",
+      "dedupe_key_prefixes": ["obra|E3", "pliego|analisis"],
+      "signal_patterns": [
+        "(?i)an[aá]lisis\\s+de\\s+precios?\\s+unitarios?",
+        "(?i)precios?\\s+unitarios?",
+        "(?i)apu"
+      ],
+      "query_role_patterns": [
+        "(?i)precios?\\s+unitarios?",
+        "(?i)an[aá]lisis\\s+de\\s+precios?"
+      ]
+    },
+    {
+      "id": "economic_proposal",
+      "label_es": "Proposición económica",
+      "dedupe_key_prefixes": ["pliego|propuesta_economica", "obra|E1"],
+      "signal_patterns": [
+        "(?i)propuesta\\s+econ",
+        "(?i)proposici[oó]n\\s+econ",
+        "(?i)carta\\s*compromiso.*propos",
+        "(?i)anexo\\s*ae"
+      ],
+      "query_role_patterns": [
+        "(?i)propuesta\\s+econ",
+        "(?i)proposici[oó]n\\s+econ",
+        "(?i)anexo\\s*ae",
+        "(?i)este\\s+total",
+        "(?i)total\\s+de\\s+la\\s+propos"
+      ]
+    },
+    {
+      "id": "economic_materials_quote",
+      "label_es": "Cotización de materiales",
+      "dedupe_key_prefixes": ["obra|E5"],
+      "signal_patterns": [
+        "(?i)cotizaciones?\\s+de\\s+materiales?",
+        "(?i)materiales?\\s+cotiz"
+      ],
+      "query_role_patterns": ["(?i)cotiz.*materiales?"]
+    },
+    {
+      "id": "economic_program",
+      "label_es": "Programa de obra / Gantt económico",
+      "dedupe_key_prefixes": ["obra|E4"],
+      "signal_patterns": [
+        "(?i)programa\\s+(de\\s+)?obra",
+        "(?i)gantt",
+        "(?i)calendariz"
+      ],
+      "query_role_patterns": ["(?i)programa\\s+de\\s+obra", "(?i)gantt"]
+    },
+    {
+      "id": "technical_proposal",
+      "label_es": "Propuesta técnica",
+      "dedupe_key_prefixes": ["pliego|propuesta_tecnica", "obra|T1"],
+      "signal_patterns": [
+        "(?i)propuesta\\s+t[eé]cnica",
+        "(?i)proposici[oó]n\\s+t[eé]cnica"
+      ],
+      "query_role_patterns": ["(?i)propuesta\\s+t[eé]cnica", "(?i)t[eé]cnico"]
+    },
+    {
+      "id": "administrative_letter",
+      "label_es": "Carta o manifestación administrativa",
+      "dedupe_key_patterns": ["pliego|ANEXO_", "obra|T6", "obra|T7"],
+      "signal_patterns": [
+        "(?i)carta\\s+de\\s+",
+        "(?i)manifestaci[oó]n",
+        "(?i)declaraci[oó]n"
+      ],
+      "query_role_patterns": ["(?i)carta", "(?i)manifestaci[oó]n"]
+    }
+  ],
+  "generated_file_role_patterns": [
+    {
+      "role_id": "unit_price_analysis",
+      "patterns": [
+        "(?i)an[aá]lisis.*precios?\\s*unitarios?",
+        "(?i)precios?\\s*unitarios?",
+        "(?i)\\bapu"
+      ]
+    },
+    {
+      "role_id": "concept_catalog",
+      "patterns": [
+        "(?i)cat[aá]logo.*conceptos?",
+        "(?i)conceptos?.*cat[aá]logo"
+      ]
+    },
+    {
+      "role_id": "economic_proposal",
+      "patterns": [
+        "(?i)propuesta\\s*econ",
+        "(?i)proposici[oó]n\\s*econ",
+        "(?i)anexo\\s*ae"
+      ]
+    },
+    {
+      "role_id": "economic_program",
+      "patterns": ["(?i)gantt", "(?i)programa.*obra"]
+    },
+    {
+      "role_id": "economic_materials_quote",
+      "patterns": ["(?i)cotiz.*materiales?", "(?i)materiales?.*cotiz"]
+    }
+  ]
+}

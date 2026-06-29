@@ -105,7 +105,12 @@ async def main(session_id: str) -> int:
         )
     if st.get("tasks_completed"):
         for mode in ("total", "catalog"):
-            eco_msg = build_economic_provenance_message(st, session_id=session_id, mode=mode)
+            eco_msg = build_economic_provenance_message(
+                st,
+                session_id=session_id,
+                mode=mode,
+                user_query=user_phrases[0][0] if mode == "total" else user_phrases[1][0],
+            )
             ok_all &= _check(
                 f"eco provenance gate5 ({mode})",
                 eco_msg

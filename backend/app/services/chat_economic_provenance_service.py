@@ -147,6 +147,16 @@ class EconomicProvenanceFacts:
     company_label: str = ""
 
 
+_DETAIL_MAX_CHARS = 320
+
+
+def _short_label(text: str, max_len: int = 40) -> str:
+    t = re.sub(r"\s+", " ", str(text or "").strip())
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1].rstrip() + "…"
+
+
 def _list_generated_economic_files(session_id: str) -> List[str]:
     if not session_id:
         return []
@@ -240,8 +250,11 @@ def collect_economic_provenance_facts(
             key=lambda it: float(it.get("subtotal") or it.get("importe") or 0),
             reverse=True,
         )
-        for it in ranked[:3]:
-            concept = str(it.get("concepto") or it.get("descripcion") or "Partida")[:72]
+        for it in ranked[:2]:
+            concept = _short_label(
+                str(it.get("concepto") or it.get("descripcion") or "Partida"),
+                max_len=40,
+            )
             sub = float(it.get("subtotal") or it.get("importe") or 0)
             pu = float(it.get("precio_unitario") or 0)
             qty = it.get("cantidad")
@@ -274,12 +287,23 @@ def build_economic_provenance_message(
     *,
     session_id: str = "",
     mode: str = "general",
+    user_query: str = "",
 ) -> Optional[str]:
     """Mensaje Gate 5 sobre procedencia económica."""
+    from app.services.annex_resolution_service import (
+        build_annex_doc_message,
+        resolve_economic_annex,
+    )
     from app.services.chat_gate5_formatter import format_gate5_message
 
     facts = collect_economic_provenance_facts(state, session_id=session_id)
     company = facts.company_label or "tu empresa"
+    annex_res = resolve_economic_annex(
+        state,
+        user_query,
+        session_id=session_id,
+        mode=mode,
+    )
 
     if not facts.has_snapshot and facts.capture_filled == 0 and not facts.generated_files:
         return format_gate5_message(
@@ -304,13 +328,12 @@ def build_economic_provenance_message(
         )
 
     doc_txt = ""
-    if facts.generated_files:
-        ae = next(
-            (f for f in facts.generated_files if re.search(r"(?i)anexo\s*ae|propuesta\s*econ", f)),
-            facts.generated_files[0],
-        )
-        doc_txt = f" Documento generado: **{ae}**."
-    elif facts.generated_files is not None:
+    annex_line = build_annex_doc_message(annex_res, user_query=user_query)
+    if annex_line:
+        doc_txt = " " + annex_line
+    elif facts.generated_files:
+        doc_txt = f" Documento generado: **{facts.generated_files[0]}**."
+    else:
         doc_txt = " Revisa **Logística y Expedientes** (panel derecho) para el Word/Excel económico."
 
     if mode == "catalog":
@@ -320,7 +343,7 @@ def build_economic_provenance_message(
             f"con **{facts.priced_partidas or facts.partidas_count}** partida(s) con precio.{sources_txt}{doc_txt}"
         )
         if facts.top_lines:
-            detail += " Ejemplos: " + "; ".join(facts.top_lines[:2]) + "."
+            detail += " Ejemplo: " + facts.top_lines[0] + "."
     elif mode == "total":
         status = f"El total {total_txt} sale del **motor económico** de esta sesión (suma de partidas + IVA)."
         detail = (
@@ -328,7 +351,7 @@ def build_economic_provenance_message(
             f"**{facts.priced_partidas}** con precio unitario.{sources_txt}{doc_txt}"
         )
         if facts.top_lines:
-            detail += " Mayores importes: " + "; ".join(facts.top_lines[:2]) + "."
+            detail += " Mayor importe: " + facts.top_lines[0] + "."
     else:
         status = f"Procedencia de precios de **{company}** en esta licitación."
         detail = (
@@ -340,5 +363,8 @@ def build_economic_provenance_message(
         "Revisa **Logística y Expedientes** o **Formatos/Anexos Detectados**; "
         "para corregir un precio, escríbelo aquí o actualiza la **Matriz de precios**."
     )
-    msg = format_gate5_message(status=status, detail=detail[:420], cta=cta)
+    detail_trim = detail.strip()
+    if len(detail_trim) > _DETAIL_MAX_CHARS:
+        detail_trim = detail_trim[: _DETAIL_MAX_CHARS - 1].rstrip() + "…"
+    msg = format_gate5_message(status=status, detail=detail_trim, cta=cta)
     return msg

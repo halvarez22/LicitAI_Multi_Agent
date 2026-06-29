@@ -1655,6 +1655,41 @@ Genera el mensaje conversacional para solicitar este dato."""
                 correlation_id=correlation_id,
             )
 
+        # Identidad de anexo (HRU panel) antes de procedencia económica y RAG.
+        if user_query and company_id:
+            from app.services.annex_resolution_service import (
+                build_annex_identity_message,
+                detect_annex_identity_intent,
+            )
+
+            if detect_annex_identity_intent(user_query):
+                _annex_msg = build_annex_identity_message(
+                    session_state,
+                    user_query,
+                    session_id=session_id,
+                )
+                if _annex_msg:
+                    await self._save_chat_history(session_id, user_query, _annex_msg)
+                    return self._format_response(
+                        session_id=session_id,
+                        correlation_id=correlation_id,
+                        respuesta=_annex_msg,
+                        confianza="Alta",
+                        tipo="annex_identity_hru",
+                        suggested_actions=[
+                            {
+                                "label": "Ver Formatos y Anexos",
+                                "payload": "CMD_SHOW_PENDING_DOCS",
+                                "style": "primary",
+                            },
+                            {
+                                "label": "Ver Fuentes (bases)",
+                                "payload": "CMD_SHOW_SOURCES",
+                                "style": "secondary",
+                            },
+                        ],
+                    )
+
         # Corrección post-entrega de precios (Ítem B): antes de RAG y sin depender de pending económico.
         if user_query and company_id:
             from app.services.chat_economic_provenance_service import (
@@ -1668,6 +1703,7 @@ Genera el mensaje conversacional para solicitar este dato."""
                     session_state,
                     session_id=session_id,
                     mode=_prov_mode,
+                    user_query=user_query,
                 )
                 if _prov_msg:
                     await self._save_chat_history(session_id, user_query, _prov_msg)
@@ -4971,6 +5007,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 session_state,
                 session_id=session_id,
                 mode=mode if mode != "origin" else "general",
+                user_query=raw_user_query,
             )
             if msg:
                 await self._save_chat_history(session_id, raw_user_query, msg)

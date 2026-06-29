@@ -80,3 +80,46 @@ def test_sanitize_strips_prompt_leak():
     assert "RESPUESTA DIRECTA" not in clean
     assert "BRECHA ECON" not in clean.upper()
     assert "[FUENTE:" not in clean
+
+
+def test_build_message_resolves_anexo_from_panel():
+    state = {
+        "master_profile": {"razon_social": "Constructora Demo"},
+        "document_candidates_consolidated": {
+            "sobre_2_economico": [
+                {
+                    "nombre_canonico": "Anexo AE — Proposición económica",
+                    "snippet_representativo": "Carta compromiso proposición económica",
+                    "sobre_clasificado": "sobre_2_economico",
+                }
+            ],
+            "sobre_1_tecnico": [],
+            "requisitos_legales": [],
+            "otros_requisitos_criticos": [],
+        },
+        "tasks_completed": [
+            {
+                "task": "economic_proposal",
+                "result": {
+                    "grand_total": 100000.0,
+                    "currency": "MXN",
+                    "items": [
+                        {
+                            "concepto": "Partida demo",
+                            "cantidad": 1,
+                            "precio_unitario": 100000.0,
+                            "subtotal": 100000.0,
+                        },
+                    ],
+                },
+            }
+        ],
+    }
+    msg = build_economic_provenance_message(
+        state,
+        session_id="demo",
+        mode="total",
+        user_query="de donde sacaste el total del ANEXO AE",
+    )
+    assert count_visible_lines(msg) <= 3
+    assert "AE" in msg.upper() or "proposición" in msg.lower()
