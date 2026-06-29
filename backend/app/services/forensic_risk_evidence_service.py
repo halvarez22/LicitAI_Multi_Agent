@@ -441,12 +441,15 @@ def _from_risk_context(risk_ctx: Dict[str, Any]) -> Dict[str, Any]:
     snippet = risk_ctx.get("snippet")
     if page is None and not (snippet and str(snippet).strip()):
         return {}
+    provenance = str(
+        risk_ctx.get("provenance") or risk_ctx.get("provenance_hint") or "panel_context"
+    )
     return {
         "page": page,
         "snippet": str(snippet).strip() if snippet else None,
         "source": risk_ctx.get("source"),
         "match_confidence": "alta" if page is not None else "media",
-        "provenance": "panel_context",
+        "provenance": provenance,
     }
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import re
+
 from app.services.analyst_output_normalize import (
     _REGLAS_ECONOMICAS_KEYS,
     _REGLAS_ALIASES,
@@ -49,11 +51,29 @@ def _value_from_raw(raw: Any) -> str:
 def _anchor_from_raw(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
-    return {
-        "page": raw.get("page"),
-        "snippet": raw.get("snippet"),
-        "source": raw.get("source"),
+    snippet_raw = (
+        raw.get("snippet")
+        or raw.get("evidence_snippet")
+        or raw.get("texto_literal")
+    )
+    snippet = str(snippet_raw).strip() if snippet_raw else None
+    source_raw = raw.get("source") or raw.get("archivo_fuente") or raw.get("file_name")
+    page_raw = raw.get("page") or raw.get("pagina")
+    page: Any = None
+    if page_raw is not None:
+        try:
+            page = int(str(page_raw).strip())
+        except (TypeError, ValueError):
+            m = re.search(r"\d+", str(page_raw))
+            page = int(m.group(0)) if m else None
+    anchor = {
+        "page": page if page and page > 0 else None,
+        "snippet": snippet or None,
+        "source": str(source_raw).strip() if source_raw else None,
     }
+    if any(anchor.values()):
+        anchor["provenance"] = "analyst_anchor_v1"
+    return anchor
 
 
 def classify_semantic_class(rule_key: str, value: str, snippet: Optional[str]) -> str:
@@ -155,6 +175,7 @@ async def build_reglas_economicas_evidence_v1(
         "promotion_eligible": 0,
         "inference_only": 0,
         "semantic_mismatch": 0,
+        "analyst_anchors_provided": 0,
     }
 
     for key in _REGLAS_ECONOMICAS_KEYS:
@@ -167,6 +188,8 @@ async def build_reglas_economicas_evidence_v1(
 
         stats["total"] += 1
         anchor = _anchor_from_raw(raw)
+        if anchor.get("page") or anchor.get("snippet") or anchor.get("source"):
+            stats["analyst_anchors_provided"] += 1
         evidence_v1 = await verify_regla_item(
             session_id,
             key,
@@ -204,6 +227,11 @@ async def build_reglas_economicas_evidence_v1(
             "snippet": evidence_v1.get("snippet"),
             "source": evidence_v1.get("source"),
             "evidence_v1": evidence_v1,
+            "analyst_anchor": {
+                "page": anchor.get("page"),
+                "snippet": anchor.get("snippet"),
+                "source": anchor.get("source"),
+            } if anchor else None,
             "semantic_class": semantic_class,
             "promotion_eligible": promotion_ok,
             "promotion_block_reason": block_reason,

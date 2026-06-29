@@ -2,6 +2,8 @@
 from app.services.analyst_output_normalize import (
     detect_tabular_reference_signals,
     normalize_alcance_operativo_list,
+    normalize_regla_economica_anchor,
+    normalize_reglas_economicas_anchored,
     normalize_reglas_economicas_dict,
 )
 
@@ -24,6 +26,47 @@ def test_normalize_reglas_economicas_rellena_defaults():
     assert out["criterio_importe_minimo_o_plazo_inferior"] == "Suma seis meses"
     assert out["meses_o_periodo_maximo_citado"] == "11"
     assert out["modalidad_contratacion_observada"] == "No especificado"
+
+
+def test_normalize_regla_economica_anchor_object():
+    raw = {
+        "value": "Propuesta no menor a $5,100,000.00",
+        "page": 12,
+        "snippet": "MONTOS DE OBRA EJECUTADA MÍNIMO A $5,100,000.00",
+        "source": "bases.pdf",
+    }
+    out = normalize_regla_economica_anchor(raw)
+    assert out["value"] == "Propuesta no menor a $5,100,000.00"
+    assert out["page"] == 12
+    assert "5,100,000" in out["snippet"]
+    assert out["source"] == "bases.pdf"
+
+
+def test_normalize_reglas_economicas_anchored_aliases():
+    raw = {
+        "importe_minimo": {
+            "value": "Seis meses de experiencia",
+            "pagina": "39",
+            "evidence_snippet": "experiencia mínima de seis meses",
+            "archivo_fuente": "convocatoria.pdf",
+        }
+    }
+    out = normalize_reglas_economicas_anchored(raw)
+    assert "criterio_importe_minimo_o_plazo_inferior" in out
+    assert out["criterio_importe_minimo_o_plazo_inferior"]["page"] == 39
+
+
+def test_normalize_reglas_dict_from_anchored():
+    anchored = {
+        "criterio_importe_minimo_o_plazo_inferior": {
+            "value": "$500,000",
+            "page": 5,
+            "snippet": "importe mínimo",
+            "source": "bases.pdf",
+        }
+    }
+    flat = normalize_reglas_economicas_dict(anchored)
+    assert flat["criterio_importe_minimo_o_plazo_inferior"] == "$500,000"
 
 
 def test_normalize_alcance_operativo_alias():

@@ -15,6 +15,7 @@ from app.services.experience_store import ExperienceStore
 from app.services.analyst_output_normalize import (
     detect_tabular_reference_signals,
     normalize_alcance_operativo_list,
+    normalize_reglas_economicas_anchored,
     normalize_reglas_economicas_dict,
 )
 from app.config.settings import settings
@@ -718,7 +719,15 @@ TAREA:
 4. requisitos_filtro: Lista de causas EXPLÍCITAS de descalificación.
 5. garantias: Montos o porcentajes de Seriedad y Cumplimiento.
 6. criterios_evaluacion: Puntos y Porcentajes, Binario, o Costo Menor.
-7. reglas_economicas: Reglas sobre importes, partidas y modalidad.
+7. reglas_economicas: Reglas sobre importes, partidas y modalidad. Cada clave debe ser un objeto con ancla forense (NO solo texto suelto).
+   - value: fragmento literal de la regla citada en EXTRACTOS TÉCNICOS.
+   - page: número de página si consta en el extracto (entero).
+   - snippet: mismo texto literal del extracto (sin abreviar).
+   - source: nombre exacto del archivo en EXTRACTOS TÉCNICOS.
+   - Si no hay extracto verificable para una clave, usa value: "No especificado" (string) para esa clave.
+   - Diferencia semántica: montos de EXPERIENCIA / obra ejecutada NO son presupuesto de licitación ni partidas del anexo económico.
+   - Ejemplo negativo: "Directora General firmará..." → no es regla económica de oferta.
+   - Ejemplo positivo: "el licitante deberá presentar propuesta no menor a $X" → criterio_importe_minimo con ancla.
 8. alcance_operativo: Lista de filas de tablas de descripción de servicios.
 
 Responde con este JSON:
@@ -747,14 +756,14 @@ Responde con este JSON:
   "garantias": {{"seriedad_oferta": "...", "cumplimiento": "..."}},
   "criterios_evaluacion": "...",
   "reglas_economicas": {{
-    "referencia_partidas_anexos_citados": "...",
-    "criterio_importe_minimo_o_plazo_inferior": "...",
-    "criterio_importe_maximo_o_plazo_superior": "...",
-    "meses_o_periodo_minimo_citado": "...",
-    "meses_o_periodo_maximo_citado": "...",
-    "modalidad_contratacion_observada": "...",
-    "vinculacion_presupuesto_partida": "...",
-    "otras_reglas_oferta_precio": "..."
+    "referencia_partidas_anexos_citados": {{"value": "<literal o No especificado>", "page": 0, "snippet": "<literal del extracto>", "source": "<archivo en EXTRACTOS>"}},
+    "criterio_importe_minimo_o_plazo_inferior": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "criterio_importe_maximo_o_plazo_superior": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "meses_o_periodo_minimo_citado": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "meses_o_periodo_maximo_citado": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "modalidad_contratacion_observada": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "vinculacion_presupuesto_partida": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}},
+    "otras_reglas_oferta_precio": {{"value": "...", "page": 0, "snippet": "...", "source": "..."}}
   }},
   "alcance_operativo": [
     {{
@@ -802,15 +811,18 @@ Responde con este JSON:
                     )
                 if "reglas_economicas" in extracted_data:
                     raw_reglas = extracted_data.get("reglas_economicas")
+                    reglas_anchored = normalize_reglas_economicas_anchored(raw_reglas)
+                    extracted_data["reglas_economicas_anchored_v1"] = reglas_anchored
                     try:
                         from app.services.reglas_economicas_evidence_service import (
                             build_reglas_economicas_evidence_v1,
                         )
 
+                        evidence_input = reglas_anchored if reglas_anchored else raw_reglas
                         extracted_data["reglas_economicas_evidence_v1"] = (
                             await build_reglas_economicas_evidence_v1(
                                 session_id,
-                                raw_reglas,
+                                evidence_input,
                                 memory=self.context_manager.memory,
                             )
                         )
@@ -821,7 +833,7 @@ Responde con este JSON:
                             reg_ev_exc,
                         )
                     extracted_data["reglas_economicas"] = normalize_reglas_economicas_dict(
-                        raw_reglas
+                        reglas_anchored if reglas_anchored else raw_reglas
                     )
                     reglas = extracted_data.get("reglas_economicas") or {}
                     if isinstance(reglas, dict) and reglas.get("meses_o_periodo_minimo_citado") == "No especificado":

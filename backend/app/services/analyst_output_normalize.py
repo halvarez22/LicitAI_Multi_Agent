@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Dict, Final, List, Set, Tuple
+from typing import Any, Dict, Final, List, Optional, Set, Tuple
 
 # Claves canónicas para reglas de oferta / marco económico citado en convocatoria.
 _REGLAS_ECONOMICAS_KEYS: Final[Tuple[str, ...]] = (
@@ -111,9 +111,32 @@ def _norm_key(s: str) -> str:
     return nk.lower().replace("-", "_").replace(" ", "_")
 
 
+def _coerce_page(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val if val > 0 else None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = re.search(r"\d+", s)
+    if not m:
+        return None
+    try:
+        n = int(m.group(0))
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_str(val: Any, default: str = _DEFAULT_REGLAS) -> str:
     if val is None:
         return default
+    if isinstance(val, dict):
+        inner = val.get("value") or val.get("texto") or val.get("text")
+        return _coerce_str(inner, default)
     if isinstance(val, str):
         t = val.strip()
         return t if t else default
@@ -124,6 +147,69 @@ def _coerce_str(val: Any, default: str = _DEFAULT_REGLAS) -> str:
         return t if t else default
     except Exception:
         return default
+
+
+def normalize_regla_economica_anchor(raw: Any) -> Dict[str, Any]:
+    """
+    Normaliza un ítem de regla económica con ancla HRU {value, page, snippet, source}.
+    Devuelve dict vacío si el valor es «No especificado» o falta.
+    """
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        value = _coerce_str(raw, _DEFAULT_REGLAS)
+        if value == _DEFAULT_REGLAS:
+            return {}
+        return {"value": value, "page": None, "snippet": None, "source": None}
+
+    if not isinstance(raw, dict):
+        return {}
+
+    value = _coerce_str(
+        raw.get("value") or raw.get("texto") or raw.get("text"),
+        _DEFAULT_REGLAS,
+    )
+    if value == _DEFAULT_REGLAS:
+        return {}
+
+    snippet_raw = (
+        raw.get("snippet")
+        or raw.get("evidence_snippet")
+        or raw.get("texto_literal")
+        or raw.get("fragmento")
+    )
+    snippet = _coerce_str(snippet_raw, "").strip() or None
+    source_raw = raw.get("source") or raw.get("archivo_fuente") or raw.get("file_name")
+    source = _coerce_str(source_raw, "").strip() or None
+    page = _coerce_page(raw.get("page") or raw.get("pagina"))
+
+    return {
+        "value": value,
+        "page": page,
+        "snippet": snippet,
+        "source": source,
+    }
+
+
+def normalize_reglas_economicas_anchored(raw: Any) -> Dict[str, Dict[str, Any]]:
+    """Mapa canónico de reglas económicas con anclas del analista (solo claves con valor real)."""
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(raw, dict):
+        return out
+    for rk, val in raw.items():
+        if not isinstance(rk, str):
+            continue
+        nk = _norm_key(rk)
+        canon = _REGLAS_ALIASES.get(nk)
+        if canon is None and nk in _REGLAS_ECONOMICAS_KEYS:
+            canon = nk
+        if canon is None or canon not in _REGLAS_ECONOMICAS_KEYS:
+            continue
+        anchor = normalize_regla_economica_anchor(val)
+        if not anchor:
+            continue
+        out[canon] = anchor
+    return out
 
 
 def normalize_reglas_economicas_dict(raw: Any) -> Dict[str, str]:
