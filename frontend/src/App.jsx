@@ -2653,7 +2653,7 @@ const App = () => {
                     session_id: sessionId,
                     company_id: selectedCompanyId,
                     forensic_risk_context: forensicRiskContext || undefined,
-                });
+                }, { timeout: 600000 });
                 
                 // Si el backend dice 'pending', esperamos y reintentamos (Compliance Gate)
                 if (res.data?.status === 'pending') {
@@ -2677,7 +2677,13 @@ const App = () => {
             } catch (err) {
                 console.error("Chat error:", err);
                 setChatMessages(prev => prev.filter(m => !m.isPending));
-                pushAssistantGuidance("Lo siento, hubo un error al procesar tu mensaje. Por favor intenta de nuevo.", true);
+                const isTimeout = err?.code === 'ECONNABORTED' || String(err?.message || '').includes('timeout');
+                pushAssistantGuidance(
+                    isTimeout
+                        ? 'La consulta a las bases está tardando más de lo habitual (primera búsqueda RAG o carga del modelo de embeddings). Espera un momento y vuelve a intentar; si acabas de reiniciar Docker, la primera pregunta literal puede tardar varios minutos.'
+                        : 'Lo siento, hubo un error al procesar tu mensaje. Por favor intenta de nuevo.',
+                    true,
+                );
             } finally {
                 if (!isRetry) setIsThinking(false);
             }

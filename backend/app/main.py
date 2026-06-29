@@ -118,6 +118,18 @@ app.include_router(interaction_blocks.router, prefix="/api/v1", tags=["Bloques d
 @app.on_event("startup")
 async def startup_event():
     logger.info("licitai_startup", environment=ENVIRONMENT, cors_origins=allow_origins)
+    warmup_flag = os.getenv("VECTOR_EMBEDDING_WARMUP", "true").strip().lower()
+    if warmup_flag in ("1", "true", "yes", "on"):
+        import asyncio
+
+        def _run_embedding_warmup() -> None:
+            try:
+                from app.services.vector_service import VectorDbServiceClient
+                VectorDbServiceClient().warmup_embedding_runtime()
+            except Exception as e:
+                logger.warning("vector_embedding_warmup_failed", error=str(e))
+
+        asyncio.get_running_loop().run_in_executor(None, _run_embedding_warmup)
 
 @app.on_event("shutdown")
 async def shutdown_event():

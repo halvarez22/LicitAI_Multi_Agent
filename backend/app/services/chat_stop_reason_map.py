@@ -79,7 +79,7 @@ def sanitize_user_visible_text(text: str) -> str:
     out = str(text)
     for pat in _BANNED_USER_PATTERNS:
         out = pat.sub("", out)
-    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 

@@ -711,6 +711,11 @@ class ChatbotRAGAgent(BaseAgent):
             "no puedo compartir",
             "no puedo solicitar",
             "no puedo pedir",
+            "no puedo acceder",
+            "no puedo encontrar información",
+            "sin que se me proporcione",
+            "archivo pdf",
+            "contenido específico de un archivo",
             "información personal",
             "informacion personal",
             "datos personales",
@@ -728,6 +733,11 @@ class ChatbotRAGAgent(BaseAgent):
         if lo.startswith("lo siento") and ("no puedo" in lo or "no podemos" in lo):
             return True
         return False
+
+    @staticmethod
+    def _is_rag_llm_refusal(text: str) -> bool:
+        """Rechazo del LLM en RAG cuando ya hay fragmentos indexados (evasiva / no puedo leer PDF)."""
+        return ChatbotRAGAgent._is_mission_llm_refusal(text)
 
     @staticmethod
     def _canonical_pending_question_text(
@@ -5429,6 +5439,193 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         return False
 
     @staticmethod
+    def _is_guarantee_obra_bases_chunk(text: str) -> bool:
+        """Garantías en bases de obra (vicios ocultos, requisitos B), sin % de fianza tipo servicios."""
+        if not text or len(text) < 50:
+            return False
+        low = text.lower()
+        obra_markers = (
+            "garantía de vicios ocultos",
+            "garantia de vicios ocultos",
+            "garantías que deban constituirse",
+            "garantias que deban constituirse",
+            "garantía de cumplimiento",
+            "garantia de cumplimiento",
+            "cancelarse la garantía de cumplimiento",
+            "cancelarse la garantia de cumplimiento",
+            "entrega de la garantía",
+            "entrega de la garantia",
+        )
+        return any(m in low for m in obra_markers)
+
+    @classmethod
+    def _is_guarantee_related_chunk(cls, text: str) -> bool:
+        """Cualquier fragmento con señal de garantías/fianzas relevante para citas literales."""
+        if not text or len(text) < 40:
+            return False
+        if cls._is_guarantee_contract_chunk(text) or cls._is_guarantee_insurance_chunk(text):
+            return True
+        if cls._is_guarantee_obra_bases_chunk(text):
+            return True
+        low = text.lower()
+        return "garant" in low or "fianza" in low
+
+    def _guarantee_scan_and_hydrate(
+        self,
+        session_id: str,
+        primary_doc: Optional[str],
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        """
+        Barrido determinista del índice cuando la búsqueda semántica no trae garantías
+        (común en bases de obra con «garantía de vicios ocultos»).
+        """
+        if not primary_doc:
+            return [], []
+        sources_to_scan: List[str] = [primary_doc]
+        try:
+            for src in self.vector_db.get_sources(session_id) or []:
+                up = str(src).upper()
+                if "CONVOCATORIA" in up and src not in sources_to_scan:
+                    sources_to_scan.append(src)
+        except Exception:
+            pass
+        try:
+            chunks: List[tuple[str, Dict[str, Any]]] = []
+            for src in sources_to_scan:
+                chunks.extend(
+                    self.vector_db.scan_session_chunks(
+                        session_id, source_filter=src, max_chunks=4000
+                    )
+                )
+        except Exception:
+            chunks = []
+        page_hits: List[tuple[str, Any]] = []
+        seen_keys: set = set()
+        for doc, meta in chunks:
+            if not self._is_guarantee_related_chunk(doc or ""):
+                continue
+            pg = meta.get("page")
+            src = str(meta.get("source") or primary_doc)
+            if pg is None:
+                continue
+            key = (src, pg)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            page_hits.append((src, pg))
+        page_hits.sort(key=lambda pair: (0 if "CONVOCATORIA" in pair[0].upper() else 1, int(pair[1]) if str(pair[1]).isdigit() else 0))
+        out_docs: List[str] = []
+        out_metas: List[Dict[str, Any]] = []
+        for src, pg in page_hits[:10]:
+            for full in self.vector_db.fetch_page_documents(session_id, src, pg):
+                if not full or full in out_docs:
+                    continue
+                if not self._is_guarantee_related_chunk(full):
+                    continue
+                out_docs.append(full)
+                out_metas.append(
+                    {
+                        "source": src,
+                        "page": pg,
+                        "hydrated": True,
+                        "guarantee_scan": True,
+                    }
+                )
+            if len(out_docs) >= 8:
+                break
+        return out_docs, out_metas
+
+    @staticmethod
+    def _score_guarantee_literary_sentence(sentence: str) -> float:
+        """Prioriza cumplimiento 10%, vicios ocultos y encabezados de cláusula sobre trámites de vigencia."""
+        sl = str(sentence or "").lower()
+        score = 0.0
+        if "garantía de cumplimiento" in sl or "garantia de cumplimiento" in sl:
+            score += 420.0
+        if re.search(r"garant[ií]a de cumplimiento.{0,120}?10\s*%", sl):
+            score += 280.0
+        if re.search(r"10\s*%", sl) and (
+            "importe total contratado" in sl or "monto del mismo" in sl or "monto total" in sl
+        ):
+            score += 260.0
+        if "vicios ocultos" in sl:
+            score += 200.0
+        if "garantía de cumplimiento" in sl and "$" in sentence:
+            score += 180.0
+        if re.search(r"\ba\)\s*garant[ií]a de cumplimiento", sl):
+            score += 160.0
+        if "fianza" in sl or "fianzas" in sl:
+            score += 80.0
+        if "anticipo" in sl:
+            score += 40.0
+        if "permanecerá vigente" in sl or "permanecera vigente" in sl:
+            score -= 60.0
+        if "diferir en igual plazo" in sl:
+            score -= 40.0
+        return score
+
+    @classmethod
+    def _compose_guarantee_literary_fallback(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        user_query: str,
+        primary_doc: Optional[str] = None,
+    ) -> str:
+        """Citas literales de garantías desde fragmentos indexados (sin narrativa del LLM)."""
+        q_low = str(user_query or "").lower()
+        annex_ref = bool(re.search(r"anexo\s+1\b", q_low))
+        has_annex_label = any(
+            re.search(r"anexo\s+1\b", str(d or "").lower()) for d in context_docs
+        )
+        parts: List[str] = []
+        if annex_ref and not has_annex_label:
+            parts.append(
+                "No aparece la etiqueta literal **Anexo 1** en los fragmentos indexados de esta sesión. "
+                "Las garantías figuran en el **modelo de contrato** y en los **requisitos de bases** "
+                "(no en un anexo numerado «1»). Lo siguiente es lo que **sí consta** sobre garantías:"
+            )
+        else:
+            parts.append("Según los fragmentos indexados de las bases, sobre **garantías**:")
+        seen: set[str] = set()
+        ranked: List[tuple[float, str]] = []
+        for doc, meta in zip(context_docs, metadatas):
+            cite = cls._format_literary_cite(meta if isinstance(meta, dict) else {}, primary_doc)
+            for body in cls._iter_sanitized_chunk_bodies(doc or ""):
+                for sent in cls._split_penalty_sentences(body):
+                    s = cls._strip_chunk_source_prefix(sent).strip()
+                    s = re.sub(r"^-\s+", "", s).strip()
+                    sl = s.lower()
+                    if len(s) < 30 or len(s) > 480:
+                        continue
+                    if "garant" not in sl and "fianza" not in sl:
+                        continue
+                    if re.search(r"\.pdf\s*\|\s*página", sl):
+                        continue
+                    if "| página" in sl and "fuente" not in sl:
+                        continue
+                    key = s[:90]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    ranked.append(
+                        (
+                            cls._score_guarantee_literary_sentence(s),
+                            f"- {s}\n  {cite}",
+                        )
+                    )
+        ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+        bullets = [line for _, line in ranked[:8]]
+        if not bullets:
+            return ""
+        parts.extend(bullets)
+        parts.append("")
+        parts.append(
+            "**Siguiente paso:** Revisa **Fuentes (bases)** para el contexto completo del capítulo de garantías."
+        )
+        return "\n".join(parts)
+
+    @staticmethod
     def _is_solvencia_fiscal_noise(text: str) -> bool:
         """Opiniones/constancias fiscales del participante (no garantía contractual del ganador)."""
         if not text:
@@ -5520,7 +5717,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             if not doc:
                 continue
             pg = cls._guarantee_page_label(meta if isinstance(meta, dict) else {})
-            if not fianza_line and cls._is_guarantee_contract_chunk(doc):
+            if not fianza_line and (
+                cls._is_guarantee_contract_chunk(doc)
+                or cls._is_guarantee_obra_bases_chunk(doc)
+            ):
                 m = re.search(
                     r"(\d{1,2})\s*%\s*del\s+monto\s+total\s+adjudicado",
                     doc,
@@ -6904,8 +7104,62 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
 
     @staticmethod
     def _strip_chunk_source_prefix(text: str) -> str:
-        """Quita encabezado [FUENTE: archivo | PÁGINA: N] del texto de chunk."""
-        return re.sub(r"\[FUENTE:[^\]]+\]\s*", "", text or "").strip()
+        """Quita encabezados [FUENTE: …] y restos de metadatos de chunk en texto indexado."""
+        t = str(text or "")
+        t = re.sub(r"\[FUENTE:[^\]]*\]\s*", "", t, flags=re.IGNORECASE)
+        # Restos cuando el chunk se partió o el encabezado quedó incompleto.
+        t = re.sub(
+            r"[^\[\n]{8,200}?\.pdf\s*\|\s*PÁGINA:\s*\d+\]",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+        t = re.sub(r"\s*\|\s*PÁGINA:\s*\d+\]", "", t, flags=re.IGNORECASE)
+        t = re.sub(r"^\d{1,3}-\d{1,3}\s+", "", t.strip())
+        t = re.sub(r"^GARANTIAS\s+", "", t, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", t).strip()
+
+    @staticmethod
+    def _short_source_label(source: str) -> str:
+        """Etiqueta legible para citas (sin nombre de archivo kilométrico)."""
+        s = str(source or "").strip()
+        if not s:
+            return "Bases"
+        up = s.upper()
+        if "BASES" in up:
+            return "Bases del procedimiento"
+        if "CONVOCATORIA" in up:
+            return "Convocatoria"
+        if len(s) <= 52:
+            return s
+        return s[:49].rstrip() + "…"
+
+    @staticmethod
+    def _format_literary_cite(meta: Dict[str, Any], primary_doc: Optional[str] = None) -> str:
+        """Cita visible al usuario (sin [FUENTE:…] — el sanitizador del chat lo elimina)."""
+        label = ChatbotRAGAgent._short_source_label(
+            str(meta.get("source") or primary_doc or "Bases")
+        )
+        pg = meta.get("page", "?")
+        return f"· {label}, página {pg}"
+
+    @classmethod
+    def _iter_sanitized_chunk_bodies(cls, text: str) -> List[str]:
+        """Segmentos de texto tras quitar metadatos de indexación (páginas hidratadas)."""
+        raw = str(text or "")
+        if not raw.strip():
+            return []
+        segments = re.split(r"\[FUENTE:[^\]]*\]\s*", raw, flags=re.IGNORECASE)
+        out: List[str] = []
+        for seg in segments:
+            clean = cls._strip_chunk_source_prefix(seg)
+            if clean and len(clean) >= 20:
+                out.append(clean)
+        if not out and raw.strip():
+            clean = cls._strip_chunk_source_prefix(raw)
+            if clean:
+                out.append(clean)
+        return out
 
     @classmethod
     def _detect_adjudication_intent(cls, query: str) -> bool:
@@ -7762,11 +8016,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             guarantee_hydrated_docs, guarantee_hydrated_metas = self._hydrate_guarantee_atomic_pages(
                 session_id, primary_doc, guarantee_focal_metas, guarantee_focal_docs
             )
+            scan_docs, scan_metas = self._guarantee_scan_and_hydrate(session_id, primary_doc)
+            guarantee_hydrated_docs = scan_docs + guarantee_hydrated_docs
+            guarantee_hydrated_metas = scan_metas + guarantee_hydrated_metas
             logger.info(
                 "chatbot_guarantee_focal_rag",
                 session_id=session_id,
                 chunks=len(guarantee_focal_docs),
                 hydrated_pages=len(guarantee_hydrated_metas),
+                scan_pages=len(scan_metas),
                 primary_doc=primary_doc,
             )
 
@@ -8512,6 +8770,31 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             _chat_ctx = 16384
         _chat_ctx = max(4096, min(_chat_ctx, 131072))
 
+        if (
+            guarantee_intent
+            and self._detect_support_evidence_intent(user_query)
+            and context_docs
+        ):
+            lit_early = self._compose_guarantee_literary_fallback(
+                context_docs, metadatas, user_query, primary_doc
+            )
+            if lit_early and len(lit_early) > 100:
+                await self._save_chat_history(session_id, user_query, lit_early)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=lit_early,
+                    confianza="Alta",
+                    tipo="rag_literal_guarantee",
+                    suggested_actions=suggested_actions or [
+                        {
+                            "label": "Ver Fuentes (bases)",
+                            "payload": "CMD_SHOW_SOURCES",
+                            "style": "primary",
+                        },
+                    ],
+                )
+
         llm_response = await self.llm.chat(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
             options={
@@ -8524,6 +8807,12 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
         if llm_response.success:
             content = llm_response.response or ""
+            if self._is_rag_llm_refusal(content) and guarantee_intent and context_docs:
+                lit_fb = self._compose_guarantee_literary_fallback(
+                    context_docs, metadatas, user_query, primary_doc
+                )
+                if lit_fb:
+                    content = lit_fb
             # Garantías: si el bloque canónico trajo fianza (% adjudicado) + RC, sustituir narrativa LLM.
             if guarantee_intent and guarantee_canonical_block:
                 if self._guarantee_canonical_has_core_facts(guarantee_canonical_block):

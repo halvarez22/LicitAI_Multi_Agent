@@ -135,6 +135,7 @@ services:
       - C:/data:/data
       - ./logs:/app/logs
       - ./backend:/app
+      - chroma_embedding_cache:/root/.cache/chroma
     depends_on:
       vector-db:
         condition: service_healthy
@@ -175,6 +176,8 @@ services:
 
 volumes:
   chroma_data:
+    driver: local
+  chroma_embedding_cache:
     driver: local
   postgres_data:
     driver: local

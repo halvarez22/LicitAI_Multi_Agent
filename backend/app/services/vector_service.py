@@ -156,11 +156,24 @@ class VectorDbServiceClient:
             ]})
 
         # Concepto 4: Póliza de Seguro / Responsabilidad Civil / Garantías / Daños a Terceros
-        if "póliza" in q_lower or "poliza" in q_lower or "seguro" in q_lower or "fianza" in q_lower or "responsabilidad" in q_lower or "daños a terceros" in q_lower:
+        if (
+            "póliza" in q_lower
+            or "poliza" in q_lower
+            or "seguro" in q_lower
+            or "fianza" in q_lower
+            or "garantía" in q_lower
+            or "garantia" in q_lower
+            or "garantias" in q_lower
+            or "responsabilidad" in q_lower
+            or "daños a terceros" in q_lower
+            or "danos a terceros" in q_lower
+        ):
             target_filters.append({"$or": [
                 {"$contains": "póliza"}, {"$contains": "poliza"}, {"$contains": "Póliza"}, {"$contains": "Poliza"}, {"$contains": "PÓLIZA"}, {"$contains": "POLIZA"},
                 {"$contains": "seguro"}, {"$contains": "Seguro"}, {"$contains": "SEGURO"},
                 {"$contains": "fianza"}, {"$contains": "Fianza"}, {"$contains": "FIANZA"},
+                {"$contains": "garantía"}, {"$contains": "Garantía"}, {"$contains": "GARANTÍA"},
+                {"$contains": "garantia"}, {"$contains": "Garantia"}, {"$contains": "GARANTIA"},
                 {"$contains": "responsabilidad"}, {"$contains": "Responsabilidad"}, {"$contains": "RESPONSABILIDAD"},
                 {"$contains": "terceros"}, {"$contains": "Terceros"}, {"$contains": "TERCEROS"}
             ]})
@@ -434,4 +447,22 @@ class VectorDbServiceClient:
         except Exception as e:
             # El error es común si la colección no existía: lo silenciamos sanamente
             print(f"INFO: No se pudo borrar la colección '{safe_name}' (posiblemente inexistente): {e}")
+            return False
+
+    def warmup_embedding_runtime(self) -> bool:
+        """
+        Precarga el runtime ONNX de embeddings de Chroma (MiniLM-L6-v2) en arranque.
+
+        La primera ``query_texts`` en un contenedor nuevo puede descargar ~80 MB y
+        bloquear el worker varios minutos; conviene hacerlo al startup, no en el chat.
+        """
+        if not self.client:
+            return False
+        try:
+            coll = self.client.get_or_create_collection(name="licitai_embedding_warmup")
+            coll.query(query_texts=["licitai embedding warmup"], n_results=1)
+            print("[VectorDB] warmup_embedding_runtime: OK")
+            return True
+        except Exception as e:
+            print(f"[VectorDB] warmup_embedding_runtime failed: {e}")
             return False
