@@ -5626,6 +5626,283 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         return "\n".join(parts)
 
     @staticmethod
+    def _literary_sources_actions() -> List[Dict[str, Any]]:
+        return [
+            {
+                "label": "Ver Fuentes (bases)",
+                "payload": "CMD_SHOW_SOURCES",
+                "style": "primary",
+            },
+        ]
+
+    @classmethod
+    def _build_ranked_literary_bullets(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        primary_doc: Optional[str],
+        topic_predicate: Any,
+        score_fn: Any,
+        max_bullets: int = 8,
+    ) -> List[str]:
+        seen: set[str] = set()
+        ranked: List[tuple[float, str]] = []
+        for doc, meta in zip(context_docs, metadatas):
+            cite = cls._format_literary_cite(
+                meta if isinstance(meta, dict) else {}, primary_doc
+            )
+            for body in cls._iter_sanitized_chunk_bodies(doc or ""):
+                for sent in cls._split_penalty_sentences(body):
+                    s = cls._strip_chunk_source_prefix(sent).strip()
+                    s = re.sub(r"^-\s+", "", s).strip()
+                    sl = s.lower()
+                    if len(s) < 30 or len(s) > 480:
+                        continue
+                    if not topic_predicate(s, sl):
+                        continue
+                    if re.search(r"\.pdf\s*\|\s*página", sl):
+                        continue
+                    if "| página" in sl and "fuente" not in sl:
+                        continue
+                    key = s[:90]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    ranked.append((float(score_fn(s)), f"- {s}\n  {cite}"))
+        ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+        return [line for _, line in ranked[:max_bullets]]
+
+    @classmethod
+    def _finalize_literary_parts(
+        cls, intro_lines: List[str], bullets: List[str], cta_line: str
+    ) -> str:
+        if not bullets:
+            return ""
+        return "\n".join(intro_lines + bullets + [""] + [cta_line])
+
+    @staticmethod
+    def _score_penalty_literary_sentence(sentence: str) -> float:
+        sl = str(sentence or "").lower()
+        score = 0.0
+        if "pena convencional" in sl or "penas convencional" in sl:
+            score += 400.0
+        if re.search(r"\d+(?:\.\d+)?\s*%", sl) and any(
+            k in sl for k in ("pena", "penaliz", "sancion", "atraso", "semana")
+        ):
+            score += 220.0
+        if "saldos pendientes" in sl or "garantía de cumplimiento" in sl:
+            score += 120.0
+        if "bienes y/o" in sl or "no suministrados" in sl:
+            score += 80.0
+        return score
+
+    @staticmethod
+    def _penalty_literary_predicate(_sentence: str, sl: str) -> bool:
+        return any(
+            k in sl
+            for k in (
+                "pena convencional",
+                "penas convencional",
+                "penaliz",
+                "sancion",
+                "sanción",
+                "atraso",
+                "incumplimiento",
+                "saldos pendientes",
+            )
+        )
+
+    @classmethod
+    def _compose_penalty_literary_fallback(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        user_query: str,
+        primary_doc: Optional[str] = None,
+    ) -> str:
+        bullets = cls._build_ranked_literary_bullets(
+            context_docs,
+            metadatas,
+            primary_doc,
+            cls._penalty_literary_predicate,
+            cls._score_penalty_literary_sentence,
+        )
+        return cls._finalize_literary_parts(
+            [
+                "Según los fragmentos indexados de las bases, sobre **penas convencionales y sanciones**:"
+            ],
+            bullets,
+            "**Siguiente paso:** Revisa **Fuentes (bases)** para el capítulo de penas y sanciones.",
+        )
+
+    @staticmethod
+    def _score_solvency_literary_sentence(sentence: str) -> float:
+        sl = str(sentence or "").lower()
+        score = 0.0
+        if "opinión del cumplimiento" in sl or "opinion del cumplimiento" in sl:
+            score += 350.0
+        if "servicio de administración tributaria" in sl or "sat" in sl:
+            score += 200.0
+        if "imss" in sl or "infonavit" in sl:
+            score += 180.0
+        if "repse" in sl:
+            score += 160.0
+        if "iso 9001" in sl or "iso 14001" in sl or "nom-035" in sl or "nom 035" in sl:
+            score += 140.0
+        if "solvencia" in sl:
+            score += 100.0
+        return score
+
+    @staticmethod
+    def _solvency_literary_predicate(_sentence: str, sl: str) -> bool:
+        return any(
+            k in sl
+            for k in (
+                "solvencia",
+                "opinion",
+                "opinión",
+                "sat",
+                "imss",
+                "infonavit",
+                "repse",
+                "iso 9001",
+                "iso 14001",
+                "nom-035",
+                "nom 035",
+                "seguridad social",
+            )
+        )
+
+    @classmethod
+    def _compose_solvency_literary_fallback(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        user_query: str,
+        primary_doc: Optional[str] = None,
+    ) -> str:
+        bullets = cls._build_ranked_literary_bullets(
+            context_docs,
+            metadatas,
+            primary_doc,
+            cls._solvency_literary_predicate,
+            cls._score_solvency_literary_sentence,
+        )
+        return cls._finalize_literary_parts(
+            [
+                "Según los fragmentos indexados de las bases, sobre **solvencia y opiniones de cumplimiento**:"
+            ],
+            bullets,
+            "**Siguiente paso:** Revisa **Fuentes (bases)** para requisitos de solvencia (SAT/IMSS/INFONAVIT y normas).",
+        )
+
+    @staticmethod
+    def _score_cronogram_literary_sentence(sentence: str) -> float:
+        sl = str(sentence or "").lower()
+        score = 0.0
+        month_pat = (
+            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre"
+        )
+        if re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl):
+            score += 300.0
+        if "junta" in sl and "aclaraci" in sl:
+            score += 280.0
+        if "apertura" in sl and "proposici" in sl:
+            score += 260.0
+        if "visita" in sl and "instalaci" in sl:
+            score += 240.0
+        if "acto de fallo" in sl or "fallo" in sl:
+            score += 200.0
+        if "fechas y horas" in sl or "cronograma" in sl:
+            score += 150.0
+        return score
+
+    @staticmethod
+    def _cronogram_literary_predicate(_sentence: str, sl: str) -> bool:
+        if any(
+            k in sl
+            for k in (
+                "junta",
+                "aclaraci",
+                "visita",
+                "apertura",
+                "fallo",
+                "cronograma",
+                "fechas y horas",
+                "presentación",
+                "presentacion",
+            )
+        ):
+            return True
+        month_pat = (
+            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre"
+        )
+        return bool(re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl))
+
+    @classmethod
+    def _compose_cronogram_literary_fallback(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        user_query: str,
+        primary_doc: Optional[str] = None,
+    ) -> str:
+        bullets = cls._build_ranked_literary_bullets(
+            context_docs,
+            metadatas,
+            primary_doc,
+            cls._cronogram_literary_predicate,
+            cls._score_cronogram_literary_sentence,
+        )
+        return cls._finalize_literary_parts(
+            [
+                "Según los fragmentos indexados de las bases, sobre **cronograma y actos del procedimiento**:"
+            ],
+            bullets,
+            "**Siguiente paso:** Revisa **Fuentes (bases)** para fechas, horas y modalidad de cada acto.",
+        )
+
+    @classmethod
+    def _build_support_evidence_literary_message(
+        cls,
+        user_query: str,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        primary_doc: Optional[str],
+        guarantee_intent: bool,
+        penalty_intent: bool,
+        solvency_intent: bool,
+        cronogram_intent: bool,
+    ) -> Optional[tuple[str, str]]:
+        """Devuelve (tipo, mensaje) para preguntas «qué dice» con citas literales del índice."""
+        if not cls._detect_support_evidence_intent(user_query) or not context_docs:
+            return None
+        builders: List[tuple[str, Any]] = []
+        if cronogram_intent:
+            builders.append(
+                ("rag_literal_cronogram", cls._compose_cronogram_literary_fallback)
+            )
+        if penalty_intent:
+            builders.append(
+                ("rag_literal_penalty", cls._compose_penalty_literary_fallback)
+            )
+        if solvency_intent:
+            builders.append(
+                ("rag_literal_solvency", cls._compose_solvency_literary_fallback)
+            )
+        if guarantee_intent:
+            builders.append(
+                ("rag_literal_guarantee", cls._compose_guarantee_literary_fallback)
+            )
+        for tipo, builder in builders:
+            text = builder(context_docs, metadatas, user_query, primary_doc)
+            if text and len(text) > 100:
+                return tipo, text
+        return None
+
+    @staticmethod
     def _is_solvencia_fiscal_noise(text: str) -> bool:
         """Opiniones/constancias fiscales del participante (no garantía contractual del ganador)."""
         if not text:
@@ -8770,30 +9047,28 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             _chat_ctx = 16384
         _chat_ctx = max(4096, min(_chat_ctx, 131072))
 
-        if (
-            guarantee_intent
-            and self._detect_support_evidence_intent(user_query)
-            and context_docs
-        ):
-            lit_early = self._compose_guarantee_literary_fallback(
-                context_docs, metadatas, user_query, primary_doc
+        literary_hit = self._build_support_evidence_literary_message(
+            user_query,
+            context_docs,
+            metadatas,
+            primary_doc,
+            guarantee_intent,
+            penalty_intent,
+            solvency_intent,
+            cronogram_intent,
+        )
+        if literary_hit:
+            lit_tipo, lit_early = literary_hit
+            await self._save_chat_history(session_id, user_query, lit_early)
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=lit_early,
+                confianza="Alta",
+                tipo=lit_tipo,
+                suggested_actions=suggested_actions
+                or self._literary_sources_actions(),
             )
-            if lit_early and len(lit_early) > 100:
-                await self._save_chat_history(session_id, user_query, lit_early)
-                return self._format_response(
-                    session_id=session_id,
-                    correlation_id=correlation_id,
-                    respuesta=lit_early,
-                    confianza="Alta",
-                    tipo="rag_literal_guarantee",
-                    suggested_actions=suggested_actions or [
-                        {
-                            "label": "Ver Fuentes (bases)",
-                            "payload": "CMD_SHOW_SOURCES",
-                            "style": "primary",
-                        },
-                    ],
-                )
 
         llm_response = await self.llm.chat(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
@@ -8807,12 +9082,19 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
         if llm_response.success:
             content = llm_response.response or ""
-            if self._is_rag_llm_refusal(content) and guarantee_intent and context_docs:
-                lit_fb = self._compose_guarantee_literary_fallback(
-                    context_docs, metadatas, user_query, primary_doc
+            if self._is_rag_llm_refusal(content) and context_docs:
+                lit_hit = self._build_support_evidence_literary_message(
+                    user_query,
+                    context_docs,
+                    metadatas,
+                    primary_doc,
+                    guarantee_intent,
+                    penalty_intent,
+                    solvency_intent,
+                    cronogram_intent,
                 )
-                if lit_fb:
-                    content = lit_fb
+                if lit_hit:
+                    content = lit_hit[1]
             # Garantías: si el bloque canónico trajo fianza (% adjudicado) + RC, sustituir narrativa LLM.
             if guarantee_intent and guarantee_canonical_block:
                 if self._guarantee_canonical_has_core_facts(guarantee_canonical_block):

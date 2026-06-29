@@ -185,6 +185,41 @@ class VectorDbServiceClient:
                     {"$contains": "responsabilidad civil por daños a terceros"}
                 ]})
 
+        # Concepto 5: Solvencia / opiniones fiscales y patronales
+        if any(
+            w in q_lower
+            for w in (
+                "solvencia",
+                "opinion",
+                "opinión",
+                "sat",
+                "imss",
+                "infonavit",
+                "repse",
+                "iso 9001",
+                "nom-035",
+                "nom 035",
+            )
+        ):
+            target_filters.append({"$or": [
+                {"$contains": "opinión"}, {"$contains": "opinion"}, {"$contains": "Opinión"}, {"$contains": "OPINIÓN"},
+                {"$contains": "SAT"}, {"$contains": "sat"},
+                {"$contains": "IMSS"}, {"$contains": "imss"},
+                {"$contains": "INFONAVIT"}, {"$contains": "infonavit"},
+                {"$contains": "solvencia"}, {"$contains": "Solvencia"}, {"$contains": "SOLVENCIA"},
+                {"$contains": "REPSE"}, {"$contains": "repse"},
+                {"$contains": "ISO"}, {"$contains": "iso"},
+            ]})
+
+        # Concepto 6: Penas convencionales / sanciones contractuales
+        if any(w in q_lower for w in ("pena", "penaliz", "sancion", "sanción", "convencional")):
+            target_filters.append({"$or": [
+                {"$contains": "pena convencional"}, {"$contains": "Pena convencional"}, {"$contains": "PENA CONVENCIONAL"},
+                {"$contains": "penas convencional"}, {"$contains": "Penas convencional"},
+                {"$contains": "penalización"}, {"$contains": "penalizacion"}, {"$contains": "Penalización"},
+                {"$contains": "sanción"}, {"$contains": "sancion"}, {"$contains": "Sanción"},
+            ]})
+
         if target_filters:
             # Si tenemos múltiples criterios, usamos $and para obligar a que coexistan
             if len(target_filters) > 1:
