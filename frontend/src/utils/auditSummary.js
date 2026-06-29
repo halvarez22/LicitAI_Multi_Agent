@@ -344,21 +344,39 @@ export function enrichDictamenFromStorage(dictamen) {
             riesgos: block.stats.total,
         };
     };
+    const maybeCurate = (d) => {
+        const schema = Number(d?.dictamen_schema_version || 0);
+        const needs =
+            schema < 3
+            || d.obligacionesDetectadas == null
+            || d.causalesArchival == null;
+        if (!needs) return d;
+        const raw =
+            Array.isArray(d.causalesRaw) && d.causalesRaw.length
+                ? d.causalesRaw
+                : d.causales || [];
+        const sessionConv = extractSessionConvocanteFromPayload({
+            master_profile: d.master_profile,
+            session_state: d.session_state,
+            ...d,
+        });
+        return applyDictamenCurationToBase({ ...d, causales: raw }, sessionConv, d.compliance || null);
+    };
     if (dictamen.compliancePorZona && Object.keys(dictamen.compliancePorZona).length > 0) {
         const withAlias = dictamen.causalesPorZona != null
             ? dictamen
             : { ...dictamen, causalesPorZona: dictamen.compliancePorZona };
         let result = finalizeStoredDictamenDedupe(withAlias);
         if (fastTrack) result.fastTrackDocumentCandidates = fastTrack;
-        return attachRisks(result);
+        return attachRisks(maybeCurate(result));
     }
     const compliance = (dictamen.causales || []).filter((c) => c.category === 'compliance');
     if (compliance.length === 0) {
-        return attachRisks(finalizeStoredDictamenDedupe({
+        return attachRisks(maybeCurate(finalizeStoredDictamenDedupe({
             ...dictamen,
             compliancePorZona: buildCompliancePorZona([]),
             causalesPorZona: buildCompliancePorZona([]),
-        }));
+        })));
     }
     const normalized = compliance.map((h) => {
         const bucket = h.bucketKey || inferBucketKeyFromTipo(h.tipo);
@@ -384,7 +402,7 @@ export function enrichDictamenFromStorage(dictamen) {
     const porZona = buildCompliancePorZona(normalized);
     const enriched = finalizeStoredDictamenDedupe({ ...dictamen, causales: causalesMerged, compliancePorZona: porZona, causalesPorZona: porZona });
     if (fastTrack) enriched.fastTrackDocumentCandidates = fastTrack;
-    return attachRisks(enriched);
+    return attachRisks(maybeCurate(enriched));
 }
 
 /**

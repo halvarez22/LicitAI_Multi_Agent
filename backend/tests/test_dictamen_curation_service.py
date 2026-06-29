@@ -170,3 +170,33 @@ def test_frontend_policy_mirror_matches_backend():
         "mixed_obligation_licitante_override_patterns",
     ):
         assert backend[key] == frontend[key], f"Policy drift en {key}"
+
+
+def test_refresh_dictamen_curation_legacy_schema():
+    session_conv_name = "Autoridad Responsable del Procedimiento Licitatorio ARC-2024-001"
+    raw = [
+        _compliance_item(
+            f"{session_conv_name} comparece con personalidad para suscribir el contrato.",
+        ),
+        _compliance_item(
+            "El licitante deberá entregar propuesta técnica.",
+            tipo_accion="generar",
+        ),
+    ]
+    legacy_dictamen = {
+        "causales": raw,
+        "status": "⚠️ COMPLETADO CON INCIDENCIAS",
+        "totalRequisitos": len(raw),
+        "dictamen_schema_version": 2,
+    }
+    from app.services.dictamen_curation_service import refresh_dictamen_curation_if_needed
+
+    out = refresh_dictamen_curation_if_needed(
+        legacy_dictamen,
+        session_state={"convocante": session_conv_name},
+        extraction_health={"status": "ok"},
+        compliance={"status": "partial", "data": {"audit_summary": {"zones": []}}},
+    )
+    assert out["dictamen_schema_version"] == 3
+    assert out["obligacionesDetectadas"] == 1
+    assert out["archivalCount"] == 1

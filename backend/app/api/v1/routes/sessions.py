@@ -241,6 +241,27 @@ async def get_dictamen(session_id: str):
                         session_id,
                         tab_exc,
                     )
+                try:
+                    from app.config.settings import settings
+                    from app.services.dictamen_curation_service import (
+                        refresh_dictamen_curation_if_needed,
+                    )
+
+                    if settings.DICTAMEN_CURATION_ENABLED and isinstance(dictamen_out, dict):
+                        dictamen_out = refresh_dictamen_curation_if_needed(
+                            dictamen_out,
+                            session_state=session_data,
+                            extraction_health=dictamen_out.get("extractionHealth"),
+                            compliance=session_data.get("compliance"),
+                            view_mode=str(settings.DICTAMEN_VIEW_MODE or "licitante"),
+                            curation_enabled=True,
+                        )
+                except Exception as cur_exc:
+                    logger.warning(
+                        "dictamen_curation_refresh_skip session=%s err=%s",
+                        session_id,
+                        cur_exc,
+                    )
             decision = session_data.get("last_orchestrator_decision") or {}
             last_quality_hints = session_data.get("last_document_quality_waiting_hints")
             last_fill_hints = session_data.get("last_document_fill_quality_waiting_hints")

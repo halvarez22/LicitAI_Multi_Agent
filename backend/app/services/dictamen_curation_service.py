@@ -233,6 +233,12 @@ def session_convocante_from_state(session_state: Optional[Dict[str, Any]]) -> Di
     """Extrae hints de convocante ya persistidos (sin hardcode por licitación)."""
     session_state = session_state or {}
     out: Dict[str, str] = {}
+    mp = session_state.get("master_profile")
+    if isinstance(mp, dict):
+        for key in ("convocante", "autoridad_convocante", "dependencia", "entidad", "comite", "destinatario"):
+            val = mp.get(key)
+            if val and str(val).strip():
+                out[key] = str(val).strip()
     for key in ("convocante", "autoridad_convocante", "dependencia", "entidad", "comite"):
         val = session_state.get(key)
         if val and str(val).strip():
@@ -380,3 +386,52 @@ def apply_curation_to_dictamen(
     from app.services.forensic_risk_service import attach_forensic_risks_to_dictamen
 
     return attach_forensic_risks_to_dictamen(out)
+
+
+def dictamen_needs_curation_refresh(dictamen: Dict[str, Any]) -> bool:
+    """True si el dictamen guardado debe re-curarse (legacy o policy nueva)."""
+    if not isinstance(dictamen, dict):
+        return False
+    schema = int(dictamen.get("dictamen_schema_version") or 0)
+    if schema < 3 or dictamen.get("obligacionesDetectadas") is None:
+        return True
+    curated = dictamen.get("dictamen_curated_v1") or {}
+    if str(curated.get("filter_pipeline_version") or "") != policy_version():
+        return True
+    if dictamen.get("causalesArchival") is None and dictamen.get("archivalCount") is None:
+        return True
+    return False
+
+
+def refresh_dictamen_curation_if_needed(
+    dictamen: Dict[str, Any],
+    *,
+    session_state: Optional[Dict[str, Any]] = None,
+    extraction_health: Optional[Dict[str, Any]] = None,
+    compliance: Any = None,
+    view_mode: str = "licitante",
+    curation_enabled: bool = True,
+) -> Dict[str, Any]:
+    """
+    Re-aplica curación HRU al dictamen persistido (GET /dictamen, sesiones legacy).
+    Usa causalesRaw si existe; si no, causales actuales como fuente cruda.
+    """
+    if not curation_enabled or not isinstance(dictamen, dict):
+        return dictamen
+    if not dictamen_needs_curation_refresh(dictamen):
+        return dictamen
+    raw = list(dictamen.get("causalesRaw") or dictamen.get("causales") or [])
+    if not raw:
+        return dictamen
+    base = {**dictamen, "causales": raw}
+    ext = extraction_health or dictamen.get("extractionHealth")
+    if isinstance(ext, dict):
+        extraction_health = ext
+    return apply_curation_to_dictamen(
+        base,
+        session_state=session_state,
+        extraction_health=extraction_health,
+        compliance=compliance,
+        view_mode=view_mode,
+        curation_enabled=True,
+    )
