@@ -83,6 +83,11 @@ def detect_price_correction_intent(query: str) -> Optional[Dict[str, Any]]:
     Returns:
         dict con ``new_value`` (float|None), ``needs_price`` (bool), ``raw``.
     """
+    from app.services.chat_economic_provenance_service import detect_economic_provenance_intent
+
+    if detect_economic_provenance_intent(query):
+        return None
+
     q = (query or "").strip()
     if not q:
         return None

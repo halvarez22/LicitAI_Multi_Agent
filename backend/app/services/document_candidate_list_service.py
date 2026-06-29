@@ -364,6 +364,14 @@ async def build_formats_panel_consolidated(
     for row in extract_pliego_generables_from_bases_corpus(corpus):
         _append(row)
 
+    inv_raw = state.get("document_inventory")
+    if isinstance(inv_raw, dict):
+        from app.services.obra_chat_queue_policy import inventory_item_to_panel_row
+
+        for raw_item in inv_raw.get("items") or []:
+            if isinstance(raw_item, dict):
+                _append(inventory_item_to_panel_row(raw_item))
+
     if isinstance(base, dict):
         for bk in buckets:
             for raw in base.get(bk) or []:
@@ -377,6 +385,9 @@ async def build_formats_panel_consolidated(
     filtered = filter_consolidated_document_candidates(
         {**buckets, "_meta": {"enriched_from_bases_corpus": True}}
     )
+    from app.services.formats_panel_hru_service import normalize_formats_panel_payload
+
+    filtered = normalize_formats_panel_payload(filtered)
     meta = filtered.get("_meta") if isinstance(filtered.get("_meta"), dict) else {}
     meta["filtered_pliego_formats_only"] = True
     meta["excluded_corporate_physical"] = True

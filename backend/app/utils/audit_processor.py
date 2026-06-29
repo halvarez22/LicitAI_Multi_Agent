@@ -170,7 +170,9 @@ def map_compliance_hallazgo(raw: Any, tipo_label: str, list_key: str) -> Dict[st
         "categoria_llm": cat_raw,
         "bucketKey": list_key, # Alineado con frontend (camelCase)
         "zona_explicita": zo is not None,
-        "categoria_difiere_bucket": str(cat_raw).lower() != str(list_key).lower()
+        "categoria_difiere_bucket": str(cat_raw).lower() != str(list_key).lower(),
+        "audience": raw.get("audience"),
+        "tipo_accion": raw.get("tipo_accion"),
     }
 
 def build_compliance_por_zona(hallazgos: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -196,6 +198,8 @@ def process_audit_results_backend(
     results_data: Dict[str, Any],
     pipeline_telemetry: Optional[Dict[str, Any]] = None,
     line_items_count: Optional[int] = None,
+    session_state: Optional[Dict[str, Any]] = None,
+    extraction_health: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Réplica en Python de processAuditResults de auditSummary.js.
@@ -265,16 +269,32 @@ def process_audit_results_backend(
         })
 
     reglas_ec = analysis_data.get("reglas_economicas") or {}
+    reglas_evidence = analysis_data.get("reglas_economicas_evidence_v1") or {}
+    ev_items = (
+        reglas_evidence.get("items")
+        if isinstance(reglas_evidence, dict)
+        else {}
+    ) or {}
     if isinstance(reglas_ec, dict):
         ri = 0
         for rk, rv in reglas_ec.items():
             if not isinstance(rv, str) or not rv.strip() or rv.strip() == "No especificado":
                 continue
+            ev_item = ev_items.get(rk) if isinstance(ev_items, dict) else None
+            ev_v1 = ev_item.get("evidence_v1") if isinstance(ev_item, dict) else None
             raw_list.append({
                 "tipo": "💶 REGLA ECONÓMICA (BASES)",
                 "texto": f"{rk}: {rv}",
                 "category": "bases_reglas_economicas",
                 "id": f"base-regla-{ri}",
+                "page": ev_item.get("page") if isinstance(ev_item, dict) else None,
+                "snippet": ev_item.get("snippet") if isinstance(ev_item, dict) else None,
+                "source": ev_item.get("source") if isinstance(ev_item, dict) else None,
+                "evidence_v1": ev_v1,
+                "verification_status": (
+                    (ev_v1 or {}).get("evidence_mode") if isinstance(ev_v1, dict) else "inference_only"
+                ),
+                "promotion_eligible": bool(ev_item.get("promotion_eligible")) if isinstance(ev_item, dict) else False,
                 "agent_id": "analyst_001",
                 "zona_origen": None,
                 "categoria_llm": None,
@@ -341,35 +361,123 @@ def process_audit_results_backend(
         })
         
     econ_data = safe_get_data(economic)
-    econ_alerts = econ_data.get("analisis_precios", {}).get("alertas", [])
-    for i, a in enumerate(econ_alerts):
-        raw_list.append({
-            "tipo": "💰 ALERTA ECONÓMICA",
-            "texto": a,
-            "isRisk": True,
-            "category": "economic",
-            "id": f"econ-{i}",
-            "agent_id": "economic_001",
-            "zona_origen": None,
-            "categoria_llm": None,
-        })
+    econ_alerts_raw = econ_data.get("analisis_precios", {}).get("alertas", [])
+    try:
+        from app.services.economic_alert_classifier import normalize_and_dedupe_economic_alerts
 
-    # Gap económico (waiting_for_data): alertas del marco de bases no van en analisis_precios.
-    gap_alerts = econ_data.get("alertas_contexto_bases") or []
-    if isinstance(gap_alerts, list):
-        for i, a in enumerate(gap_alerts):
-            if not a:
-                continue
+        forensic_econ, excluded_econ = normalize_and_dedupe_economic_alerts(
+            econ_alerts_raw if isinstance(econ_alerts_raw, list) else []
+        )
+        for norm in forensic_econ:
+            _ev = None
+            try:
+                from app.services.economic_risk_evidence_v1 import build_evidence_v1
+
+                _ev = build_evidence_v1(
+                    {
+                        "page": norm.get("page"),
+                        "snippet": norm.get("snippet"),
+                        "match_confidence": "media" if norm.get("snippet") else "none",
+                        "provenance": "economic_agent",
+                    },
+                    literal=str(norm.get("texto") or ""),
+                )
+            except Exception:
+                pass
             raw_list.append({
-                "tipo": "📌 PAUSA ECONÓMICA / CONTEXTO DE BASES",
-                "texto": a,
+                "tipo": "💰 ALERTA ECONÓMICA",
+                "texto": norm.get("texto"),
                 "isRisk": True,
-                "category": "economic_gap_context",
-                "id": f"econ-gap-{i}",
+                "category": "economic",
+                "id": norm.get("id"),
+                "page": norm.get("page"),
+                "snippet": norm.get("snippet"),
+                "alert_subtype": norm.get("alert_subtype"),
+                "risk_reason_ux": norm.get("risk_reason_ux"),
+                "evidence_v1": _ev,
                 "agent_id": "economic_001",
                 "zona_origen": None,
                 "categoria_llm": None,
             })
+        for norm in excluded_econ:
+            raw_list.append({
+                "tipo": "📋 CONTEXTO ECONÓMICO",
+                "texto": norm.get("texto"),
+                "isRisk": False,
+                "category": "economic_context",
+                "id": norm.get("id"),
+                "page": norm.get("page"),
+                "snippet": norm.get("snippet"),
+                "alert_subtype": norm.get("alert_subtype"),
+                "risk_reason_ux": norm.get("risk_reason_ux"),
+                "agent_id": "economic_001",
+                "zona_origen": None,
+                "categoria_llm": None,
+            })
+    except Exception:
+        for i, a in enumerate(econ_alerts_raw or []):
+            raw_list.append({
+                "tipo": "💰 ALERTA ECONÓMICA",
+                "texto": a,
+                "isRisk": True,
+                "category": "economic",
+                "id": f"econ-{i}",
+                "agent_id": "economic_001",
+                "zona_origen": None,
+                "categoria_llm": None,
+            })
+
+    # Gap económico (waiting_for_data): alertas del marco de bases — no son riesgos HITL por defecto.
+    gap_alerts = econ_data.get("alertas_contexto_bases") or []
+    if isinstance(gap_alerts, list):
+        try:
+            from app.services.economic_alert_classifier import normalize_and_dedupe_economic_alerts
+
+            forensic_gap, context_gap = normalize_and_dedupe_economic_alerts(
+                [a for a in gap_alerts if a]
+            )
+            for norm in forensic_gap:
+                raw_list.append({
+                    "tipo": "📌 PAUSA ECONÓMICA / CONTEXTO DE BASES",
+                    "texto": norm.get("texto"),
+                    "isRisk": True,
+                    "category": "economic_gap_context",
+                    "id": norm.get("id"),
+                    "page": norm.get("page"),
+                    "snippet": norm.get("snippet"),
+                    "alert_subtype": norm.get("alert_subtype"),
+                    "risk_reason_ux": norm.get("risk_reason_ux"),
+                    "agent_id": "economic_001",
+                    "zona_origen": None,
+                    "categoria_llm": None,
+                })
+            for norm in context_gap:
+                raw_list.append({
+                    "tipo": "📋 CONTEXTO ECONÓMICO",
+                    "texto": norm.get("texto"),
+                    "isRisk": False,
+                    "category": "economic_context",
+                    "id": norm.get("id"),
+                    "alert_subtype": norm.get("alert_subtype"),
+                    "risk_reason_ux": norm.get("risk_reason_ux"),
+                    "agent_id": "economic_001",
+                    "zona_origen": None,
+                    "categoria_llm": None,
+                })
+        except Exception:
+            for i, a in enumerate(gap_alerts):
+                if not a:
+                    continue
+                raw_list.append({
+                    "tipo": "📌 PAUSA ECONÓMICA / CONTEXTO DE BASES",
+                    "texto": a,
+                    "isRisk": True,
+                    "category": "economic_gap_context",
+                    "id": f"econ-gap-{i}",
+                    "agent_id": "economic_001",
+                    "zona_origen": None,
+                    "categoria_llm": None,
+                })
 
     # --- DEDUPLICACIÓN (Fingerprint Map) ---
     seen_map = {} # key -> item_ref
@@ -389,7 +497,7 @@ def process_audit_results_backend(
         else:
             dedup_key = (
                 h_id
-                if (h_id and "risk-" not in h_id and "base-" not in h_id)
+                if (h_id and "risk-" not in h_id and "base-" not in h_id and "econ-" not in h_id)
                 else f"{cat}:{fp}"
             )
 
@@ -416,6 +524,12 @@ def process_audit_results_backend(
 
     # --- MÉTRICAS ---
     listado_hallazgos = list(seen_map.values())
+    try:
+        from app.services.economic_alert_classifier import sanitize_economic_causales
+
+        listado_hallazgos = sanitize_economic_causales(listado_hallazgos)
+    except Exception:
+        pass
     comp_only = [h for h in listado_hallazgos if h.get("category") == "compliance"]
     compliance_por_zona = build_compliance_por_zona(comp_only)
 
@@ -495,4 +609,37 @@ def process_audit_results_backend(
             base["fastTrackDocumentCandidates"] = _filter_ccc_payload(ft)
         else:
             base["fastTrackDocumentCandidates"] = ft
-    return apply_infrastructure_ux_overrides(base)
+
+    base = apply_infrastructure_ux_overrides(base)
+
+    try:
+        from app.config.settings import settings
+        from app.services.dictamen_curation_service import (
+            apply_curation_to_dictamen,
+            build_forensic_audit_health,
+        )
+
+        if settings.DICTAMEN_CURATION_ENABLED:
+            forensic = build_forensic_audit_health(compliance)
+            base["forensicAuditHealth"] = forensic
+            if extraction_health:
+                base["extractionHealth"] = extraction_health
+            base = apply_curation_to_dictamen(
+                base,
+                session_state=session_state,
+                extraction_health=extraction_health,
+                compliance=compliance,
+                view_mode=str(settings.DICTAMEN_VIEW_MODE or "licitante"),
+                curation_enabled=True,
+            )
+    except Exception:
+        pass
+
+    try:
+        from app.services.forensic_risk_service import attach_forensic_risks_to_dictamen
+
+        base = attach_forensic_risks_to_dictamen(base)
+    except Exception:
+        pass
+
+    return base

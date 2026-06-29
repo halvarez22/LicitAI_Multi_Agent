@@ -172,6 +172,15 @@ def human_line_for_issue(issue: Dict[str, Any], *, company_name: Optional[str] =
         return f"• En **{doc}** quedaron espacios o texto de plantilla sin completar."
     if err == "cross_tender_reference":
         marker = str(issue.get("detected_value") or "").strip()
+        from app.services.document_fill_quality_gate import is_pliego_boilerplate_marker
+
+        if is_pliego_boilerplate_marker(marker):
+            short = marker[:50] + ("…" if len(marker) > 50 else "")
+            return (
+                f"• En **{doc}** quedó un **marcador de plantilla**"
+                + (f" («{short}»)" if short else "")
+                + " sin completar — se cerrará al **Generar** de nuevo o con **[Consignar]**."
+            )
         return (
             f"• En **{doc}** aparece información de **otra licitación**"
             + (f" («{marker[:50]}»)." if marker else ".")
@@ -225,10 +234,10 @@ def _build_intro(
         )
     if not needs_profile and not needs_clients and not needs_economic:
         return (
-            f"⏸️ **Pausé la generación** al armar la **{stage_label}** porque algunos "
-            f"archivos quedaron con **texto incompleto o plantilla** sin terminar. "
+            f"Algunos documentos de la **{stage_label}** quedaron con **texto de plantilla** "
+            f"o marcadores **[Consignar]** sin cerrar. "
             f"**Los datos de Empresas{company_phrase} (RFC, domicilio, representante) ya se usaron "
-            f"en la mayoría de los documentos.**"
+            f"en la mayoría de los anexos.**"
         )
     return (
         f"⏸️ **Pausé la generación** al armar la **{stage_label}** porque faltan datos "
@@ -270,6 +279,12 @@ def _build_next_steps(
         )
         step += 1
     if step == 1:
+        if not needs_profile and not needs_clients and not needs_economic:
+            lines.append(
+                f"{step}. Pulsa **Generar** en **Formatos/Anexos detectados** "
+                "(con tu empresa seleccionada)."
+            )
+            return "\n".join(lines)
         lines.append(f"{step}. **Escríbeme aquí** el dato que falta y yo lo incorporo.")
         step += 1
     lines.append(f"{step}. Pulsa otra vez **Generar** en el panel.")
@@ -301,6 +316,56 @@ def _build_chat_prompt(
     if needs_profile and not needs_clients:
         return "Escríbeme el RFC, representante legal o domicilio que falte, o complétalo en Empresas."
     return "Escríbeme en una frase lo que falta y te guío paso a paso."
+
+
+def _short_doc_label(document_id: str) -> str:
+    """Nombre legible corto para un archivo generado."""
+    raw = str(document_id or "").strip()
+    if not raw:
+        return "un anexo"
+    base = raw.rsplit(".", 1)[0] if "." in raw else raw
+    base = base.replace("_", " ").strip()
+    return base[:72] + ("…" if len(base) > 72 else "")
+
+
+def build_obra_fill_quality_gate5_message(
+    stage: str,
+    issues: Sequence[Dict[str, Any]],
+    *,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Mensaje HRU (≤3 líneas) cuando la pausa es por plantilla, no por datos en chat.
+    """
+    from app.services.chat_gate5_formatter import format_gate5_message
+    from app.services.obra_chat_queue_policy import filter_obra_fill_quality_issues
+
+    filtered = filter_obra_fill_quality_issues(list(issues or []), session_state)
+    docs: List[str] = []
+    for issue in filtered:
+        label = _short_doc_label(str(issue.get("document_id") or ""))
+        if label not in docs:
+            docs.append(label)
+
+    n = len(docs) or len(filtered) or 1
+    stage_hint = humanize_stage(stage)
+    status = (
+        f"La última pasada de **{stage_hint}** dejó **{n} anexo(s)** "
+        "con marcadores **[Consignar]** o texto de plantilla sin cerrar."
+    )
+    detail = (
+        "**No falta tu RFC ni datos de Empresas** — en obra es normal antes de la segunda generación."
+    )
+    if docs:
+        shown = ", ".join(f"**{d}**" for d in docs[:3])
+        if len(docs) > 3:
+            shown += f" y {len(docs) - 3} más"
+        detail += f" Revisa: {shown}."
+    cta = (
+        "Abre **Formatos/Anexos detectados** y pulsa **Generar** de nuevo "
+        "con tu empresa seleccionada."
+    )
+    return format_gate5_message(status=status, detail=detail, cta=cta)
 
 
 def build_fill_quality_user_brief(
@@ -381,11 +446,25 @@ def build_fill_blocking_question(
     *,
     company_name: Optional[str] = None,
     experience_summary: Optional[str] = None,
+    session_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Pregunta HITL corta para pending_questions / chatbot."""
+    from app.services.obra_chat_queue_policy import (
+        filter_obra_fill_quality_issues,
+        obra_fill_quality_needs_chat_capture,
+    )
+
+    issues_list = list(issues or [])
+    if session_state is not None:
+        issues_list = filter_obra_fill_quality_issues(issues_list, session_state)
+        if issues_list and not obra_fill_quality_needs_chat_capture(issues_list, session_state):
+            return build_obra_fill_quality_gate5_message(
+                stage, issues_list, session_state=session_state
+            )
+
     brief = build_fill_quality_user_brief(
         stage,
-        issues,
+        issues_list,
         company_name=company_name,
         max_lines=4,
         experience_summary=experience_summary,

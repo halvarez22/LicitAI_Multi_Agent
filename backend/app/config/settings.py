@@ -152,6 +152,17 @@ class Settings(BaseSettings):
         description="Mínimo de ítems economic_price en un mismo grupo para formar un InteractionBlock.",
     )
 
+    DICTAMEN_CURATION_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("DICTAMEN_CURATION_ENABLED", "LICITAI_DICTAMEN_CURATION_ENABLED"),
+        description="Curación vista licitante en Dictamen Forense.",
+    )
+    DICTAMEN_VIEW_MODE: str = Field(
+        default="licitante",
+        validation_alias=AliasChoices("DICTAMEN_VIEW_MODE", "LICITAI_DICTAMEN_VIEW_MODE"),
+        description="licitante | forense_completo",
+    )
+
     # Redis for communication
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379

@@ -787,9 +787,10 @@ async def _safe_save_session(
         
         # DEBUG LOG: Monitorear cambios en la cola de preguntas
         if key == "pending_questions":
-            from app.services.hitl_queue_service import normalize_pending_queue
+            from app.services.hitl_queue_service import normalize_pending_queue, sanitize_chat_pending_questions
 
-            q_list = normalize_pending_queue(value or [])
+            q_list = sanitize_chat_pending_questions(value or [], fresh)
+            q_list = normalize_pending_queue(q_list)
             value = q_list
             logger.info("safe_save_pending_questions", 
                         session_id=session_id, 

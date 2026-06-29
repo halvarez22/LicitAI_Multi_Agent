@@ -89,6 +89,7 @@ _PROFILE_FIELD_KEYWORDS: List[tuple[str, str]] = [
 def detect_brechas(
     compliance_data: Dict[str, Any],
     master_profile: Dict[str, Any],
+    session_convocante: Optional[Dict[str, str]] = None,
 ) -> List[Brecha]:
     """Detecta brechas entre los datos de compliance y el perfil maestro.
 
@@ -96,6 +97,7 @@ def detect_brechas(
         compliance_data: Salida del ComplianceAgent (claves: administrativo, tecnico,
             formatos, summary con causas_desechamiento).
         master_profile: Perfil maestro de la empresa (master_profile del modelo Company).
+        session_convocante: Tokens del convocante de la sesión (HRU: sin hardcode por licitación).
 
     Returns:
         Lista de objetos Brecha ordenada: primero knock-outs, luego el resto.
@@ -120,11 +122,13 @@ def detect_brechas(
             zona_origen=_ZONA_FALLBACK,
         ))
 
-    # 2. Requisitos por zona
+    # 2. Requisitos por zona (excluir narrativa convocante — misma política que dictamen)
     for bucket_key, zona_label in _ZONAS_VALIDAS.items():
         items = compliance_data.get(bucket_key) or []
         for item in items:
             if not isinstance(item, dict):
+                continue
+            if _is_convocante_noise_for_gng(item, session_convocante):
                 continue
             texto = _extract_text(item)
             if not texto:
@@ -145,6 +149,37 @@ def detect_brechas(
     # Knock-outs primero
     brechas.sort(key=lambda b: (0 if b.is_knockout else 1))
     return brechas
+
+
+def _is_convocante_noise_for_gng(
+    item: Dict[str, Any],
+    session_convocante: Optional[Dict[str, str]],
+) -> bool:
+    """True si el ítem compliance es narrativa del convocante (no brecha del licitante)."""
+    aud = str(item.get("audience") or "").strip().lower()
+    if aud == "convocante":
+        return True
+    tipo = str(item.get("tipo_accion") or "").strip().lower()
+    if tipo == "informativo":
+        return True
+    try:
+        from app.services.dictamen_curation_service import (
+            CURATION_REASON_CONVOCANTE,
+            CURATION_REASON_INFORMATIVO,
+            CURATION_REASON_PROCEDURAL,
+            resolve_curation_reason,
+        )
+
+        hallazgo = {"texto": item, "category": "compliance"}
+        reason = resolve_curation_reason(hallazgo, session_convocante)
+        # Solo excluir ruido convocante/procedural; requisitos sin tipo_accion siguen siendo brechas.
+        return reason in (
+            CURATION_REASON_CONVOCANTE,
+            CURATION_REASON_INFORMATIVO,
+            CURATION_REASON_PROCEDURAL,
+        )
+    except Exception:
+        return False
 
 
 def calculate_semaforo(

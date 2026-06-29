@@ -3,7 +3,7 @@
 > **Documento maestro para todos los agentes de IA que colaboran en este proyecto (desarrollo, auditoría y pruebas).**
 > Todo agente nuevo (Claude, Cursor, Antigravity u otro) debe leer este archivo al inicio de cada sesión.
 > Este documento define el contexto técnico, estándares, flujo y criterios mínimos de calidad esperados.
-> Última actualización: 2026-03-31.
+> Última actualización: 2026-06-23.
 
 ---
 
@@ -313,6 +313,8 @@ licitaciones-ai/
 | `backend/app/contracts/orchestrator_contracts.py` | OrchestratorState |
 | `backend/app/api/schemas/requests.py` | Esquemas de request API |
 | `backend/app/api/schemas/responses.py` | Esquemas de response API |
+| `session_state.dictamen_curated_v1` | Vista curada del Dictamen Forense (obligaciones licitante vs archivo). Spec: [`docs/SPEC_DICTAMEN_CURACION_LICITANTE.md`](docs/SPEC_DICTAMEN_CURACION_LICITANTE.md) |
+| `backend/app/services/dictamen_curation_service.py` | *(planificado)* Curación post-compliance; ver `.kiro/specs/dictamen-curacion-licitante/` |
 
 ---
 
@@ -327,6 +329,8 @@ licitaciones-ai/
 | `CONFIDENCE_ENABLED` | Cálculo de confianza | `true` |
 | `CONFIDENCE_SHADOW_MODE` | Ejecuta confianza en modo sombra sin impactar decisiones finales | `false` |
 | `FEEDBACK_UI_ENABLED` | UI de feedback al usuario | `true` |
+| `DICTAMEN_CURATION_ENABLED` | Curación vista licitante en Dictamen Forense | `true` *(planificado)* |
+| `DICTAMEN_VIEW_MODE` | `licitante` (default curado) \| `forense_completo` (legacy) | `licitante` *(planificado)* |
 
 ### Valores de `stop_reason` del Orquestador (Trazabilidad)
 - `FINAL_OK`: Proceso completado exitosamente (análisis + generación).

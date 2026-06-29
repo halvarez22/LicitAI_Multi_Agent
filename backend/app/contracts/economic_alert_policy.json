@@ -1,0 +1,108 @@
+{
+  "policy_version": "economic-alert-v1.4.0",
+  "description": "Clasificación universal de alertas económicas (HRU). Sin nombres de convocante ni municipio.",
+  "evidence_schema_version": "economic_risk_evidence_v1",
+  "reglas_economicas_evidence_schema": "reglas_economicas_evidence_v1",
+  "requires_index_anchor_for_page_citation": true,
+  "promotion_requires_index_verified": true,
+  "regla_key_expected_semantics": {
+    "referencia_partidas_anexos_citados": "tabular_reference",
+    "criterio_importe_minimo_o_plazo_inferior": "offer_floor_or_importe",
+    "criterio_importe_maximo_o_plazo_superior": "offer_ceiling_or_importe",
+    "meses_o_periodo_minimo_citado": "period",
+    "meses_o_periodo_maximo_citado": "period",
+    "modalidad_contratacion_observada": "procedural",
+    "vinculacion_presupuesto_partida": "budget_linkage",
+    "otras_reglas_oferta_precio": "generic_economic"
+  },
+  "experience_amount_patterns": [
+    "(?i)obra\\s+ejecutada",
+    "(?i)experiencia\\s+(t[eé]cnica|comprobada|similar)",
+    "(?i)monto[s]?\\s+de\\s+obra",
+    "(?i)acta\\s+de\\s+cierre",
+    "(?i)entrega\\s+recepci[oó]n"
+  ],
+  "tabular_reference_patterns": [
+    "(?i)\\banexo\\s*n[o°º.]?\\s*\\d+",
+    "(?i)\\bpartida[s]?\\b",
+    "(?i)\\bcat[aá]logo\\s+de\\s+conceptos",
+    "(?i)\\btabla\\s+(de\\s+)?(precios|conceptos)"
+  ],
+  "ux_reason_by_subtype": {
+    "offer_floor": "Las bases fijan un piso o condición mínima para tu propuesta económica. Si tu oferta queda por debajo, puede haber desechamiento.",
+    "convocante_budget": "Este texto describe el presupuesto o monto autorizado del convocante para la obra o servicio. No es una obligación documental del licitante; es contexto del procedimiento.",
+    "guarantee_insurance": "Las bases exigen una garantía o seguro con monto mínimo. Debes acreditarlo en la documentación correspondiente (fianza o póliza), no confundirlo con el total de tu propuesta.",
+    "ambiguous_presupuesto": "El texto menciona un monto de «presupuesto» sin dejar claro si es piso de tu oferta o presupuesto autorizado del convocante. Revisa el párrafo literal en las bases antes de decidir.",
+    "bases_coherence_hint": "Recordatorio de coherencia entre reglas económicas extraídas de las bases y tu cotización. No es causa de desechamiento por sí solo; revísalo al armar la oferta.",
+    "session_canonical_hint": "Señal operativa del motor económico (partidas, cuadratura o datos canónicos). Es contexto técnico, no un riesgo de descalificación.",
+    "generic_economic": "El agente económico detectó una condición relevante para tu oferta. Contrasta con tu propuesta y expediente."
+  },
+  "severity_by_subtype": {
+    "offer_floor": "blocking",
+    "guarantee_insurance": "high",
+    "ambiguous_presupuesto": "high",
+    "convocante_budget": "medium",
+    "bases_coherence_hint": "medium",
+    "session_canonical_hint": "medium",
+    "generic_economic": "high"
+  },
+  "offer_floor_patterns": [
+    "(?i)(propuesta|oferta|cotizaci[oó]n)\\s+(econ[oó]mica\\s+)?(no\\s+)?(ser[aá]\\s+)?(menor|inferior)",
+    "(?i)importe\\s+m[ií]nimo\\s+(de\\s+)?(la\\s+)?(propuesta|oferta|cotizaci[oó]n)",
+    "(?i)el\\s+licitante\\s+.*(presupuesto|propuesta|oferta).*(m[ií]nimo|debe)",
+    "(?i)precio\\s+m[ií]nimo\\s+(de\\s+)?(la\\s+)?(propuesta|oferta)"
+  ],
+  "presupuesto_disambiguation_trigger_patterns": [
+    "(?i)\\bpresupuesto\\s+debe\\s+ser\\s+(de\\s+)?\\$",
+    "(?i)\\bpresupuesto\\s+(m[ií]nimo|m[aá]ximo)\\s+de\\s+\\$"
+  ],
+  "snippet_offer_floor_patterns": [
+    "(?i)(propuesta|oferta|cotizaci[oó]n).*(no\\s+)?(menor|inferior|m[ií]nimo)",
+    "(?i)(licitante|postor|concursante).*(propuesta|oferta|presupuesto|cotizaci[oó]n)",
+    "(?i)piso\\s+(de\\s+)?(la\\s+)?(oferta|propuesta)",
+    "(?i)importe\\s+m[ií]nimo\\s+(de\\s+)?(la\\s+)?(propuesta|oferta|cotizaci[oó]n)"
+  ],
+  "snippet_convocante_budget_patterns": [
+    "(?i)presupuesto\\s+(autorizado|base|asignado|de\\s+referencia|programado)",
+    "(?i)recursos\\s+(aprobados|autorizados)",
+    "(?i)monto\\s+(total|m[aá]ximo)\\s+(de\\s+)?(la\\s+)?(obra|contrataci[oó]n|inversi[oó]n)",
+    "(?i)asignaci[oó]n\\s+presupuestal"
+  ],
+  "default_currency_fallback": "",
+  "convocante_budget_patterns": [
+    "(?i)presupuesto\\s+(autorizado|base|asignado|de\\s+referencia|programado)",
+    "(?i)monto\\s+(total|m[aá]ximo)\\s+(de\\s+)?(la\\s+)?(obra|contrataci[oó]n|inversi[oó]n)",
+    "(?i)recursos\\s+(aprobados|autorizados)",
+    "(?i)asignaci[oó]n\\s+presupuestal"
+  ],
+  "guarantee_insurance_patterns": [
+    "(?i)seguro\\s+de\\s+responsabilidad",
+    "(?i)fianza\\s+de\\s+(cumplimiento|seriedad|anticipo)",
+    "(?i)garant[ií]a\\s+de\\s+(cumplimiento|seriedad|anticipo)",
+    "(?i)cobertura\\s+m[ií]nima\\s+de\\s+\\$"
+  ],
+  "ambiguous_presupuesto_patterns": [],
+  "exclude_from_forensic_risks_subtypes": [
+    "convocante_budget",
+    "bases_coherence_hint",
+    "session_canonical_hint"
+  ],
+  "prefix_subtypes": {
+    "[Bases]": "bases_coherence_hint",
+    "[Partidas": "session_canonical_hint",
+    "[Canónico]": "session_canonical_hint",
+    "[Cuadratura]": "session_canonical_hint"
+  },
+  "conversational_templates": {
+    "offer_floor": "El riesgo detectado se refiere a que las bases exigen un piso de oferta de al menos {amount}{currency_suffix}. Lo marqué como riesgo para que tu propuesta económica quede por encima de ese mínimo; de lo contrario podrías quedar fuera por incumplir una condición económica.{page_block}",
+    "ambiguous_presupuesto": "El riesgo detectado menciona un monto de presupuesto ({amount}{currency_suffix}) y conviene aclarar en las bases si es piso de tu oferta o presupuesto autorizado del convocante. Lo marqué como riesgo para que revises el párrafo completo antes de cerrar tu propuesta.{page_block}",
+    "convocante_budget": "El fragmento indexado describe presupuesto o recursos del convocante ({amount}{currency_suffix}), no necesariamente un piso de tu oferta. Revisa el contexto en las bases para no confundirlo con tu propuesta económica.{page_block}",
+    "guarantee_insurance": "El riesgo detectado exige acreditar una garantía o seguro con requisitos económicos mínimos. Lo marqué como riesgo para que prepares la fianza o póliza correspondiente en el sobre administrativo.{page_block}",
+    "knockout_causal": "El riesgo detectado corresponde a una causa de desechamiento en las bases: «{literal}». Si no lo acreditas documentalmente, puedes quedar fuera del procedimiento.{page_block}",
+    "economic_alert": "El riesgo detectado se refiere a: «{literal}». Lo marqué como riesgo porque puede afectar la validez o competitividad de tu oferta si no lo atiendes.{page_block}",
+    "page_block_with_page": " Puedes leer el párrafo completo en las bases que subiste: ve a la página {page}.{snippet_block}",
+    "page_block_without_page": " Este aviso lo generó el análisis económico (no es cita literal del PDF). Si no aparece el párrafo indexado, abre las bases y busca el monto {amount}{currency_suffix} con términos como «presupuesto», «propuesta mínima» o «importe mínimo».",
+    "snippet_block": " Fragmento indexado: «{snippet}»."
+  },
+  "llm_refine_system_prompt": "Eres un asistente de licitaciones. Reescribe en español claro (2-3 oraciones) la explicación del riesgo usando SOLO el literal del dictamen, el fragmento citado y la página indicada en el borrador. PROHIBIDO inventar nombres de dependencias, municipios o convocantes que no aparezcan en el fragmento. PROHIBIDO cambiar el número de página: si el borrador cita una página, repítela exactamente; si no hay página verificada, NO cites ninguna página. No uses viñetas ni encabezados markdown."
+}

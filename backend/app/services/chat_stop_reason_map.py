@@ -61,6 +61,14 @@ _BANNED_USER_PATTERNS = (
     re.compile(r"\bstop_reason\b", re.I),
     re.compile(r"\b\d{2,4}\s+ítems\b", re.I),
     re.compile(r"\b\d{2,4}\s+items\b", re.I),
+    re.compile(r"\*\*RESPUESTA DIRECTA AL USUARIO\*\*", re.I),
+    re.compile(r"RESPUESTA DIRECTA AL USUARIO", re.I),
+    re.compile(r"\*\*ALERTA DE BRECHA ECON[ÓO]MICA\*\*", re.I),
+    re.compile(r"ALERTA DE BRECHA ECON[ÓO]MICA", re.I),
+    re.compile(r"^### \d+\)", re.M),
+    re.compile(r"\[FUENTE:", re.I),
+    re.compile(r"\[INSTRUCCIÓN PROPUESTA ECONÓMICA", re.I),
+    re.compile(r"\[INSTRUCCIÓN PROPUESTA ECONOMICA", re.I),
 )
 
 

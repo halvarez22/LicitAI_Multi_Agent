@@ -127,6 +127,12 @@ const ExportPDF = ({ auditResults, sessionId }) => {
             veredicto,
             riesgos,
             totalRequisitos,
+            obligacionesDetectadas,
+            archivalCount,
+            totalRequisitosLegacy,
+            uxGuiaUsuario,
+            extractionHealth,
+            forensicAuditHealth,
             causales,
             compliancePorZona,
             extracted_data: analysis,
@@ -139,6 +145,8 @@ const ExportPDF = ({ auditResults, sessionId }) => {
             reqTecnico = [],
             reqFormatos = [],
         } = auditResults;
+
+        const obligaciones = obligacionesDetectadas ?? totalRequisitos ?? (causales || []).length;
 
         const porZona = compliancePorZona || {};
         const allCompliance = (causales || []).filter((c) => c.category === 'compliance');
@@ -372,12 +380,22 @@ const ExportPDF = ({ auditResults, sessionId }) => {
     <div class="status-label">${displayStatus}</div>
     <div class="status-meta">
         Dictamen generado por agentes IA &nbsp;|&nbsp;
-        ${totalRequisitos} requisitos analizados &nbsp;|&nbsp;
+        ${obligaciones} obligaciones detectadas &nbsp;|&nbsp;
         ${riesgos} hallazgos de riesgo detectados
+        ${totalRequisitosLegacy != null && totalRequisitosLegacy !== obligaciones
+            ? ` &nbsp;|&nbsp; ${archivalCount || 0} archivados de ${totalRequisitosLegacy} totales`
+            : ''}
     </div>
 </div>
 
 <div class="content">
+
+    ${uxGuiaUsuario
+        ? `<div class="zone-flag" style="border-left-color:#38bdf8;"><strong>Guía:</strong> ${escapeHtml(uxGuiaUsuario)}</div>`
+        : ''}
+    ${extractionHealth?.status || forensicAuditHealth?.status
+        ? `<div class="zone-flag" style="border-left-color:#64748b;"><strong>Salud:</strong> Lectura ${escapeHtml(extractionHealth?.status || '—')} · Auditoría ${escapeHtml(forensicAuditHealth?.status || '—')}</div>`
+        : ''}
 
     <div class="veredicto-box">
         <h3 style="font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 8px;">Veredicto del sistema</h3>
@@ -388,8 +406,8 @@ const ExportPDF = ({ auditResults, sessionId }) => {
 
     <div class="stats">
         <div class="stat-box">
-            <div class="stat-label">Total hallazgos</div>
-            <div class="stat-value">${totalRequisitos}</div>
+            <div class="stat-label">Obligaciones detectadas</div>
+            <div class="stat-value">${obligaciones}</div>
         </div>
         <div class="stat-box">
             <div class="stat-label">Ítems de riesgo</div>

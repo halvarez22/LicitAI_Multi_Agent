@@ -81,10 +81,17 @@ class GoNoGoAgent(BaseAgent):
             baseline_for_atenuadas = agent_input.company_data.get(
                 "go_no_go_baseline_master_profile"
             )
+            from app.services.dictamen_curation_service import session_convocante_from_state
+
+            session_convocante = session_convocante_from_state(session_state)
 
             # Detectar brechas
             try:
-                brechas = detect_brechas(compliance_data, master_profile)
+                brechas = detect_brechas(
+                    compliance_data,
+                    master_profile,
+                    session_convocante=session_convocante,
+                )
             except Exception as exc:
                 logger.error(
                     "go_no_go_detect_brechas_failed",
@@ -120,6 +127,7 @@ class GoNoGoAgent(BaseAgent):
                 baseline_profile=baseline_for_atenuadas
                 if isinstance(baseline_for_atenuadas, dict)
                 else None,
+                session_convocante=session_convocante,
             )
             result_data = _build_result(brechas, semaforo, score_result, atenuadas)
 
@@ -192,6 +200,7 @@ def _count_brechas_atenuadas_por_evidencia_sesion(
     compliance_data: Dict[str, Any],
     brechas_efectivo: List[Brecha],
     baseline_profile: Optional[Dict[str, Any]],
+    session_convocante: Optional[Dict[str, str]] = None,
 ) -> int:
     """Cuenta brechas que dejarían de reportarse al usar solo el maestro vs. el perfil ya evaluado.
 
@@ -209,7 +218,11 @@ def _count_brechas_atenuadas_por_evidencia_sesion(
     if baseline_profile is None:
         return 0
     try:
-        brechas_base = detect_brechas(compliance_data, baseline_profile)
+        brechas_base = detect_brechas(
+            compliance_data,
+            baseline_profile,
+            session_convocante=session_convocante,
+        )
         return max(0, len(brechas_base) - len(brechas_efectivo))
     except Exception:
         return 0

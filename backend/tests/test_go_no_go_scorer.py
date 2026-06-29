@@ -325,3 +325,36 @@ def test_property_4_perfil_vacio_requisito_no_acreditado(compliance_data):
             f"Con perfil vacío, valor_empresa debe ser None, got {b.valor_empresa!r}"
         )
         assert b.categoria in _CATEGORIAS_VALIDAS, f"Categoría inválida: {b.categoria}"
+
+
+def test_detect_brechas_excludes_convocante_preamble():
+    """Go/No-Go no debe tratar preámbulo del convocante como brecha del licitante."""
+    compliance = {
+        "summary": {"causas_desechamiento": []},
+        "administrativo": [
+            {
+                "descripcion": (
+                    "Que es una persona moral legalmente constituida conforme a las leyes mexicanas, "
+                    "según lo acredita con el testimonio de la Escritura Pública No. 19687"
+                ),
+            },
+            {
+                "descripcion": (
+                    "F) Que Señala como su domicilio el ubicado en Palacio Municipal S/N, "
+                    "Col. Centro C.P. 37000"
+                ),
+            },
+            {
+                "descripcion": (
+                    "Tiene capacidad jurídica para suscribir el presente contrato y está facultado "
+                    "para representarla legalmente en este acto"
+                ),
+            },
+            {"descripcion": "El licitante deberá presentar acta constitutiva notariada"},
+        ],
+        "tecnico": [],
+        "formatos": [],
+    }
+    brechas = detect_brechas(compliance, {})
+    assert len(brechas) == 1
+    assert "acta constitutiva" in brechas[0].requisito_bases.lower()

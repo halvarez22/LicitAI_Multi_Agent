@@ -232,11 +232,23 @@ class ChatbotRAGAgent(BaseAgent):
             warnings = int(f_hint.get("warning_count", 0) or 0)
             issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
             if blocking > 0 or warnings > 0:
+                from app.services.obra_chat_queue_policy import (
+                    filter_obra_fill_quality_issues,
+                    obra_fill_quality_needs_chat_capture,
+                )
+
+                issues_norm = filter_obra_fill_quality_issues(list(issues), session_state)
+                if issues_norm and not obra_fill_quality_needs_chat_capture(
+                    issues_norm, session_state
+                ):
+                    return out
                 if issues:
                     from app.services.document_fill_ux_messages import build_fill_blocking_question
 
                     stage = str(f_hint.get("stage") or "technical")
-                    question = build_fill_blocking_question(stage, issues)
+                    question = build_fill_blocking_question(
+                        stage, issues_norm or issues, session_state=session_state
+                    )
                 else:
                     question = (
                         "Al armar los documentos me faltan **datos de tu empresa** (RFC, representante legal, "
@@ -953,10 +965,14 @@ Genera el mensaje conversacional para solicitar este dato."""
         return base
 
     @staticmethod
-    def _compute_pending_progress(pending: List[Dict[str, Any]], current_idx: int) -> Dict[str, Any]:
+    def _compute_pending_progress(
+        pending: List[Dict[str, Any]],
+        current_idx: int,
+        session_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         from app.services.hitl_queue_service import sanitize_chat_pending_questions
 
-        chat_pending = sanitize_chat_pending_questions(pending or [])
+        chat_pending = sanitize_chat_pending_questions(pending or [], session_state)
         total = len(chat_pending)
         if total <= 0:
             return {"progress_current": 0, "progress_total": 0, "progress_label": "Sin pendientes"}
@@ -1075,6 +1091,47 @@ Genera el mensaje conversacional para solicitar este dato."""
                       "buenas noches", "buenos dias", "buenos días", "hey",
                       "buen dia", "buen día"}
         _is_bootstrap_query = user_query.lower() in _GREETINGS
+
+        # Respuesta anclada para consultas desde el panel de riesgos forenses (HRU).
+        _risk_ctx = agent_input.company_data.get("forensic_risk_context")
+        if user_query and isinstance(_risk_ctx, dict) and _risk_ctx:
+            try:
+                from app.services.forensic_risk_chat_service import try_answer_forensic_risk_question
+
+                _session_for_risk = await self.context_manager.memory.get_session(session_id) or {}
+                _risk_ctx = {**_risk_ctx, "force_grounded": True, "session_id": session_id}
+                grounded = await try_answer_forensic_risk_question(
+                    user_query,
+                    _risk_ctx,
+                    session_id=session_id,
+                    memory=self.context_manager.memory,
+                    session_state=_session_for_risk,
+                )
+                if grounded:
+                    if isinstance(grounded, dict):
+                        reply_text = grounded.get("respuesta") or ""
+                        extra = {
+                            k: v for k, v in grounded.items()
+                            if k != "respuesta"
+                        }
+                    else:
+                        reply_text = str(grounded)
+                        extra = {}
+                    await self._save_chat_history(session_id, user_query, reply_text)
+                    return AgentOutput(
+                        status=AgentStatus.SUCCESS,
+                        agent_id=self.agent_id,
+                        session_id=session_id,
+                        data={"respuesta": reply_text, "grounded_forensic_risk": True, **extra},
+                        message=reply_text,
+                        correlation_id=correlation_id,
+                    )
+            except Exception as _risk_chat_exc:
+                logger.warning(
+                    "forensic_risk_grounded_chat_skip session=%s err=%s",
+                    session_id,
+                    _risk_chat_exc,
+                )
         
         # --- C04: COMPLIANCE GATE (Sensor Asíncrono) ---
         # Si el análisis de cumplimiento está en curso, devolvemos PENDING.
@@ -1108,15 +1165,23 @@ Genera el mensaje conversacional para solicitar este dato."""
         # =====================================================================
         if _is_bootstrap_query:
             _state_for_resume = await self.context_manager.memory.get_session(session_id) or {}
-            # Si hay preguntas pendientes, NO mostrar session_resume: el flujo
-            # secuencial de pending_questions tiene prioridad (Req 2.3, 4.1).
             from app.services.hitl_queue_service import sanitize_chat_pending_questions
 
-            _has_pending_for_resume = bool(
-                sanitize_chat_pending_questions(
-                    _state_for_resume.get("pending_questions") or []
-                )
-            )
+            _raw_pending = list(_state_for_resume.get("pending_questions") or [])
+            _san_pending = sanitize_chat_pending_questions(_raw_pending, _state_for_resume)
+            if _san_pending != _raw_pending:
+                _state_for_resume["pending_questions"] = _san_pending
+                _state_for_resume["current_question_index"] = 0
+                if not _san_pending:
+                    _state_for_resume["intake_progress"] = {
+                        "started": False,
+                        "accepted": False,
+                        "remaining": 0,
+                        "total": 0,
+                    }
+                await self.context_manager.memory.save_session(session_id, _state_for_resume)
+
+            _has_pending_for_resume = bool(_san_pending)
             if not _has_pending_for_resume:
                 _eco_ready_resume = self._maybe_economic_capture_complete_message(
                     session_id=session_id,
@@ -1156,8 +1221,16 @@ Genera el mensaje conversacional para solicitar este dato."""
                     _resume_actions = []
                     if self._bases_analysis_phase(_state_for_resume) == "complete":
                         _resume_actions = [
-                            {"label": "Generar Propuesta Economica", "payload": "CMD_TRIGGER_GENERATION", "style": "primary"},
-                            {"label": "Ver Requisitos Administrativos", "payload": "CMD_SHOW_PENDING_DOCS", "style": "secondary"},
+                            {
+                                "label": "Ver Formatos y Anexos",
+                                "payload": "CMD_SHOW_PENDING_DOCS",
+                                "style": "primary",
+                            },
+                            {
+                                "label": "Generar expediente",
+                                "payload": "CMD_TRIGGER_GENERATION",
+                                "style": "secondary",
+                            },
                         ]
 
                     return self._format_response(
@@ -1233,7 +1306,7 @@ Genera el mensaje conversacional para solicitar este dato."""
         _pending_sanitized = await self._sanitize_economic_pending_questions(session_id, session_state)
         from app.services.hitl_queue_service import sanitize_chat_pending_questions
 
-        _pending_sanitized = sanitize_chat_pending_questions(_pending_sanitized)
+        _pending_sanitized = sanitize_chat_pending_questions(_pending_sanitized, session_state)
         if _pending_sanitized != _pending_before_sanitize:
             session_state["pending_questions"] = _pending_sanitized
             session_state["current_question_index"] = 0
@@ -1528,7 +1601,7 @@ Genera el mensaje conversacional para solicitar este dato."""
         if pending_questions:
             from app.services.hitl_queue_service import sanitize_chat_pending_questions
 
-            chat_pending = sanitize_chat_pending_questions(pending_questions)
+            chat_pending = sanitize_chat_pending_questions(pending_questions, session_state)
             if len(chat_pending) != len(pending_questions):
                 session_state["pending_questions"] = chat_pending
                 pending_questions = chat_pending
@@ -1537,7 +1610,7 @@ Genera el mensaje conversacional para solicitar este dato."""
                 current_idx = self._resolve_resume_pointer(session_state, chat_pending, current_idx)
                 session_state["current_question_index"] = current_idx
                 prog = dict(session_state.get("intake_progress") or {})
-                p = self._compute_pending_progress(chat_pending, current_idx)
+                p = self._compute_pending_progress(chat_pending, current_idx, session_state)
                 prog.update(
                     {
                         "started": bool(prog.get("started", False)) or any(
@@ -1584,6 +1657,40 @@ Genera el mensaje conversacional para solicitar este dato."""
 
         # Corrección post-entrega de precios (Ítem B): antes de RAG y sin depender de pending económico.
         if user_query and company_id:
+            from app.services.chat_economic_provenance_service import (
+                build_economic_provenance_message,
+                detect_economic_provenance_intent,
+            )
+
+            _prov_mode = detect_economic_provenance_intent(user_query)
+            if _prov_mode:
+                _prov_msg = build_economic_provenance_message(
+                    session_state,
+                    session_id=session_id,
+                    mode=_prov_mode,
+                )
+                if _prov_msg:
+                    await self._save_chat_history(session_id, user_query, _prov_msg)
+                    return self._format_response(
+                        session_id=session_id,
+                        correlation_id=correlation_id,
+                        respuesta=_prov_msg,
+                        confianza="Alta",
+                        tipo="economic_provenance_hru",
+                        suggested_actions=[
+                            {
+                                "label": "Ver Formatos y Anexos",
+                                "payload": "CMD_SHOW_PENDING_DOCS",
+                                "style": "primary",
+                            },
+                            {
+                                "label": "Generar expediente",
+                                "payload": "CMD_TRIGGER_GENERATION",
+                                "style": "secondary",
+                            },
+                        ],
+                    )
+
             _corr_out = await self._try_price_correction_channel(
                 session_id=session_id,
                 session_state=session_state,
@@ -2228,6 +2335,19 @@ Genera el mensaje conversacional para solicitar este dato."""
                         or self._detect_cronogram_intent(user_query)
                     )
                     if not skip_reminder:
+                        from app.services.chat_fill_quality_queue_policy import (
+                            should_skip_fill_quality_rag_reminder,
+                        )
+
+                        if should_skip_fill_quality_rag_reminder(q, session_state):
+                            skip_reminder = True
+                        elif (
+                            str(q.get("type") or "") == "quality_validation_blocking"
+                            and str(q.get("label") or "").strip().lower()
+                            == "datos para llenar documentos"
+                        ):
+                            skip_reminder = True
+                    if not skip_reminder:
                         reminder = (
                             f"\n\nPor cierto, sigo atento a lo de: "
                             f"**{label_to_show}**. ¿Qué me puedes decir de eso?"
@@ -2391,6 +2511,23 @@ Genera el mensaje conversacional para solicitar este dato."""
                 logger.info(f"[Chatbot] Rama DETERMINÍSTICA detectada para: '{user_query}'")
                 return await self._handle_clarification(
                     session_id, pending_questions, correlation_id, current_idx=current_idx
+                )
+
+        if (
+            not pending_questions
+            and user_query
+            and has_real_work_context
+            and self._evaluate_clarification_intent(user_query)
+        ):
+            _fill_clarif = self._maybe_fill_quality_clarification_reply(session_state)
+            if _fill_clarif:
+                await self._save_chat_history(session_id, user_query, _fill_clarif)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=_fill_clarif,
+                    confianza="Alta",
+                    tipo="fill_quality_clarification",
                 )
 
         # Posponer el pendiente actual al final de la cola (HITL: atender otros primero).
@@ -2564,8 +2701,17 @@ Genera el mensaje conversacional para solicitar este dato."""
             from app.services.chat_user_intent import is_bases_query
 
             fresh_s = await self.context_manager.memory.get_session(session_id) or {}
-            p_list = list(fresh_s.get("pending_questions") or pending_questions)
+            raw_pending = list(fresh_s.get("pending_questions") or pending_questions)
+            p_list = await self._sanitize_and_persist_pending(session_id, fresh_s, raw_pending)
             c_idx = int(fresh_s.get("current_question_index") or current_idx)
+            if not p_list:
+                return await self._handle_rag_query(
+                    session_id,
+                    user_query,
+                    [],
+                    correlation_id,
+                    current_idx=0,
+                )
             cur_q = p_list[c_idx] if 0 <= c_idx < len(p_list) else {}
             cur_type = str(cur_q.get("type") or "")
             eco_active_types = (
@@ -2617,12 +2763,61 @@ Genera el mensaje conversacional para solicitar este dato."""
             suggested_actions=suggested_actions
         )
 
+    @staticmethod
+    def _maybe_fill_quality_clarification_reply(session_state: Dict[str, Any]) -> Optional[str]:
+        """Respuesta HRU cuando preguntan qué falta pero la cola chat ya está limpia."""
+        f_hint = session_state.get("last_document_fill_quality_waiting_hints")
+        if not isinstance(f_hint, dict):
+            return None
+        blocking = int(f_hint.get("blocking_count") or 0)
+        warnings = int(f_hint.get("warning_count") or 0)
+        if blocking <= 0 and warnings <= 0:
+            return None
+        issues = f_hint.get("issues")
+        if not isinstance(issues, list) or not issues:
+            return None
+        from app.services.document_fill_ux_messages import build_fill_blocking_question
+
+        return build_fill_blocking_question(
+            str(f_hint.get("stage") or "formats"),
+            issues,
+            session_state=session_state,
+        )
+
+    async def _sanitize_and_persist_pending(
+        self,
+        session_id: str,
+        session_state: Dict[str, Any],
+        pending: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Aplica política HRU de cola chat y persiste si cambió."""
+        from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+        sanitized = sanitize_chat_pending_questions(pending or [], session_state)
+        if sanitized != list(pending or []):
+            session_state["pending_questions"] = sanitized
+            session_state["current_question_index"] = (
+                0 if sanitized else 0
+            )
+            if not sanitized:
+                session_state["intake_progress"] = {
+                    "started": False,
+                    "accepted": False,
+                    "remaining": 0,
+                    "total": 0,
+                }
+            await self.context_manager.memory.save_session(session_id, session_state)
+        return sanitized
+
     async def _load_fresh_pending_state(
         self, session_id: str, fallback_pending: Optional[List] = None, fallback_idx: int = 0
     ) -> tuple[List, int]:
-        """Lee estado HITL vigente desde DB y normaliza índice de cola."""
+        """Lee estado HITL vigente desde DB, sanitiza y normaliza índice de cola."""
         fresh = await self.context_manager.memory.get_session(session_id) or {}
         p_list = list(fresh.get("pending_questions") or (fallback_pending or []))
+        if not p_list:
+            return [], 0
+        p_list = await self._sanitize_and_persist_pending(session_id, fresh, p_list)
         if not p_list:
             return [], 0
         idx = int(fresh.get("current_question_index") or fallback_idx or 0)
@@ -4710,6 +4905,11 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         Detecta preguntas sobre origen/procedencia de precio.
         Devuelve concepto inferido si se detecta intención, o None.
         """
+        from app.services.chat_economic_provenance_service import detect_economic_provenance_intent
+
+        if detect_economic_provenance_intent(query):
+            return "general"
+
         q = query.strip()
         qn = self._normalize(q)
         has_origin = any(
@@ -4760,6 +4960,28 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         Responde trazabilidad de precios con precedencia:
         chat override > económico normalizado > catálogo empresa.
         """
+        from app.services.chat_economic_provenance_service import (
+            build_economic_provenance_message,
+            detect_economic_provenance_intent,
+        )
+
+        mode = detect_economic_provenance_intent(raw_user_query) or "origin"
+        if concept_hint == "general" or mode in ("total", "catalog", "general"):
+            msg = build_economic_provenance_message(
+                session_state,
+                session_id=session_id,
+                mode=mode if mode != "origin" else "general",
+            )
+            if msg:
+                await self._save_chat_history(session_id, raw_user_query, msg)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=msg,
+                    confianza="Alta",
+                    tipo="economic_provenance_hru",
+                )
+
         target = self._normalize(concept_hint if concept_hint != "general" else "")
         best_chat = None
         best_chat_score = 0.0
@@ -6150,6 +6372,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
     @classmethod
     def _detect_economic_intent(cls, query: str) -> bool:
         """True si la consulta apunta a formato/moneda/discrepancias de la propuesta económica."""
+        from app.services.chat_economic_provenance_service import detect_economic_provenance_intent
+
+        if detect_economic_provenance_intent(query):
+            return False
         if cls._is_economic_generation_command(query):
             return False
         q = cls._normalize_query_for_intent(query)
@@ -8719,46 +8945,62 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         """
         Genera botones de acción dinámicos basados en el estado real de la licitación.
         """
-        actions = []
-        
-        # 1. Si hay pendientes críticos (Must-Haves sin evidencia)
+        from app.services.chat_gate5_formatter import _has_analysis_complete
+        from app.services.hitl_queue_service import sanitize_chat_pending_questions
+
+        pending = sanitize_chat_pending_questions(pending or [], session_state)
+        actions: List[Dict[str, Any]] = []
+
         has_must_haves_pending = any(
-            str(q.get("type")) == "intake_planner" or q.get("is_blocking") 
+            str(q.get("type")) == "intake_planner" or q.get("is_blocking")
             for q in pending
         )
-        if has_must_haves_pending:
-            actions.append({
-                "label": "🧐 Ver Requisitos Pendientes",
-                "payload": "CMD_SHOW_PENDING_DOCS",
-                "style": "primary"
-            })
-
-        # 2. Si faltan precios (bloqueo económico)
         has_economic_pending = any(
             str(q.get("type")) in ("economic_price", "economic_validation_blocking")
             for q in pending
         )
+
+        if _has_analysis_complete(session_state) and not has_must_haves_pending and not has_economic_pending:
+            return [
+                {
+                    "label": "Ver Formatos y Anexos",
+                    "payload": "CMD_SHOW_PENDING_DOCS",
+                    "style": "primary",
+                },
+                {
+                    "label": "Generar expediente",
+                    "payload": "CMD_TRIGGER_GENERATION",
+                    "style": "secondary",
+                },
+            ]
+
+        if has_must_haves_pending:
+            actions.append({
+                "label": "🧐 Ver Requisitos Pendientes",
+                "payload": "CMD_SHOW_PENDING_DOCS",
+                "style": "primary",
+            })
+
         if has_economic_pending:
             actions.append({
                 "label": "💰 Capturar Precios",
                 "payload": "CMD_SHOW_ECONOMIC_VALS",
-                "style": "secondary"
+                "style": "secondary",
             })
 
-        # 3. Si todo está listo (o casi listo), sugerir generación
         if not pending or (len(pending) < 3 and not has_must_haves_pending):
             actions.append({
                 "label": "🚀 Generar Propuesta",
                 "payload": "CMD_TRIGGER_GENERATION",
-                "style": "primary"
+                "style": "primary",
             })
 
-        # Siempre permitir ver el dictamen
-        actions.append({
-            "label": "📋 Ver Dictamen Forense",
-            "payload": "CMD_SHOW_FORENSIC",
-            "style": "secondary"
-        })
+        if has_must_haves_pending or has_economic_pending:
+            actions.append({
+                "label": "📋 Ver Dictamen Forense",
+                "payload": "CMD_SHOW_FORENSIC",
+                "style": "secondary",
+            })
 
         return actions
 
@@ -10113,15 +10355,19 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         q = pending[idx]
         ft = str(q.get("field") or q.get("field_target") or "")
         if str(q.get("type")) == "quality_validation_blocking" and ft == "quality.fill.review":
-            resp = str(q.get("question") or "").strip()
-            if not resp:
-                session_state = await self.context_manager.memory.get_session(session_id) or {}
-                f_hint = session_state.get("last_document_fill_quality_waiting_hints") or {}
-                issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
-                if issues:
-                    from app.services.document_fill_ux_messages import build_fill_blocking_question
+            session_state = await self.context_manager.memory.get_session(session_id) or {}
+            f_hint = session_state.get("last_document_fill_quality_waiting_hints") or {}
+            issues = f_hint.get("issues") if isinstance(f_hint.get("issues"), list) else []
+            if issues:
+                from app.services.document_fill_ux_messages import build_fill_blocking_question
 
-                    resp = build_fill_blocking_question(str(f_hint.get("stage") or "technical"), issues)
+                resp = build_fill_blocking_question(
+                    str(f_hint.get("stage") or "technical"),
+                    issues,
+                    session_state=session_state,
+                )
+            else:
+                resp = str(q.get("question") or "").strip()
             await self._save_chat_history(session_id, "Solicitud de aclaración sobre pendientes", resp)
             return self._format_response(session_id, correlation_id, resp, tipo="clarification_answer")
         if str(q.get("type")) == "economic_validation_blocking":
@@ -10699,7 +10945,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             except Exception:
                 experience_summary = None
         fresh_question = build_fill_blocking_question(
-            stage, issues, experience_summary=experience_summary
+            stage, issues, experience_summary=experience_summary, session_state=session_state
         )
         updated: List[Dict[str, Any]] = []
         kept_fill = False

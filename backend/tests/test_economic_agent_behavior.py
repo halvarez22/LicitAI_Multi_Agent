@@ -572,8 +572,12 @@ async def test_alertas_contexto_bases_en_salida_y_waiting():
 
     assert out_ok.status == AgentStatus.SUCCESS
     alerts = out_ok.data["analisis_precios"]["alertas"]
-    assert any("Ingerir Excel" in a for a in alerts)
-    assert any("criterio_importe_minimo" in a for a in alerts)
+    alert_texts = [
+        (a.get("texto") if isinstance(a, dict) else str(a))
+        for a in alerts
+    ]
+    assert any("Ingerir Excel" in t for t in alert_texts)
+    assert any("criterio_importe_minimo" in t for t in alert_texts)
 
     gap_payload = '{"items": [{"concepto": "X", "cantidad": 1, "precio_unitario": 0, "subtotal": 0, "status": "price_missing"}]}'
     with (

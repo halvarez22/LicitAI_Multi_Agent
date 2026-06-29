@@ -201,12 +201,20 @@ class DataGapAgent(BaseAgent):
                 seen.add(fk)
         for s in sorted(mapped_inferred_slots):
             if s not in seen:
+                from app.services.obra_chat_queue_policy import should_skip_datagap_field_for_session
+
+                if should_skip_datagap_field_for_session(s, session_state):
+                    continue
                 active_fields.append(s)
                 seen.add(s)
 
         print(f"[DataGap] 🧩 Campos activos (bloqueantes + inferidos desde compliance): {active_fields}")
 
         for field_key in active_fields:
+            from app.services.obra_chat_queue_policy import should_skip_datagap_field_for_session
+
+            if should_skip_datagap_field_for_session(field_key, session_state):
+                continue
             # Obtener definición (si no existe, crear una genérica básica)
             field_def = self.FIELD_DEFINITIONS.get(field_key, {
                 "label": field_key.replace("_", " ").title(),
@@ -257,6 +265,13 @@ class DataGapAgent(BaseAgent):
         # 2. missing_blocking debe ser subconjunto de missing
         missing_field_keys = {m["field"] for m in missing_fields}
         missing_blocking_fields = [f for f in missing_blocking_fields if f in missing_field_keys]
+
+        from app.services.obra_chat_queue_policy import sanitize_obra_chat_pending_questions
+
+        missing_fields = sanitize_obra_chat_pending_questions(missing_fields, session_state)
+        missing_blocking_fields = [
+            f for f in missing_blocking_fields if f in {m["field"] for m in missing_fields}
+        ]
 
         # Guardar campos auto-completados en la BD
         if auto_filled and company_id:
@@ -705,8 +720,12 @@ class DataGapAgent(BaseAgent):
     async def _save_pending_questions(self, session_id: str, missing_fields: List[Dict]):
         """Guarda las preguntas pendientes en la sesión para que el chatbot las gestione."""
         try:
+            from app.services.hitl_queue_service import normalize_pending_queue
+            from app.services.obra_chat_queue_policy import sanitize_obra_chat_pending_questions
+
             session_state = await self.context_manager.memory.get_session(session_id) or {}
-            session_state["pending_questions"] = missing_fields
+            filtered = sanitize_obra_chat_pending_questions(missing_fields, session_state)
+            session_state["pending_questions"] = normalize_pending_queue(filtered)
             session_state["current_question_index"] = 0
             await self.context_manager.memory.save_session(session_id, session_state)
         except Exception as e:

@@ -118,24 +118,14 @@ async def main(session_id: str) -> int:
         base = Path("/data/outputs") / session_id
         dirs = [
             base / "SOBRE_3_ECONOMICO",
+            base / "2.propuesta_economica",
             base / "propuesta_economica",
+            base / "3.documentos administrativos",
             base / "_compranet_validated" / "SobreEconomica",
         ]
         all_renamed: List[Dict[str, str]] = []
         for d in dirs:
             all_renamed.extend(_rename_in_dir(d, doc_meta, state, session_id))
-
-        # Renombrar fuente de generación si aplica
-        for src in base.rglob("*"):
-            if not src.is_file() or src.suffix.lower() not in (".docx", ".xlsx"):
-                continue
-            if _OCR_NOISE_RE.search(src.name):
-                dest_name = _target_name(doc_meta, state, session_id, src.name)
-                if dest_name != src.name:
-                    dest = src.with_name(dest_name)
-                    if not dest.exists():
-                        src.rename(dest)
-                        all_renamed.append({"from": src.name, "to": dest_name, "dir": str(src.parent)})
 
         print({"session_id": session_id, "renamed": all_renamed, "count": len(all_renamed)})
         return 0 if all_renamed else 1

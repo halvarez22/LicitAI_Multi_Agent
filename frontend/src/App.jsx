@@ -18,6 +18,9 @@ import ExportPDF from './components/ExportPDF';
 import LicitacionesGrid from './components/LicitacionesGrid';
 import GoNoGoPanel from './components/GoNoGoPanel';
 import ForensicCard from './components/ForensicCard';
+import ForensicRiskPanel from './components/ForensicRiskPanel';
+import ForensicBasesExcerptCard from './components/ForensicBasesExcerptCard';
+import ForensicEvidenceBadge from './components/ForensicEvidenceBadge';
 import ValidationAlert from './components/ValidationAlert';
 import JustificationModal from './components/JustificationModal';
 import ValidationPolicyAdmin from './components/ValidationPolicyAdmin';
@@ -32,12 +35,14 @@ import { useValidationManager } from './hooks/useValidationManager';
 import {
     processAuditResults,
     ZONA_TAB_ORDER,
+    buildCompliancePorZona,
     enrichDictamenFromStorage,
     applyInfrastructureUxOverrides,
     synthesizePipelineTelemetryFromDictamen,
     pickDocumentCandidatesForPanel,
     pickDetectedFormatsForPanel,
 } from './utils/auditSummary';
+import { resolveForensicRisksBlock } from './utils/forensicRiskUtils.js';
 import { LICITAI_APP_VERSION } from './appVersion.js';
 import { API_BASE } from './apiBase.js';
 // Interceptor global para atrapar caídas de servidor y evitar UI rota/ERR_EMPTY_RESPONSE
@@ -555,22 +560,72 @@ function formatGenerationStateJobsSummary(generationState) {
 }
 
 // --- Sub-componente para mostrar resultados de auditoría ---
-const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
+const AnalysisResults = ({ results, onAskExpert, onAskRiskExpert, sessionId, companyId, onRiskDecisionsUpdated, onRiskBatchStop }) => {
     const [activeZoneTab, setActiveZoneTab] = useState('all');
     const [expandedKey, setExpandedKey] = useState(null);
+    const [showArchivoCompleto, setShowArchivoCompleto] = useState(false);
+    const [showRiskPanel, setShowRiskPanel] = useState(true);
 
     useEffect(() => {
         setExpandedKey(null);
-    }, [activeZoneTab]);
+    }, [activeZoneTab, showArchivoCompleto]);
+
+    useEffect(() => {
+        if ((results?.riesgos ?? 0) > 0) setShowRiskPanel(true);
+    }, [results?.riesgos, results?.fechaAuditoria]);
 
     if (!results) return null;
 
-    const porZona = results.compliancePorZona || {};
-    const allCompliance = results.causales.filter((c) => c.category === 'compliance');
-    const otrosHallazgos = results.causales.filter((c) => c.category !== 'compliance');
+    const forensicRisksBlock = resolveForensicRisksBlock(results);
+    const riskCount = forensicRisksBlock?.stats?.total ?? results.riesgos ?? 0;
+
+    const displayCausales = showArchivoCompleto
+        ? [
+            ...(results.causales || []),
+            ...(results.causalesArchival || []),
+        ]
+        : (results.causales || []);
+
+    const porZona = showArchivoCompleto
+        ? buildCompliancePorZona(displayCausales.filter((c) => c.category === 'compliance'))
+        : (results.compliancePorZona || {});
+    const allCompliance = displayCausales.filter((c) => c.category === 'compliance');
+    const otrosHallazgos = displayCausales.filter((c) => c.category !== 'compliance' && !c.isRisk);
     const visibleCompliance =
         activeZoneTab === 'all' ? allCompliance : porZona[activeZoneTab] || [];
     const otrasZonasList = porZona._OTRAS_ZONAS || [];
+    const obligacionesCount =
+        results.obligacionesDetectadas ?? results.totalRequisitos ?? displayCausales.length;
+    const archivalCount = results.archivalCount ?? (results.causalesArchival || []).length;
+    const legacyTotal = results.totalRequisitosLegacy ?? null;
+
+    const healthChip = (label, health) => {
+        const st = String(health?.status || 'unknown').toLowerCase();
+        let color = '#94a3b8';
+        if (st === 'ok' || st === 'success') color = '#2ecc71';
+        else if (st === 'degraded' || st === 'partial') color = '#f39c12';
+        else if (st === 'failed' || st === 'fail' || st === 'error') color = '#e74c3c';
+        return (
+            <div
+                key={label}
+                style={{
+                    flex: 1,
+                    minWidth: 0,
+                    padding: '8px 10px',
+                    borderRadius: '10px',
+                    background: 'rgba(255,255,255,0.03)',
+                    border: `1px solid ${color}55`,
+                }}
+            >
+                <div style={{ fontSize: '8px', fontWeight: 800, color: 'var(--text-muted)', letterSpacing: '0.4px' }}>
+                    {label}
+                </div>
+                <div style={{ fontSize: '11px', fontWeight: 800, color, marginTop: '4px', textTransform: 'uppercase' }}>
+                    {st}
+                </div>
+            </div>
+        );
+    };
     const tabBtn = (id, label, count, isActive) => (
         <button
             type="button"
@@ -640,6 +695,17 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
                 </div>
             )}
 
+            {(results.extractionHealth || results.forensicAuditHealth) && (
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                    {results.extractionHealth
+                        ? healthChip('Lectura de bases', results.extractionHealth)
+                        : null}
+                    {results.forensicAuditHealth
+                        ? healthChip('Auditoría forense', results.forensicAuditHealth)
+                        : null}
+                </div>
+            )}
+
             <div style={{ marginBottom: '20px', padding: '15px', borderRadius: '15px', background: 'rgba(0,0,0,0.3)', border: `1px solid ${results.statusColor || 'rgba(255,255,255,0.02)'}` }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
                     <div style={{ fontSize: '14px', fontWeight: 900, color: results.statusColor || '#2ecc71' }}>{results.status || "✅ COMPLETADO"}</div>
@@ -657,16 +723,102 @@ const AnalysisResults = ({ results, onAskExpert, sessionId, companyId }) => {
                 )}
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
                 <div className="audit-widget">
-                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontWeight: 800 }}>REQUISITOS (TOTAL)</div>
-                    <div style={{ fontSize: '24px', fontWeight: 900 }}>{results.totalRequisitos}</div>
+                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontWeight: 800 }}>OBLIGACIONES DETECTADAS</div>
+                    <div style={{ fontSize: '24px', fontWeight: 900 }}>{obligacionesCount}</div>
+                    {legacyTotal != null && legacyTotal !== obligacionesCount && (
+                        <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                            {archivalCount} archivados · {legacyTotal} en archivo forense completo
+                        </div>
+                    )}
                 </div>
-                <div className="audit-widget">
+                <div
+                    className="audit-widget"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                        setShowRiskPanel(true);
+                        document.getElementById('forensic-risk-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            setShowRiskPanel(true);
+                            document.getElementById('forensic-risk-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    }}
+                    style={{
+                        cursor: riskCount > 0 ? 'pointer' : 'default',
+                        outline: showRiskPanel && riskCount > 0 ? '1px solid rgba(231,76,60,0.45)' : undefined,
+                    }}
+                    title={riskCount > 0 ? 'Ver evaluación de riesgos forenses' : undefined}
+                >
                     <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontWeight: 800 }}>RIESGOS</div>
-                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#ff4d4d' }}>{results.riesgos}</div>
+                    <div style={{ fontSize: '24px', fontWeight: 900, color: '#ff4d4d' }}>{riskCount}</div>
+                    {riskCount > 0 && (
+                        <div style={{ fontSize: '9px', color: '#ff8a8a', marginTop: '4px', fontWeight: 700 }}>
+                            Clic para evaluar
+                        </div>
+                    )}
                 </div>
             </div>
+
+            {showRiskPanel && forensicRisksBlock && (
+                <ForensicRiskPanel
+                    forensicRisks={forensicRisksBlock}
+                    sessionId={sessionId}
+                    onDecisionsUpdated={onRiskDecisionsUpdated}
+                    onAskExpert={onAskExpert}
+                    onAskRiskExpert={onAskRiskExpert}
+                    onBatchStop={onRiskBatchStop}
+                />
+            )}
+
+            {riskCount > 0 && (
+                <div style={{ marginBottom: '12px' }}>
+                    <button
+                        type="button"
+                        onClick={() => setShowRiskPanel((v) => !v)}
+                        style={{
+                            width: '100%',
+                            padding: '8px 10px',
+                            borderRadius: '10px',
+                            border: '1px solid rgba(231,76,60,0.25)',
+                            background: 'rgba(231,76,60,0.08)',
+                            color: '#ffb4b4',
+                            fontSize: '10px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                        }}
+                    >
+                        {showRiskPanel ? 'Ocultar panel de riesgos' : `Mostrar evaluación de ${riskCount} riesgos`}
+                    </button>
+                </div>
+            )}
+
+            {archivalCount > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                    <button
+                        type="button"
+                        onClick={() => setShowArchivoCompleto((v) => !v)}
+                        style={{
+                            width: '100%',
+                            padding: '10px 12px',
+                            borderRadius: '10px',
+                            border: '1px solid rgba(255,255,255,0.12)',
+                            background: showArchivoCompleto ? 'rgba(0, 212, 255, 0.1)' : 'rgba(0,0,0,0.25)',
+                            color: '#e2e8f0',
+                            fontSize: '11px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                        }}
+                    >
+                        {showArchivoCompleto
+                            ? 'Ver solo obligaciones del licitante'
+                            : `Ver archivo forense completo (+${archivalCount} ítems de contexto)`}
+                    </button>
+                </div>
+            )}
 
             {allCompliance.length > 0 && (
                 <div style={{ marginBottom: '16px' }}>
@@ -861,6 +1013,7 @@ const App = () => {
     const uploadAbortControllerRef = useRef(null);
     const chatEndRef = useRef(null);
     const chatInputRef = useRef(null);
+    const pendingForensicRiskContextRef = useRef(null);
     const companySelectRef = useRef(null);
     /** Solo para limpiar claves del Set de módulo al cambiar de sesión. */
     const prevSessionIdForChatBootstrapRef = useRef(null);
@@ -1083,6 +1236,7 @@ const App = () => {
                 // Dictámenes viejos: se guardó "éxito" con 0 ítems al confundir job_id con resultados del orquestador.
                 const looksLikeStaleEnqueueBug =
                     d.dictamen_schema_version !== 2 &&
+                    d.dictamen_schema_version !== 3 &&
                     d.statusRaw === 'success' &&
                     (d.totalRequisitos === 0 || d.totalRequisitos == null) &&
                     (!Array.isArray(d.causales) || d.causales.length === 0);
@@ -1135,6 +1289,9 @@ const App = () => {
                 const inferredTelem = synthesizePipelineTelemetryFromDictamen(enriched);
                 if (inferredTelem) {
                     enriched = { ...enriched, pipelineTelemetry: inferredTelem };
+                }
+                if (res.data.data?.risk_decisions_v1) {
+                    enriched = { ...enriched, risk_decisions_v1: res.data.data.risk_decisions_v1 };
                 }
                 setAuditResults(applyInfrastructureUxOverrides(enriched));
 
@@ -1419,12 +1576,14 @@ const App = () => {
                 ? { metadata: orchestrator.metadata }
                 : {}),
         };
-        const nuevosDictamen = processAuditResults(auditPayload);
-        if (nuevosDictamen) {
-            nuevosDictamen.dictamen_schema_version = 2;
-            nuevosDictamen.fechaAuditoria = new Date().toLocaleString('es-MX');
-            setAuditResults(nuevosDictamen);
-            await saveDictamenToPostgres(nuevosDictamen);
+        if (orchestrator.dictamen && typeof orchestrator.dictamen === 'object') {
+            setAuditResults(applyInfrastructureUxOverrides(enrichDictamenFromStorage(orchestrator.dictamen)));
+        } else {
+            const nuevosDictamen = processAuditResults(auditPayload);
+            if (nuevosDictamen) {
+                nuevosDictamen.fechaAuditoria = new Date().toLocaleString('es-MX');
+                setAuditResults(nuevosDictamen);
+            }
         }
         await fetchDictamen();
         await fetchSubmissionChecklist();
@@ -2372,10 +2531,13 @@ const App = () => {
             confidence: botData.confianza || res.data.confidence,
             tipo: botData.tipo,
             suggestedActions: res.data.suggested_actions || [],
+            basesExcerpt: botData.bases_excerpt_v1 || null,
+            evidenceV1: botData.evidence_v1 || null,
             isGlow:
                 botData.tipo === 'data_saved' ||
                 botData.tipo === 'pending_question' ||
-                botData.tipo === 'economic_price_provenance',
+                botData.tipo === 'economic_price_provenance' ||
+                botData.grounded_forensic_risk === true,
         };
         setChatMessages((prev) => [...prev, botMsg]);
         if (botData.tipo === 'economic_price_provenance') {
@@ -2443,6 +2605,29 @@ const App = () => {
         }
     };
 
+    const handleAskRiskExpert = useCallback((item) => {
+        const literal = item?._literal
+            || (typeof item?.texto === 'object'
+                ? (item.texto?.descripcion || item.texto?.nombre)
+                : item?.texto)
+            || '';
+        pendingForensicRiskContextRef.current = {
+            force_grounded: true,
+            session_id: sessionId || null,
+            risk_id: item?.risk_id || item?.id,
+            literal: String(literal),
+            alert_subtype: item?.alert_subtype || null,
+            risk_reason_ux: item?.risk_reason_ux || null,
+            page: item?.page ?? null,
+            snippet: item?.snippet ?? null,
+            risk_kind: item?.risk_kind || null,
+            risk_severity: item?.risk_severity || null,
+            category: item?.category || null,
+        };
+        setChatInput(`Explícame este riesgo forense y qué hacer: ${literal}`);
+        setTimeout(() => chatInputRef.current?.focus?.(), 120);
+    }, []);
+
     const handleSendMessage = async (e) => {
         if (e) e.preventDefault();
         if (!chatInput.trim()) return;
@@ -2456,15 +2641,18 @@ const App = () => {
         const userMsg = { sender: 'user', text: chatInput };
         setChatMessages(prev => [...prev, userMsg]);
         const queryText = chatInput;
+        const riskContext = pendingForensicRiskContextRef.current;
+        pendingForensicRiskContextRef.current = null;
         setChatInput("");
         setIsThinking(true);
 
-        const pollChatbot = async (query, isRetry = false) => {
+        const pollChatbot = async (query, isRetry = false, forensicRiskContext = null) => {
             try {
                 const res = await axios.post(`${API_BASE}/chatbot/ask`, {
                     query: query,
                     session_id: sessionId,
-                    company_id: selectedCompanyId
+                    company_id: selectedCompanyId,
+                    forensic_risk_context: forensicRiskContext || undefined,
                 });
                 
                 // Si el backend dice 'pending', esperamos y reintentamos (Compliance Gate)
@@ -2475,7 +2663,7 @@ const App = () => {
                     if (!isRetry) {
                         setChatMessages(prev => [...prev, { sender: 'bot', text: msg, isPending: true }]);
                     }
-                    setTimeout(() => pollChatbot(query, true), 3000);
+                    setTimeout(() => pollChatbot(query, true, forensicRiskContext), 3000);
                     return;
                 }
 
@@ -2495,7 +2683,7 @@ const App = () => {
             }
         };
 
-        await pollChatbot(queryText);
+        await pollChatbot(queryText, false, riskContext);
     };
 
     /** Tras guardar un bloque económico: sincroniza cola de pendientes y semáforo con el mismo bootstrap que el chat. */
@@ -2582,7 +2770,7 @@ const App = () => {
                             className="header-summary-badge"
                             title="El total agrupa requisitos de bases, compliance y otros hallazgos. Puede variar si repites el análisis (el modelo no es idéntico cada vez) o si se unifican textos repetidos al cargar el dictamen."
                         >
-                            <div>REQUISITOS: <span className="header-stat">{auditResults.totalRequisitos}</span></div>
+                            <div>OBLIGACIONES: <span className="header-stat">{auditResults.obligacionesDetectadas ?? auditResults.totalRequisitos}</span></div>
                             <div style={{ paddingLeft: '10px', borderLeft: '1px solid rgba(255,255,255,0.1)' }}>RIESGOS: <span className="header-stat risk">{auditResults.riesgos}</span></div>
                         </div>
                     )}
@@ -2857,15 +3045,8 @@ const App = () => {
                                                 percent: u.pct ?? prev.percent,
                                                 currentFile: u.message || prev.currentFile,
                                             }));
-                                        }).then((result) => {
-                                            const auditPayload = { ...result?.data, orchestrator_decision: result?.agent_decision };
-                                            const dictamen = processAuditResults(auditPayload);
-                                            if (dictamen) {
-                                                dictamen.dictamen_schema_version = 2;
-                                                dictamen.fechaAuditoria = new Date().toLocaleString('es-MX');
-                                                setAuditResults(dictamen);
-                                                saveDictamenToPostgres(dictamen);
-                                            }
+                                        }).then(async () => {
+                                            await fetchDictamen();
                                         }).catch((err) => {
                                             pushAssistantGuidance(`Error al reanudar: ${err.message}`, true);
                                         }).finally(() => {
@@ -2881,8 +3062,23 @@ const App = () => {
                             <AnalysisResults
                                 results={auditResults}
                                 onAskExpert={(q) => { setChatInput(q); }}
+                                onAskRiskExpert={handleAskRiskExpert}
                                 sessionId={sessionId}
                                 companyId={selectedCompanyId}
+                                onRiskDecisionsUpdated={(data) => {
+                                    if (!data?.forensic_risks_v1) return;
+                                    setAuditResults((prev) => ({
+                                        ...(prev || {}),
+                                        forensic_risks_v1: data.forensic_risks_v1,
+                                        risk_decisions_v1: data.risk_decisions_v1,
+                                    }));
+                                }}
+                                onRiskBatchStop={() => {
+                                    pushAssistantGuidance(
+                                        'Detuviste el expediente tras revisar riesgos forenses. Corrige documentos o consulta al experto antes de continuar con la generación.',
+                                        true,
+                                    );
+                                }}
                             />
                         )}
                     </div>
@@ -3711,6 +3907,14 @@ const App = () => {
                                                 msg.text
                                             )}
                                         </div>
+                                        {msg.evidenceV1 && (
+                                            <div style={{ marginTop: '8px' }}>
+                                                <ForensicEvidenceBadge evidence={msg.evidenceV1} />
+                                            </div>
+                                        )}
+                                        {msg.basesExcerpt?.available && (
+                                            <ForensicBasesExcerptCard excerpt={msg.basesExcerpt} compact />
+                                        )}
                                         {msg.suggestedActions && msg.suggestedActions.length > 0 && (
                                             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                                                 {msg.suggestedActions.map((action, idx) => (

@@ -324,6 +324,59 @@ class VectorDbServiceClient:
             print(f"ERROR get_sources: {e}")
             return []
 
+    def scan_session_chunks(
+        self,
+        session_id: str,
+        *,
+        source_filter: Optional[str] = None,
+        max_chunks: int = 4000,
+    ) -> List[tuple[str, Dict[str, Any]]]:
+        """Barrido determinista de chunks indexados (fallback cuando falla la búsqueda semántica)."""
+        clean_id = self._sanitize_name(session_id)
+        collection, _ = self._pick_vector_collection(clean_id)
+        if not collection:
+            return []
+        try:
+            if source_filter:
+                where: Dict[str, Any] = {
+                    "$and": [
+                        {"session_id": clean_id},
+                        {"source": source_filter},
+                    ]
+                }
+            else:
+                where = {"session_id": clean_id}
+            res = collection.get(
+                where=where,
+                include=["documents", "metadatas"],
+                limit=max_chunks,
+            )
+            docs = list(res.get("documents") or [])
+            metas = list(res.get("metadatas") or [])
+            return [
+                (str(doc or ""), meta if isinstance(meta, dict) else {})
+                for doc, meta in zip(docs, metas)
+                if doc
+            ]
+        except Exception as e:
+            print(f"ERROR scan_session_chunks: {e}")
+            return []
+
+    def count_session_chunks(self, session_id: str) -> int:
+        clean_id = self._sanitize_name(session_id)
+        collection, _ = self._pick_vector_collection(clean_id)
+        if not collection:
+            return 0
+        try:
+            res = collection.get(where={"session_id": clean_id}, include=[], limit=1)
+            ids = res.get("ids") or []
+            if not ids:
+                return 0
+            full = collection.get(where={"session_id": clean_id}, include=["metadatas"])
+            return len(full.get("ids") or [])
+        except Exception:
+            return 0
+
     def query_texts_filtered(self, session_id: str, query: str, source_filter: str, n_results: int = 20) -> Dict[str, Any]:
         """Búsqueda semántica restringida a un documento específico."""
         clean_id = self._sanitize_name(session_id)

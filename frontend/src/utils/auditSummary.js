@@ -1,3 +1,7 @@
+import { applyDictamenCurationToBase } from './dictamenCuration.js';
+import { buildForensicRisksFromCausales } from './forensicRiskUtils.js';
+import { mapEconomicAlertsToCausales, sanitizeEconomicCausales } from './economicAlertUtils.js';
+
 /**
  * Utilidad para centralizar el procesamiento de resultados de auditoría.
  * Asegura que el conteo de requisitos y hallazgos sea uniforme en toda la aplicación.
@@ -176,7 +180,7 @@ export function dedupeHallazgosList(rawList) {
         const dedupKey =
             h.category === 'compliance'
                 ? `compliance:${contentStr}`
-                : h.id && !h.id.includes('risk-') && !h.id.includes('base-')
+                : h.id && !h.id.includes('risk-') && !h.id.includes('base-') && !h.id.includes('econ-')
                   ? h.id
                   : `${h.category}:${contentStr}`;
 
@@ -212,15 +216,38 @@ function finalizeStoredDictamenDedupe(dictamen) {
     const causales = dedupeHallazgosList(dictamen.causales || []);
     const comp = causales.filter((c) => c.category === 'compliance');
     const porZona = buildCompliancePorZona(comp);
+    const isCuratedV3 =
+        dictamen.dictamen_schema_version >= 3 && dictamen.obligacionesDetectadas != null;
     return {
         ...dictamen,
         causales,
         compliancePorZona: porZona,
         causalesPorZona: porZona,
-        totalRequisitos: causales.length,
+        totalRequisitos: isCuratedV3 ? dictamen.obligacionesDetectadas : causales.length,
+        obligacionesDetectadas: isCuratedV3
+            ? dictamen.obligacionesDetectadas
+            : causales.length,
         riesgos: causales.filter((h) => h.isRisk).length,
         complianceHallazgosCount: comp.length,
     };
+}
+
+/** Convocante de sesión para curación HRU (sin hardcode por licitación). */
+export function extractSessionConvocanteFromPayload(resultsData) {
+    if (!resultsData || typeof resultsData !== 'object') return {};
+    const mp =
+        resultsData.master_profile
+        || resultsData.session?.master_profile
+        || resultsData.session_state?.master_profile
+        || {};
+    const out = {};
+    ['convocante', 'autoridad_convocante', 'dependencia', 'entidad', 'comite', 'destinatario'].forEach(
+        (key) => {
+            const val = mp[key] ?? resultsData[key] ?? resultsData.session_state?.[key];
+            if (val && String(val).trim()) out[key] = String(val).trim();
+        },
+    );
+    return out;
 }
 
 /**
@@ -299,21 +326,39 @@ export function synthesizePipelineTelemetryFromDictamen(dictamen) {
 export function enrichDictamenFromStorage(dictamen) {
     if (!dictamen || typeof dictamen !== 'object') return dictamen;
     const fastTrack = dictamen.fastTrackDocumentCandidates || null;
+    const attachRisks = (d) => {
+        const sanitized = {
+            ...d,
+            causales: sanitizeEconomicCausales(d?.causales),
+        };
+        if (!sanitized?.forensic_risks_v1?.items?.length) {
+            const block = buildForensicRisksFromCausales(sanitized?.causales);
+            if (block.items.length) {
+                return { ...sanitized, forensic_risks_v1: block, riesgos: block.stats.total };
+            }
+        }
+        const block = buildForensicRisksFromCausales(sanitized?.causales);
+        return {
+            ...sanitized,
+            forensic_risks_v1: block,
+            riesgos: block.stats.total,
+        };
+    };
     if (dictamen.compliancePorZona && Object.keys(dictamen.compliancePorZona).length > 0) {
         const withAlias = dictamen.causalesPorZona != null
             ? dictamen
             : { ...dictamen, causalesPorZona: dictamen.compliancePorZona };
-        const result = finalizeStoredDictamenDedupe(withAlias);
+        let result = finalizeStoredDictamenDedupe(withAlias);
         if (fastTrack) result.fastTrackDocumentCandidates = fastTrack;
-        return result;
+        return attachRisks(result);
     }
     const compliance = (dictamen.causales || []).filter((c) => c.category === 'compliance');
     if (compliance.length === 0) {
-        return finalizeStoredDictamenDedupe({
+        return attachRisks(finalizeStoredDictamenDedupe({
             ...dictamen,
             compliancePorZona: buildCompliancePorZona([]),
             causalesPorZona: buildCompliancePorZona([]),
-        });
+        }));
     }
     const normalized = compliance.map((h) => {
         const bucket = h.bucketKey || inferBucketKeyFromTipo(h.tipo);
@@ -339,7 +384,7 @@ export function enrichDictamenFromStorage(dictamen) {
     const porZona = buildCompliancePorZona(normalized);
     const enriched = finalizeStoredDictamenDedupe({ ...dictamen, causales: causalesMerged, compliancePorZona: porZona, causalesPorZona: porZona });
     if (fastTrack) enriched.fastTrackDocumentCandidates = fastTrack;
-    return enriched;
+    return attachRisks(enriched);
 }
 
 /**
@@ -509,32 +554,20 @@ export const processAuditResults = (resultsData) => {
             zona_origen: null,
             categoria_llm: null,
         })),
-        ...(economic?.data?.analisis_precios?.alertas || []).map((a, i) => ({
-            tipo: '💰 ALERTA ECONÓMICA',
-            texto: a,
-            isRisk: true,
-            category: 'economic',
-            id: `econ-${i}`,
-            agent_id: 'economic_001',
-            zona_origen: null,
-            categoria_llm: null,
-        })),
-        ...(Array.isArray(economic?.data?.alertas_contexto_bases)
-            ? economic.data.alertas_contexto_bases
-            : []
-        ).map((a, i) => ({
-            tipo: '📌 PAUSA ECONÓMICA / CONTEXTO DE BASES',
-            texto: a,
-            isRisk: true,
-            category: 'economic_gap_context',
-            id: `econ-gap-${i}`,
-            agent_id: 'economic_001',
-            zona_origen: null,
-            categoria_llm: null,
-        })),
+        ...mapEconomicAlertsToCausales(economic?.data?.analisis_precios?.alertas || []),
+        ...mapEconomicAlertsToCausales(
+            Array.isArray(economic?.data?.alertas_contexto_bases)
+                ? economic.data.alertas_contexto_bases
+                : [],
+        ).map((h) => (
+            h.isRisk
+                ? { ...h, tipo: '📌 PAUSA ECONÓMICA / CONTEXTO DE BASES', category: 'economic_gap_context' }
+                : h
+        )),
     ];
 
-    const listadoHallazgos = dedupeHallazgosList(rawList);
+    let listadoHallazgos = dedupeHallazgosList(rawList);
+    listadoHallazgos = sanitizeEconomicCausales(listadoHallazgos);
 
     const compliancePorZona = buildCompliancePorZona(
         listadoHallazgos.filter(h => h.category === 'compliance')
@@ -612,7 +645,13 @@ export const processAuditResults = (resultsData) => {
             base.fastTrackDocumentCandidates = ftDocs;
         }
     }
-    return applyInfrastructureUxOverrides(base);
+    let result = applyInfrastructureUxOverrides(base);
+    result = applyDictamenCurationToBase(
+        result,
+        extractSessionConvocanteFromPayload(resultsData),
+        compliance,
+    );
+    return result;
 };
 
 /** Panel Documentos detectados: solo credenciales empresariales en presentación física. */

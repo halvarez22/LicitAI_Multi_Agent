@@ -251,6 +251,7 @@ async def _run_orchestrator_job(
 
         resultado_dict = resultado if isinstance(resultado, dict) else {}
         pipeline_telemetry = build_pipeline_telemetry(resultado_dict)
+        persisted_dictamen = None
 
         # Formatear el resultado final similar a AgentExecutionResponse
         final_data = {
@@ -292,6 +293,22 @@ async def _run_orchestrator_job(
                     resultado_dict.get("document_candidates_consolidated")
                     or session_for_ccc.get("document_candidates_consolidated")
                 )
+                extraction_health = None
+                try:
+                    from app.services.extraction_health_service import (
+                        compute_extraction_health_for_session,
+                    )
+
+                    extraction_health = await compute_extraction_health_for_session(
+                        memory, request.session_id
+                    )
+                except Exception as ext_exc:
+                    logger.warning(
+                        "dictamen_extraction_health_skip session=%s err=%s",
+                        request.session_id,
+                        ext_exc,
+                    )
+
                 dictamen = process_audit_results_backend(
                     {
                         "status": resultado_dict.get("status"),
@@ -305,11 +322,16 @@ async def _run_orchestrator_job(
                     },
                     pipeline_telemetry=pipeline_telemetry,
                     line_items_count=line_items_count,
+                    session_state=session_for_ccc,
+                    extraction_health=extraction_health,
                 )
 
                 if dictamen:
+                    persisted_dictamen = dictamen
                     session_data = await memory.get_session(request.session_id) or {}
                     session_data["dictamen"] = dictamen
+                    if dictamen.get("dictamen_curated_v1"):
+                        session_data["dictamen_curated_v1"] = dictamen["dictamen_curated_v1"]
                     ccc_saved = dictamen.get("documentCandidatesConsolidated")
                     if isinstance(ccc_saved, dict) and ccc_saved.get("sobre_1_tecnico") is not None:
                         session_data["document_candidates_consolidated"] = ccc_saved
@@ -320,6 +342,9 @@ async def _run_orchestrator_job(
                     )
             except Exception as e:
                 logger.error(f"Error en auto-persistencia del dictamen: {e}")
+
+        if persisted_dictamen:
+            final_data["dictamen"] = persisted_dictamen
         
         final_status = str(resultado_dict.get("status", "error"))
         update_job_status(

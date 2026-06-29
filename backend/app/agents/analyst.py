@@ -801,8 +801,27 @@ Responde con este JSON:
                         extracted_data.get("requisitos_participacion")
                     )
                 if "reglas_economicas" in extracted_data:
+                    raw_reglas = extracted_data.get("reglas_economicas")
+                    try:
+                        from app.services.reglas_economicas_evidence_service import (
+                            build_reglas_economicas_evidence_v1,
+                        )
+
+                        extracted_data["reglas_economicas_evidence_v1"] = (
+                            await build_reglas_economicas_evidence_v1(
+                                session_id,
+                                raw_reglas,
+                                memory=self.context_manager.memory,
+                            )
+                        )
+                    except Exception as reg_ev_exc:
+                        logger.warning(
+                            "reglas_economicas_evidence_failed session=%s err=%s",
+                            session_id,
+                            reg_ev_exc,
+                        )
                     extracted_data["reglas_economicas"] = normalize_reglas_economicas_dict(
-                        extracted_data.get("reglas_economicas")
+                        raw_reglas
                     )
                     reglas = extracted_data.get("reglas_economicas") or {}
                     if isinstance(reglas, dict) and reglas.get("meses_o_periodo_minimo_citado") == "No especificado":

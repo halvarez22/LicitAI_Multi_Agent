@@ -90,6 +90,8 @@ class VectorSyncService:
         self,
         memory: Any,
         session_id: str,
+        *,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """
         Verifica que la sesión tenga vectores coherentes con su estado en Postgres.
@@ -158,7 +160,7 @@ class VectorSyncService:
             current_chunks = self._count_chunks(session_id, doc_id)
             expected_min = max(1, total_pages_pg) * CHUNKS_PER_PAGE_MIN
 
-            if current_chunks >= expected_min:
+            if not force and current_chunks >= expected_min:
                 logger.debug(
                     "vector_sync_ok",
                     session_id=session_id,
@@ -184,6 +186,7 @@ class VectorSyncService:
                     doc_id=doc_id,
                     filename=filename,
                     extracted_text=extracted_text,
+                    pages=content.get("pages"),
                 )
                 result["docs_healed"] += 1
                 result["pages_indexed"] += pages_indexed
@@ -230,6 +233,7 @@ class VectorSyncService:
         doc_id: str,
         filename: str,
         extracted_text: str,
+        pages: Any = None,
     ) -> int:
         """
         Re-indexa un documento desde el texto almacenado en Postgres.
@@ -265,9 +269,24 @@ class VectorSyncService:
                 error=str(exc),
             )
 
-        # ── Paso 2: División en páginas ───────────────────────────────────────
-        pages = _split_by_page_markers(extracted_text)
-        if not pages:
+        # ── Paso 2: Indexación canónica (preferir pages[] del OCR) ───────────
+        from app.services.document_vector_index import index_pages_atomic
+
+        structured_pages = pages if isinstance(pages, list) and pages else None
+        if structured_pages:
+            indexed = index_pages_atomic(
+                session_id,
+                doc_id,
+                filename,
+                structured_pages,
+                self._vector_client,
+            )
+            if indexed > 0:
+                return indexed
+
+        # Fallback: marcadores en extracted_text
+        page_chunks = _split_by_page_markers(extracted_text)
+        if not page_chunks:
             logger.warning(
                 "vector_sync_no_pages",
                 session_id=session_id,
@@ -278,7 +297,7 @@ class VectorSyncService:
 
         # ── Paso 3: Re-indexación atómica por página ──────────────────────────
         indexed = 0
-        for page in pages:
+        for page in page_chunks:
             p_num = page["page"]
             p_text = page["text"]
             if not p_text:

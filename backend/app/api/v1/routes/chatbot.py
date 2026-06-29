@@ -59,6 +59,7 @@ async def ask_chatbot(request: ChatbotRequest):
                 "query": request.query,
                 "doc_id": request.doc_id,
                 "uploaded_doc_id": request.doc_id,
+                "forensic_risk_context": request.forensic_risk_context,
             },
             mode="full",
             job_id=active_job.get("job_id") if analysis_running else None,
@@ -84,8 +85,14 @@ async def ask_chatbot(request: ChatbotRequest):
         if go_no_go_override:
             reply_data = {**reply_data, "go_no_go_override": go_no_go_override}
 
+        reply_text = (
+            reply_data.get("respuesta")
+            or reply_data.get("reply")
+            or result.message
+            or "Lo siento, hubo un error de contexto."
+        )
         return ChatbotResponse(
-            reply=reply_data.get("respuesta", "Lo siento, hubo un error de contexto."),
+            reply=reply_text,
             citations=reply_data.get("citas", []),
             confidence=reply_data.get("confianza", "Baja"),
             expert_suggestion=reply_data.get("sugerencia"),

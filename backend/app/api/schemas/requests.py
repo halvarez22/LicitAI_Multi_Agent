@@ -18,3 +18,5 @@ class ChatbotRequest(BaseModel):
     company_id: Optional[str] = None
     # Archivo ya subido vía POST /upload (cotización Excel/CSV en chat).
     doc_id: Optional[str] = None
+    # Contexto estructurado de riesgo forense (panel HITL) para respuesta anclada.
+    forensic_risk_context: Optional[Dict[str, Any]] = None

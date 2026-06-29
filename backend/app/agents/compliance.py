@@ -550,6 +550,12 @@ REGLA DE ZONA CRÍTICA: Este bloque pertenece a la zona [{zone_name}].
 - Si el texto habla de FORMATOS, ANEXOS o CARTAS → usa "formatos".
 - Clasifica cada ítem en la categoría que corresponde a SU CONTENIDO, no a la zona del bloque.
 
+PERSPECTIVA LICITANTE (OBLIGATORIO — HRU universal):
+- NO registres como obligación del licitante la personalidad, facultades o identidad de la CONTRATANTE/CONVOCANTE/dependencia/comité.
+- Si el texto solo describe al convocante (facultad de suscribir, personalidad, institución de orden público): tipo_accion "informativo", audience "convocante".
+- Si el obligado es el licitante/contratista/proponente: audience "licitante".
+- Campo "audience" obligatorio en cada ítem: "licitante" | "convocante" | "neutral".
+
 CLASIFICACIÓN tipo_accion (OBLIGATORIO en cada ítem):
 - "generar": el licitante DEBE redactar y entregar este documento (propuesta técnica, carta, manifiesto, declaración, anexo con contenido propio).
 - "presentar_fisico": el licitante debe presentar un documento físico existente (INE, acta constitutiva, fianza de institución, constancia IMSS).
@@ -761,25 +767,27 @@ FORMATO JSON OBLIGATORIO:
             if _enforce_must_have:
                 must_have_match = await self._match_must_have_policy(item, triage_context)
                 if must_have_match is not None:
-                    enforced_action = str(must_have_match.get("expected_action") or "generar")
-                    if enforced_action not in ("generar", "presentar_fisico"):
-                        enforced_action = "generar"
-                    item["tipo_accion"] = enforced_action
-                    if "forced_by_must_have_matrix" not in item["quality_flags"]:
-                        item["quality_flags"].append("forced_by_must_have_matrix")
-                    item["forced_by_must_have"] = {
-                        "label": must_have_match.get("label"),
-                        "matched_on": must_have_match.get("matched_on"),
-                        "expected_action": enforced_action,
-                        "source": "triage_context.must_have_policy",
-                    }
-                    logger.info(
-                        "compliance_forced_must_have",
-                        item=item["nombre"],
-                        label=must_have_match.get("label"),
-                        expected_action=enforced_action,
-                        matched_on=must_have_match.get("matched_on"),
-                    )
+                    _probe_aud = str(item.get("audience") or "").lower()
+                    if _probe_aud != "convocante":
+                        enforced_action = str(must_have_match.get("expected_action") or "generar")
+                        if enforced_action not in ("generar", "presentar_fisico"):
+                            enforced_action = "generar"
+                        item["tipo_accion"] = enforced_action
+                        if "forced_by_must_have_matrix" not in item["quality_flags"]:
+                            item["quality_flags"].append("forced_by_must_have_matrix")
+                        item["forced_by_must_have"] = {
+                            "label": must_have_match.get("label"),
+                            "matched_on": must_have_match.get("matched_on"),
+                            "expected_action": enforced_action,
+                            "source": "triage_context.must_have_policy",
+                        }
+                        logger.info(
+                            "compliance_forced_must_have",
+                            item=item["nombre"],
+                            label=must_have_match.get("label"),
+                            expected_action=enforced_action,
+                            matched_on=must_have_match.get("matched_on"),
+                        )
 
             # ✅ TRAZABILIDAD: estampar zona_origen (propagada desde _extract_zone_chunk)
             item["zona_origen"] = raw.get("zona_origen", zone_name)
@@ -798,6 +806,24 @@ FORMATO JSON OBLIGATORIO:
                 if "fallback_to_informative" not in _qflags:
                     _qflags.append("fallback_to_informative")
                 item["quality_flags"] = _qflags
+
+            try:
+                from app.services.dictamen_curation_service import classify_item_audience
+
+                _aud = classify_item_audience(
+                    {"texto": item, "snippet": item.get("snippet")},
+                    None,
+                )
+                if not str(item.get("audience") or "").strip():
+                    item["audience"] = _aud
+                if _aud == "convocante" and str(item.get("tipo_accion") or "").lower() not in (
+                    "generar",
+                    "presentar_fisico",
+                    "requiere_datos_licitante",
+                ):
+                    item["tipo_accion"] = "informativo"
+            except Exception:
+                pass
 
             final_items.append(item)
             seen_snippets.add(dedup_key)

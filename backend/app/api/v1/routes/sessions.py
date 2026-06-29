@@ -203,6 +203,30 @@ async def get_dictamen(session_id: str):
             dictamen_out = session_data["dictamen"]
             if isinstance(dictamen_out, dict):
                 try:
+                    from app.services.forensic_risk_service import (
+                        attach_and_hydrate_forensic_risks,
+                        merge_risk_decisions_into_items,
+                    )
+
+                    dictamen_out = await attach_and_hydrate_forensic_risks(
+                        dictamen_out,
+                        session_id,
+                        session_state=session_data,
+                        memory=repo,
+                    )
+                    risk_decisions = session_data.get("risk_decisions_v1")
+                    if dictamen_out.get("forensic_risks_v1"):
+                        dictamen_out["forensic_risks_v1"] = merge_risk_decisions_into_items(
+                            dictamen_out["forensic_risks_v1"],
+                            risk_decisions,
+                        )
+                except Exception as risk_exc:
+                    logger.warning(
+                        "dictamen_forensic_risks_skip session=%s err=%s",
+                        session_id,
+                        risk_exc,
+                    )
+                try:
                     from app.utils.audit_processor import strip_stale_tabular_alert_from_dictamen
 
                     rows = await repo.get_line_items_for_session(session_id)
@@ -327,6 +351,7 @@ async def get_dictamen(session_id: str):
                     "pliego_formats_panel": doc_candidates if isinstance(doc_candidates, dict) else None,
                     "submission_checklist": submission_checklist_payload,
                     "corporate_physical_document_candidates": corporate_physical_payload,
+                    "risk_decisions_v1": session_data.get("risk_decisions_v1"),
                 }
             )
         return GenericResponse(success=False, message="No hay dictamen guardado")

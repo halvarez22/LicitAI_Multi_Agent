@@ -38,6 +38,31 @@ from app.services.economic_tabular_ingest_sync import tech_requirements_from_tab
 from app.services.tabular_line_item_extract import dedupe_tabular_line_items
 from app.config.settings import settings as app_settings
 
+
+def _dedupe_economic_alert_strings(alertas_merged: List[Any]) -> List[Any]:
+    """Deduplica alertas económicas por huella universal (HRU), preservando metadatos."""
+    try:
+        from app.services.economic_alert_classifier import (
+            dedupe_normalized_alerts,
+            normalize_economic_alert,
+        )
+
+        normalized = [
+            normalize_economic_alert(a, index=i)
+            for i, a in enumerate(alertas_merged or [])
+            if a
+        ]
+        return dedupe_normalized_alerts(normalized)
+    except Exception:
+        return list(alertas_merged or [])
+
+
+def _alert_text_for_display(alert: Any) -> str:
+    """Texto legible de alerta str o dict normalizado."""
+    if isinstance(alert, dict):
+        return str(alert.get("texto") or alert.get("descripcion") or "")
+    return str(alert or "")
+
 logger = get_logger(__name__)
 
 
@@ -739,6 +764,7 @@ class EconomicAgent(BaseAgent):
         alertas_contexto_bases = self._build_bases_economic_alertas(reglas_bases, datos_tab)
         contexto_bases_analista = {
             "reglas_economicas": reglas_bases,
+            "reglas_economicas_evidence_v1": analisis_bases.get("reglas_economicas_evidence_v1"),
             "alcance_operativo_filas": len(alcance_bases or []),
             "datos_tabulares": datos_tab,
         }
@@ -942,10 +968,18 @@ class EconomicAgent(BaseAgent):
         
         if isinstance(calculation_result, list):
              proposal_draft = calculation_result
-             alertas: List[Any] = []
+             alertas_sugeridas_llm: List[Any] = []
         else:
              proposal_draft = calculation_result.get("items", []) or []
-             alertas = calculation_result.get("alertas") or []
+             alertas_sugeridas_llm = calculation_result.get("alertas") or []
+
+        from app.services.reglas_economicas_evidence_service import (
+            build_forensic_alerts_from_evidence_block,
+        )
+
+        forensic_from_reglas = build_forensic_alerts_from_evidence_block(
+            analisis_bases.get("reglas_economicas_evidence_v1")
+        )
 
         proposal_draft = self._apply_tabular_prices_to_proposal(
             proposal_draft, tech_requirements, pricing_line_items
@@ -1294,9 +1328,8 @@ class EconomicAgent(BaseAgent):
 
         calc_blocking_issues = list(totals.get("blocking_issues") or [])
         alertas_merged = (
-            list(alertas if isinstance(alertas, list) else [])
-            + alertas_contexto_bases
-            + chat_override_alerts
+            list(forensic_from_reglas)
+            + list(chat_override_alerts or [])
         )
         if quadrature_report.get("available"):
             alertas_merged.append(
@@ -1307,6 +1340,7 @@ class EconomicAgent(BaseAgent):
                     f"(delta {quadrature_report.get('delta_total', 0.0):.2f})."
                 )
             )
+        alertas_merged = _dedupe_economic_alert_strings(alertas_merged)
         if calc_blocking_issues:
             fsr_msg = (
                 "No cierres la app. Faltan parámetros obligatorios para calcular el Factor de Salario Real "
@@ -1329,7 +1363,10 @@ class EconomicAgent(BaseAgent):
                 "items": proposal_draft,
                 "total_base": float(total_base),
                 "grand_total": float(grand_total),
-                "analisis_precios": {"alertas": alertas_merged},
+                "analisis_precios": {
+                    "alertas": alertas_merged,
+                    "alertas_sugeridas_llm": alertas_sugeridas_llm,
+                },
                 "missing": calc_missing,
                 "calculator_result": {
                     "profile_name": totals.get("profile_name"),
@@ -1395,7 +1432,10 @@ class EconomicAgent(BaseAgent):
                 "items": proposal_draft,
                 "total_base": float(total_base),
                 "grand_total": float(grand_total),
-                "analisis_precios": {"alertas": alertas_merged},
+                "analisis_precios": {
+                    "alertas": alertas_merged,
+                    "alertas_sugeridas_llm": alertas_sugeridas_llm,
+                },
                 "missing": quadrature_missing,
                 "calculator_result": {
                     "profile_name": totals.get("profile_name"),
@@ -1730,7 +1770,10 @@ class EconomicAgent(BaseAgent):
                 "total_base": float(total_base),
                 "grand_total": float(grand_total),
                 "allow_zero_total_base_ack": allow_zero_total_base,
-                "analisis_precios": {"alertas": alertas_merged},
+                "analisis_precios": {
+                    "alertas": alertas_merged,
+                    "alertas_sugeridas_llm": alertas_sugeridas_llm,
+                },
                 "validation_result": validation_result.model_dump(mode="json"),
                 "missing": missing_fields,
                 "validation_events": validation_events,
@@ -1811,6 +1854,7 @@ class EconomicAgent(BaseAgent):
             "allow_zero_total_base_ack": allow_zero_total_base,
             "analisis_precios": {
                 "alertas": alertas_merged,
+                "alertas_sugeridas_llm": alertas_sugeridas_llm,
             },
             "validation_result": validation_result.model_dump(mode="json"),
             "calculator_result": {
@@ -1829,6 +1873,7 @@ class EconomicAgent(BaseAgent):
             "quadrature_report": quadrature_report,
             "contexto_bases_analista": {
                 "reglas_economicas": reglas_bases,
+                "reglas_economicas_evidence_v1": analisis_bases.get("reglas_economicas_evidence_v1"),
                 "alcance_operativo_filas": len(alcance_bases),
                 "datos_tabulares": dict(datos_tab),
             },

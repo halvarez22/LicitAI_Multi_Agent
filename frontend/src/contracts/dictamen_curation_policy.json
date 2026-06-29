@@ -1,0 +1,56 @@
+{
+  "policy_version": "dictamen-curation-v1.0.0",
+  "description": "Política universal de curación del Dictamen Forense (HRU: sin hardcode por licitación). Espejo de backend/app/contracts/dictamen_curation_policy.json — mantener en sync.",
+  "actionable_tipo_accion": [
+    "generar",
+    "presentar_fisico",
+    "requiere_datos_licitante"
+  ],
+  "actionable_non_compliance_categories": [
+    "bases_participacion",
+    "bases_filtro",
+    "bases_reglas_economicas",
+    "bases_alcance",
+    "bases_datos_tabulares",
+    "risk",
+    "economic",
+    "economic_gap_context"
+  ],
+  "licitante_subject_patterns": [
+    "(?i)\\bel\\s+licitante\\b",
+    "(?i)\\bla\\s+empresa\\s+licitante\\b",
+    "(?i)\\bel\\s+contratista\\b",
+    "(?i)\\bel\\s+proponente\\b",
+    "(?i)\\bel\\s+oferente\\b",
+    "(?i)\\bel\\s+proveedor\\b(?=.*deber)",
+    "(?i)\\bdeber[aá]\\s+presentar\\s+el\\s+licitante",
+    "(?i)\\bdeber[aá]\\s+entregar\\s+el\\s+licitante",
+    "(?i)\\bel\\s+participante\\b"
+  ],
+  "convocante_subject_patterns": [
+    "(?i)\\bla\\s+contratante\\b",
+    "(?i)\\bel\\s+comit[eé]\\b",
+    "(?i)\\bconvocante\\b",
+    "(?i)\\besta\\s+dependencia\\b",
+    "(?i)\\bla\\s+dependencia\\b(?=.*(podr[aá]|establece|convoca))",
+    "(?i)\\bfacultad(?:es)?\\s+para\\s+suscribir\\b",
+    "(?i)\\bpersonalidad\\s+con\\s+que\\s+comparece\\b(?=.*contratante)",
+    "(?i)\\binstituci[oó]n\\s+de\\s+orden\\s+p[uú]blico\\b",
+    "(?i)\\bque\\s+es\\s+una\\s+persona\\s+moral\\s+legalmente\\s+constituida\\b",
+    "(?i)\\bse[nñ]ala\\s+como\\s+su\\s+domicilio\\b",
+    "(?i)\\bcapacidad\\s+jur[ií]dica\\s+para\\s+suscribir\\b",
+    "(?i)\\bfacultado\\s+para\\s+representarla\\s+legalmente\\b",
+    "(?i)\\bacreditando\\s+su\\s+personalidad\\b",
+    "(?i)\\best[aá]\\s+facultado\\s+para\\s+representar\\b",
+    "(?i)\\bcomparece\\s+con\\s+personalidad\\b"
+  ],
+  "mixed_obligation_licitante_override_patterns": [
+    "(?i)\\bel\\s+licitante\\b",
+    "(?i)\\bel\\s+contratista\\b",
+    "(?i)\\bel\\s+proponente\\b",
+    "(?i)\\bdeber[aá]\\s+presentar",
+    "(?i)\\bdeber[aá]\\s+entregar",
+    "(?i)\\bdeber[aá]\\s+constituir",
+    "(?i)\\bdeber[aá]\\s+acreditar"
+  ]
+}

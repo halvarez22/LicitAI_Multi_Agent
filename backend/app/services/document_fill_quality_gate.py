@@ -409,12 +409,17 @@ def _is_placeholder_operational_mirror(text: str) -> bool:
     return _is_placeholder_llm_residual_only(text)
 
 
-def _is_boilerplate_parenthetic_marker(marker: str) -> bool:
-    """True si el token entre paréntesis es jerga de formato/pliego, no sigla de otra licitación."""
+def is_pliego_boilerplate_marker(marker: str) -> bool:
+    """True si el token es jerga de formato/pliego, no sigla de otra licitación."""
     token = _normalize_token(marker)
     if not token or len(token) < 3:
         return True
     return token in _GENERIC_TENDER_MARKERS
+
+
+def _is_boilerplate_parenthetic_marker(marker: str) -> bool:
+    """Alias interno: paréntesis en detección cross-tender."""
+    return is_pliego_boilerplate_marker(marker)
 
 
 def detect_cross_tender_marker(chunks: Sequence[str], session_hint: str) -> str | None:

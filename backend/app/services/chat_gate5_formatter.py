@@ -12,6 +12,55 @@ from app.services.chat_stop_reason_map import (
     single_cta_for_context,
 )
 
+_STALE_GENERATION_STOP_REASONS = frozenset(
+    {
+        "INCOMPLETE_FORMATS_DATA",
+        "INCOMPLETE_FORMAT_DATA",
+        "DELIVERY_COVERAGE_GAP",
+        "PACKAGING_VALIDATION_FAILED",
+        "PACKAGING_INCOMPLETE_SOBRES",
+        "MINI_DICTAMEN_BLOCKED",
+    }
+)
+
+
+def _has_analysis_complete(state: Dict[str, Any]) -> bool:
+    for task in state.get("tasks_completed") or []:
+        if isinstance(task, dict) and str(task.get("task") or "") == "stage_completed:analysis":
+            return True
+    return False
+
+
+def _has_economic_chat_pending(state: Dict[str, Any]) -> bool:
+    pending = list(state.get("pending_questions") or [])
+    return any(
+        str(q.get("type") or "")
+        in ("economic_price", "economic_price_matrix", "economic_validation_blocking")
+        for q in pending
+        if isinstance(q, dict)
+    )
+
+
+def _should_use_expediente_plan_bootstrap(state: Dict[str, Any], stop_reason: str) -> bool:
+    """Bootstrap HRU universal tras análisis, sin cola económica activa."""
+    if not _has_analysis_complete(state):
+        return False
+    if _has_economic_chat_pending(state):
+        return False
+    if stop_reason in _STALE_GENERATION_STOP_REASONS or stop_reason in (
+        "IDLE",
+        "ANALYSIS_COMPLETED",
+    ):
+        return True
+    return True
+
+
+def build_obra_documentary_bootstrap(state: Dict[str, Any]) -> str:
+    """Retrocompat: delega al bootstrap universal de expediente."""
+    from app.services.chat_expediente_bootstrap_service import build_expediente_plan_bootstrap
+
+    return build_expediente_plan_bootstrap(state)
+
 
 def format_gate5_message(
     *,
@@ -19,9 +68,7 @@ def format_gate5_message(
     cta: str,
     detail: str = "",
 ) -> str:
-    """
-    Compone respuesta de chat acotada: máximo 3 líneas (2 de estado + 1 CTA).
-    """
+    """Compone respuesta de chat acotada: máximo 3 líneas (2 de estado + 1 CTA)."""
     status_line = sanitize_user_visible_text(str(status or "").strip())
     detail_line = sanitize_user_visible_text(str(detail or "").strip())
     cta_line = sanitize_user_visible_text(str(cta or "").strip())
@@ -38,9 +85,7 @@ def format_gate5_message(
 
 
 def build_compact_session_resume(state: Dict[str, Any]) -> str:
-    """
-    Mensaje de reanudación determinista (Gate 5) desde estado de sesión.
-    """
+    """Mensaje de reanudación determinista (Gate 5) desde estado de sesión."""
     session_name = str(state.get("name") or "esta licitación")
     decision = state.get("last_orchestrator_decision") if isinstance(state.get("last_orchestrator_decision"), dict) else {}
     stop_reason = str(decision.get("stop_reason") or "IDLE")
@@ -53,8 +98,19 @@ def build_compact_session_resume(state: Dict[str, Any]) -> str:
         in ("economic_price", "economic_price_matrix", "economic_validation_blocking")
     ]
 
+    if _should_use_expediente_plan_bootstrap(state, stop_reason):
+        from app.services.chat_expediente_bootstrap_service import build_expediente_plan_bootstrap
+
+        return build_expediente_plan_bootstrap(state)
+
     status = humanize_stop_reason(stop_reason)
-    detail = f"Retomamos **{session_name}**."
+    if stop_reason in _STALE_GENERATION_STOP_REASONS and _has_analysis_complete(state):
+        status = (
+            "El análisis de bases está listo. "
+            "Si una generación anterior quedó incompleta, revisa los anexos en el panel antes de volver a generar."
+        )
+
+    detail = f"Continuamos con **{session_name}**."
     if eco_pending:
         cur = eco_pending[0]
         label = str(cur.get("label") or "Precio pendiente")
@@ -64,6 +120,16 @@ def build_compact_session_resume(state: Dict[str, Any]) -> str:
         stop_reason=stop_reason,
         has_economic_pending=bool(eco_pending),
     )
+    if (
+        _has_analysis_complete(state)
+        and not eco_pending
+        and stop_reason in _STALE_GENERATION_STOP_REASONS
+    ):
+        cta = (
+            "Revisa **Formatos/Anexos Detectados** y pulsa **Generar**; "
+            "consigna en los Word los datos marcados **[Consignar]**."
+        )
+
     return format_gate5_message(status=status, detail=detail, cta=cta)
 
 

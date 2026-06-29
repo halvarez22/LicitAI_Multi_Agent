@@ -116,6 +116,9 @@ def consolidate_pending_from_intake_plan(
     ]
 
     raw_merged = merge_pending_queues(existing_pending, new_to_add)
+    from app.services.obra_chat_queue_policy import sanitize_obra_chat_pending_questions
+
+    raw_merged = sanitize_obra_chat_pending_questions(raw_merged, session_state)
     normalized = normalize_pending_queue(raw_merged)
 
     seen: set[str] = set()

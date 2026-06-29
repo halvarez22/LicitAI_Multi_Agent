@@ -467,7 +467,10 @@ class DocumentInventoryService:
         synced = DocumentInventoryService.sync_inventory_status_from_disk(
             inv, session_id, output_root=output_root
         )
-        return synced.model_dump(mode="json")
+        dump = synced.model_dump(mode="json")
+        from app.services.obra_chat_queue_policy import enrich_inventory_payload_for_ui
+
+        return enrich_inventory_payload_for_ui(dump)
 
     @staticmethod
     async def sync_inventory_to_session_memory(
