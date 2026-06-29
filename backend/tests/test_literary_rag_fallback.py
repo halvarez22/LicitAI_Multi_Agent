@@ -27,8 +27,22 @@ def test_solvency_predicate_matches_sat():
     assert C._solvency_literary_predicate(s, s.lower())
 
 
-def test_cronogram_predicate_matches_junta():
-    s = "La junta de aclaraciones se llevará el 15 de enero de 2025."
+def test_solvency_noise_rejects_sua_plantilla():
+    s = "Dicho personal deberá formar parte de la plantilla mediante copia del SUA y pago IMSS."
+    assert C._is_solvency_literary_noise_sentence(s)
+    assert not C._solvency_literary_predicate(s, s.lower())
+
+
+def test_cronogram_noise_rejects_table_header():
+    s = (
+        "LICITACIÓN OBRA DESCRIPCIÓN INSCRIPCIONES VISITA AL SITIO "
+        "JUNTA DE ACLARACIONES ACTO DE PRESENTACIÓN"
+    )
+    assert C._is_cronogram_literary_noise_sentence(s)
+
+
+def test_cronogram_predicate_accepts_junta_with_date():
+    s = "La junta de aclaraciones se llevará el 10 de diciembre del año 2025 a las 10:30 hrs."
     assert C._cronogram_literary_predicate(s, s.lower())
 
 

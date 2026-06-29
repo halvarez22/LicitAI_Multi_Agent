@@ -5644,10 +5644,13 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         topic_predicate: Any,
         score_fn: Any,
         max_bullets: int = 8,
+        source_predicate: Any = None,
     ) -> List[str]:
         seen: set[str] = set()
         ranked: List[tuple[float, str]] = []
         for doc, meta in zip(context_docs, metadatas):
+            if source_predicate and not source_predicate(meta if isinstance(meta, dict) else {}):
+                continue
             cite = cls._format_literary_cite(
                 meta if isinstance(meta, dict) else {}, primary_doc
             )
@@ -5670,7 +5673,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     seen.add(key)
                     ranked.append((float(score_fn(s)), f"- {s}\n  {cite}"))
         ranked.sort(key=lambda pair: (-pair[0], pair[1]))
-        return [line for _, line in ranked[:max_bullets]]
+        return [line for score, line in ranked if score > 0][:max_bullets]
 
     @classmethod
     def _finalize_literary_parts(
@@ -5736,42 +5739,111 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
 
     @staticmethod
+    def _is_solvency_literary_noise_sentence(sentence: str) -> bool:
+        """Ruido de plantilla/puntuación/ISO — no opiniones de cumplimiento fiscal/patronal."""
+        sl = str(sentence or "").lower()
+        noise_markers = (
+            "sistema único de autodeterminación",
+            "sistema unico de autodeterminacion",
+            "sua ",
+            "plantilla de la empresa",
+            "plantilla de personal",
+            "certificado de discapacidad",
+            "factor de salario real",
+            "considerando: sar",
+            "ohsas 18001",
+            "acreditación estatal",
+            "acreditacion estatal",
+            "puntuación",
+            "puntuacion",
+            "para efecto de puntuación",
+            "para efecto de puntuacion",
+            "acta constitutiva o copia de puc",
+        )
+        if any(m in sl for m in noise_markers):
+            return True
+        if re.search(r"iso\s*9001", sl) and re.search(r"\d+(?:\.\d+)?\s*puntos", sl):
+            return True
+        if "imss" in sl and "sua" in sl:
+            return True
+        return False
+
+    @staticmethod
     def _score_solvency_literary_sentence(sentence: str) -> float:
         sl = str(sentence or "").lower()
         score = 0.0
         if "opinión del cumplimiento" in sl or "opinion del cumplimiento" in sl:
-            score += 350.0
-        if "servicio de administración tributaria" in sl or "sat" in sl:
+            score += 420.0
+            if "fiscales" in sl or "fiscal" in sl:
+                score += 120.0
+            if "seguridad social" in sl or "imss" in sl or "infonavit" in sl:
+                score += 100.0
+        if "32-d" in sl or "32 d" in sl or "miscelánea fiscal" in sl or "miscelanea fiscal" in sl:
+            score += 280.0
+        if "constancia de situación fiscal" in sl or "constancia de situacion fiscal" in sl:
+            score += 260.0
+        if "servicio de administración tributaria" in sl:
+            score += 220.0
+        if "infonavit" in sl and any(
+            k in sl for k in ("opinion", "opinión", "cumplimiento", "no adeudo", "corriente")
+        ):
             score += 200.0
-        if "imss" in sl or "infonavit" in sl:
+        if "imss" in sl and any(
+            k in sl for k in ("opinion", "opinión", "cumplimiento", "no adeudo", "corriente")
+        ):
             score += 180.0
         if "repse" in sl:
             score += 160.0
-        if "iso 9001" in sl or "iso 14001" in sl or "nom-035" in sl or "nom 035" in sl:
+        if "solvencia" in sl and any(
+            k in sl for k in ("económica", "economica", "financiera", "fiscal", "patronal")
+        ):
             score += 140.0
-        if "solvencia" in sl:
-            score += 100.0
+        if ChatbotRAGAgent._is_solvency_literary_noise_sentence(sentence):
+            score -= 500.0
         return score
 
     @staticmethod
-    def _solvency_literary_predicate(_sentence: str, sl: str) -> bool:
-        return any(
-            k in sl
-            for k in (
-                "solvencia",
-                "opinion",
-                "opinión",
-                "sat",
-                "imss",
-                "infonavit",
-                "repse",
-                "iso 9001",
-                "iso 14001",
-                "nom-035",
-                "nom 035",
-                "seguridad social",
-            )
+    def _solvency_literary_predicate(sentence: str, sl: str) -> bool:
+        if ChatbotRAGAgent._is_solvency_literary_noise_sentence(sentence):
+            return False
+        fiscal_core = (
+            "opinión del cumplimiento",
+            "opinion del cumplimiento",
+            "obligaciones fiscales",
+            "obligaciones en materia de seguridad social",
+            "constancia de situación fiscal",
+            "constancia de situacion fiscal",
+            "miscelánea fiscal",
+            "miscelanea fiscal",
+            "32-d",
+            "32 d",
+            "no adeudo",
+            "al corriente de sus obligaciones",
+            "solvencia económica",
+            "solvencia economica",
+            "solvencia financiera",
         )
+        if any(k in sl for k in fiscal_core):
+            return True
+        if "infonavit" in sl and any(
+            k in sl for k in ("opinion", "opinión", "cumplimiento", "adeudo", "corriente")
+        ):
+            return True
+        if "sat" in sl and any(
+            k in sl for k in ("opinion", "opinión", "fiscal", "32-d", "tributaria", "hacienda")
+        ):
+            return True
+        if "imss" in sl and any(
+            k in sl for k in ("opinion", "opinión", "seguridad social", "adeudo", "cumplimiento")
+        ):
+            return True
+        if "repse" in sl and any(
+            k in sl for k in ("registro", "servicios especializados", "autorización", "autorizacion")
+        ):
+            return True
+        if "iso 9001" in sl or "iso 14001" in sl or "nom-035" in sl:
+            return "solvencia" in sl or "certificación" in sl or "certificacion" in sl
+        return "solvencia" in sl
 
     @classmethod
     def _compose_solvency_literary_fallback(
@@ -5797,6 +5869,64 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
 
     @staticmethod
+    def _is_cronogram_literary_noise_sentence(sentence: str) -> bool:
+        """Encabezados de tabla, firmas y rejillas — no actos con fecha/hora."""
+        if not sentence:
+            return True
+        if ChatbotRAGAgent._is_cronogram_noise_chunk(sentence):
+            return True
+        if "---" in sentence or sentence.count("|") >= 3:
+            return True
+        if sentence.strip().startswith("|"):
+            return True
+        sl = sentence.lower()
+        if re.search(r"león, gto", sl) and "el h." in sl:
+            return True
+        if re.search(r"licitaci[oó]n obra descripci[oó]n", sl):
+            return True
+        if "inscripciones visita al sitio" in sl.replace(" ", ""):
+            return True
+        if "32-d" in sl or "miscelánea fiscal" in sl or "miscelanea fiscal" in sl:
+            return True
+        if "representante legal" in sl and re.search(r"d/\d+/\d+", sl):
+            return True
+        if re.search(r"\bdirector de\b", sl) and not re.search(
+            r"\d{1,2}\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre)",
+            sl,
+        ):
+            return True
+        caps_runs = re.findall(r"\b[A-ZÁÉÍÓÚÑ]{5,}\b", sentence)
+        if len(caps_runs) >= 4:
+            return True
+        month_pat = (
+            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre"
+        )
+        has_date = bool(
+            re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl)
+            or re.search(rf"({month_pat})\s+de\s+20\d{{2}}", sl)
+            or re.search(r"\d{{1,2}}\s+de\s+diciembre", sl)
+        )
+        act_hit = any(
+            k in sl
+            for k in (
+                "junta",
+                "aclaraci",
+                "visita",
+                "apertura",
+                "fallo",
+                "presentación",
+                "presentacion",
+                "inscripcion",
+                "inscripción",
+            )
+        )
+        if not has_date and not act_hit:
+            return True
+        return False
+
+    @staticmethod
     def _score_cronogram_literary_sentence(sentence: str) -> float:
         sl = str(sentence or "").lower()
         score = 0.0
@@ -5806,20 +5936,28 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         )
         if re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl):
             score += 300.0
+        if re.search(r"\d{{1,2}}:\d{{2}}\s*hrs", sl) or re.search(r"\d{{1,2}}:\d{{2}}\s*horas", sl):
+            score += 180.0
         if "junta" in sl and "aclaraci" in sl:
             score += 280.0
         if "apertura" in sl and "proposici" in sl:
             score += 260.0
-        if "visita" in sl and "instalaci" in sl:
+        if "visita" in sl and ("instalaci" in sl or "sitio" in sl):
             score += 240.0
-        if "acto de fallo" in sl or "fallo" in sl:
-            score += 200.0
+        if "acto de fallo" in sl or ("fallo" in sl and "adjudic" in sl):
+            score += 220.0
         if "fechas y horas" in sl or "cronograma" in sl:
             score += 150.0
+        if "inicio:" in sl and "terminación" in sl or "terminacion" in sl:
+            score += 200.0
+        if ChatbotRAGAgent._is_cronogram_literary_noise_sentence(sentence):
+            score -= 600.0
         return score
 
     @staticmethod
-    def _cronogram_literary_predicate(_sentence: str, sl: str) -> bool:
+    def _cronogram_literary_predicate(sentence: str, sl: str) -> bool:
+        if ChatbotRAGAgent._is_cronogram_literary_noise_sentence(sentence):
+            return False
         if any(
             k in sl
             for k in (
@@ -5832,6 +5970,8 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 "fechas y horas",
                 "presentación",
                 "presentacion",
+                "inscripcion",
+                "inscripción",
             )
         ):
             return True
@@ -5840,6 +5980,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             r"septiembre|octubre|noviembre|diciembre"
         )
         return bool(re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl))
+
+    @staticmethod
+    def _cronogram_literary_source_ok(meta: Dict[str, Any]) -> bool:
+        src = str(meta.get("source") or "").upper()
+        if "CATÁLOGO" in src or "CATALOGO" in src:
+            return False
+        if "CONSTRUCTORA" in src and "CONCEPTO" in src:
+            return False
+        return True
 
     @classmethod
     def _compose_cronogram_literary_fallback(
@@ -5855,6 +6004,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             primary_doc,
             cls._cronogram_literary_predicate,
             cls._score_cronogram_literary_sentence,
+            source_predicate=cls._cronogram_literary_source_ok,
         )
         return cls._finalize_literary_parts(
             [
