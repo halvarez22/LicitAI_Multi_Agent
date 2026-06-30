@@ -2,6 +2,18 @@ import React from 'react';
 import { AlertTriangle, CheckCircle2, CalendarClock } from 'lucide-react';
 import { formatFechaDisplay } from '../utils/criticalDatesDisplay.js';
 
+/** @param {Record<string, unknown>|undefined|null} prov */
+function hitoProvenanceLabel(prov) {
+    if (!prov || typeof prov !== 'object') return null;
+    if (prov.anchor_kind === 'indexed' && prov.page != null) {
+        return `Cita en bases · pág. ${prov.page}`;
+    }
+    if (prov.anchor_kind === 'checklist_fallback' || prov.badge === 'checklist_calendar') {
+        return 'Calendario del expediente (Fechas críticas)';
+    }
+    return null;
+}
+
 /**
  * Lista legible de hitos del procedimiento (fechas críticas).
  * @param {object} props
@@ -40,6 +52,8 @@ export default function CriticalDatesList({
         >
             {hitos.map((h) => {
                 const fecha = formatFechaDisplay(h.fecha_texto_raw);
+                const provLabel = hitoProvenanceLabel(h.provenance_ui);
+                const literal = String(h.bases_literal || '').trim();
                 const vencido = h.estado === 'vencido';
                 const hecho = h.estado === 'completado';
                 return (
@@ -79,9 +93,36 @@ export default function CriticalDatesList({
                                     marginTop: '4px',
                                     fontWeight: 600,
                                 }}
+                                title={literal || undefined}
                             >
                                 {fecha}
                             </div>
+                            {literal && literal !== fecha && (
+                                <div
+                                    style={{
+                                        fontSize: '10px',
+                                        color: '#64748b',
+                                        marginTop: '4px',
+                                        lineHeight: 1.35,
+                                    }}
+                                    title={literal}
+                                >
+                                    {literal.length > 160 ? `${literal.slice(0, 157).trim()}…` : literal}
+                                </div>
+                            )}
+                            {provLabel && (
+                                <div
+                                    style={{
+                                        fontSize: '9px',
+                                        color: '#64748b',
+                                        marginTop: '4px',
+                                        fontWeight: 700,
+                                        letterSpacing: '0.02em',
+                                    }}
+                                >
+                                    {provLabel}
+                                </div>
+                            )}
                             {vencido && (
                                 <div
                                     style={{

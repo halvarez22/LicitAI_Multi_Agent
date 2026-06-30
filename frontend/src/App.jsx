@@ -2870,6 +2870,7 @@ const App = () => {
                     </div>
 
                     <div
+                        id="sources-panel"
                         style={{
                             flex: '1 1 auto',
                             flexShrink: 0,
@@ -3928,6 +3929,15 @@ const App = () => {
                                                         key={idx}
                                                         type="button"
                                                         onClick={() => {
+                                                            const kind = action.action_kind || 'chat';
+                                                            const actionId = action.action_id || '';
+                                                            if (kind === 'ui' && actionId === 'OPEN_SOURCES_PANEL') {
+                                                                document
+                                                                    .getElementById('sources-panel')
+                                                                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                                return;
+                                                            }
+                                                            if (!action.payload) return;
                                                             setChatInput(action.payload);
                                                             // Forzamos el envío
                                                             setTimeout(() => {

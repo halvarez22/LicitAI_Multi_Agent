@@ -14,6 +14,7 @@ from app.checklist.hito_scheduler import (
     build_hitos_from_cronograma,
     calcular_porcentaje,
     merge_hitos_preservar_completados,
+    parse_fecha_hito,
 )
 from app.checklist.models import HitoModel, MarkHitoPayload, SubmissionChecklistModel
 
@@ -79,6 +80,79 @@ def _hitos_to_model_list(hitos_data: List[Dict[str, Any]]) -> List[HitoModel]:
     return [HitoModel.model_validate(h) for h in hitos_data]
 
 
+def _cronograma_dict_for_enrichment(cronograma: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(cronograma, dict):
+        return None
+    from app.agents.analyst import normalize_cronograma_dict
+
+    return normalize_cronograma_dict(cronograma)
+
+
+def _hitos_need_literary_enrichment(hitos: List[Dict[str, Any]]) -> bool:
+    from app.services.literary_cronogram_service import _literal_needs_repolish
+
+    for h in hitos:
+        if not isinstance(h, dict) or not h.get("id"):
+            continue
+        hid = str(h.get("id"))
+        stored = str(h.get("bases_literal") or "").strip()
+        if not stored:
+            return True
+        if _literal_needs_repolish(hid, stored):
+            return True
+        raw = str(h.get("fecha_texto_raw") or "")
+        if len(raw) > 100:
+            return True
+    return False
+
+
+async def _enrich_hitos_literary_hru(
+    memory: Any,
+    session_id: str,
+    session: Dict[str, Any],
+    hitos: List[Dict[str, Any]],
+    cronograma: Any,
+) -> List[Dict[str, Any]]:
+    """Literal de bases + procedencia + fecha compacta (alineación panel ↔ chat)."""
+    from app.config.settings import settings
+    from app.services.literary_cronogram_service import enrich_checklist_hitos_literary
+
+    cron_norm = _cronograma_dict_for_enrichment(cronograma)
+    timeout_s = float(settings.CRONOGRAMA_ENRICHMENT_TIMEOUT_S or 12.0)
+
+    def _run() -> List[Dict[str, Any]]:
+        enriched = enrich_checklist_hitos_literary(
+            hitos,
+            session_id,
+            session,
+            cronograma=cron_norm,
+        )
+        for h in enriched:
+            if not isinstance(h, dict):
+                continue
+            fh = parse_fecha_hito(str(h.get("fecha_texto_raw") or ""))
+            if fh is not None:
+                h["fecha_hora"] = fh
+        return enriched
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "checklist_literary_enrich_timeout session=%s timeout_s=%s",
+            session_id,
+            timeout_s,
+        )
+        return hitos
+    except Exception as exc:
+        logger.warning(
+            "checklist_literary_enrich_failed session=%s err=%s",
+            session_id,
+            str(exc)[:200],
+        )
+        return hitos
+
+
 def _model_to_storable(m: SubmissionChecklistModel) -> Dict[str, Any]:
     return m.model_dump(mode="json")
 
@@ -128,6 +202,10 @@ async def upsert_checklist_from_cronograma(
         merged = merge_hitos_preservar_completados(nuevos_raw, prev_hitos)
     else:
         merged = list(nuevos_raw)
+
+    merged = await _enrich_hitos_literary_hru(
+        memory, session_id, session, merged, cronograma_merged
+    )
 
     aplicar_estados_vencido(merged)
     pct = calcular_porcentaje(merged)
@@ -371,6 +449,23 @@ async def get_submission_checklist(
         block = session.get(SESSION_KEY)
     if isinstance(block, dict) and block.get("hitos"):
         try:
+            hitos_raw = [h for h in block["hitos"] if isinstance(h, dict)]
+            cron_for_enrich: Any = None
+            if _hitos_need_literary_enrichment(hitos_raw):
+                tasks = session.get("tasks_completed") or []
+                for t in reversed(tasks):
+                    if t.get("task") != "stage_completed:analysis":
+                        continue
+                    cron_for_enrich = _cronograma_from_analysis_result(t.get("result"))
+                    break
+                hitos_raw = await _enrich_hitos_literary_hru(
+                    memory,
+                    session_id,
+                    session,
+                    hitos_raw,
+                    cron_for_enrich,
+                )
+                block = {**block, "hitos": hitos_raw}
             m = SubmissionChecklistModel.model_validate(block)
             # Refrescar vencidos al leer
             hitos_d = [h.model_dump() for h in m.hitos]

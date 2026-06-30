@@ -69,8 +69,19 @@ class AgentInput(BaseModel):
 class SuggestedAction(BaseModel):
     """Modelo para botones de acción sugeridos en la UI"""
     label: str = Field(..., description="Texto que verá el usuario en el botón")
-    payload: str = Field(..., description="Comando técnico que se enviará al backend")
+    payload: str = Field(
+        default="",
+        description="Comando técnico enviado al backend cuando action_kind=chat",
+    )
     style: str = Field(default="primary", description="Estilo visual: primary, secondary, danger, etc.")
+    action_kind: str = Field(
+        default="chat",
+        description="chat: envía payload al chat; ui: acción local en frontend",
+    )
+    action_id: Optional[str] = Field(
+        default=None,
+        description="Identificador de acción UI (ej. OPEN_SOURCES_PANEL)",
+    )
 
 
 class AgentOutput(BaseModel):

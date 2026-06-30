@@ -1444,13 +1444,23 @@ def _body_obra_e1_carta_compromiso(
 ) -> str:
     """Carta-compromiso de la proposición (Anexo E-1) con montos del motor económico."""
     from app.services.economic_document_reapply import load_economic_payload
-    from app.services.obra_economic_annex_clauses import build_obra_e1_carta_compromiso_markdown
+    from app.services.obra_economic_annex_clauses import (
+        assemble_obra_e1_corpus,
+        build_obra_e1_carta_compromiso_markdown,
+    )
 
     session_state = doc_metadata.get("session_state") or {}
+    session_id = str(doc_metadata.get("session_id") or session_state.get("session_id") or "")
     _, _, resumen = load_economic_payload(session_state)
-    corpus = " ".join(
-        str(doc_metadata.get(k) or "")
-        for k in ("bases_corpus_hint", "req_snippet", "req_desc")
+    req_snippet = str(doc_metadata.get("req_snippet") or "")
+    req_desc = str(doc_metadata.get("req_desc") or "")
+    bases_hint = str(doc_metadata.get("bases_corpus_hint") or "")
+    corpus = assemble_obra_e1_corpus(
+        session_id=session_id,
+        session_state=session_state,
+        bases_corpus_hint=bases_hint,
+        req_snippet=req_snippet,
+        req_desc=req_desc,
     )
     concurso = _slot(
         doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
@@ -1461,6 +1471,16 @@ def _body_obra_e1_carta_compromiso(
         master_profile=master_profile or {},
         resumen=resumen,
         req_snippet=corpus,
+        bases_corpus_hint=bases_hint,
+        req_desc=req_desc,
+        session_id=session_id,
+        session_state=session_state,
+        obra_descripcion=str(
+            doc_metadata.get("obra_descripcion")
+            or doc_metadata.get("objeto_obra")
+            or ""
+        ),
+        session_name=str(session_state.get("name") or doc_metadata.get("session_name") or ""),
     )
 
 

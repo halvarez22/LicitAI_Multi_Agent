@@ -84,6 +84,15 @@ def test_parse_spanish_date_del_anio():
     assert dt.year == 2026 and dt.month == 1 and dt.day == 30
 
 
+def test_parse_spanish_date_del_anio_con_palabra_anio():
+    dt = parse_spanish_date_fragment(
+        "10 de diciembre del año 2025, a las 10:30 hrs"
+    )
+    assert dt is not None
+    assert dt.year == 2025 and dt.month == 12 and dt.day == 10
+    assert dt.hour == 10 and dt.minute == 30
+
+
 BARDA_GUANAJUATO_SNIPPET = """
 VISITA AL SITIO NOVENA. - De la visita al sitio. - los participantes podrán realizar conjuntamente
 con el servidor público que designe la convocante una visita al sitio donde se ejecutará la obra,

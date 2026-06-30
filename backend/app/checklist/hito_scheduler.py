@@ -118,11 +118,33 @@ def _compact_fecha_texto(raw: str, parsed: Optional[datetime]) -> str:
     return base
 
 
-def _hito_dict_from_canon(hito_id: str, valor_cronograma: str) -> Dict[str, Any]:
-    nombre = _NOMBRES_ES.get(hito_id, hito_id.replace("_", " ").title())
+def _first_spanish_date_fragment(text: str) -> Optional[str]:
+    """Primer fragmento «DD de mes de YYYY» en narrativa larga de bases."""
+    m = re.search(
+        r"\d{1,2}\s+de\s+[a-záéíóúñü]+\s+(?:de|del)\s+(?:año\s+)?20\d{2}"
+        r"(?:\s*(?:,|\s+)?(?:a\s+las\s+)?\d{1,2}[:h]\d{2}(?:\s*(?:horas?|hrs?\.?)?)?)?",
+        str(text or ""),
+        re.IGNORECASE,
+    )
+    return m.group(0).strip() if m else None
+
+
+def _resolve_display_fecha_raw(valor_cronograma: str) -> Tuple[str, Optional[datetime]]:
+    """Fecha compacta para panel; evita párrafos truncados en fecha_texto_raw."""
     raw = (valor_cronograma or "").strip() or "No especificado"
     parsed = parse_fecha_hito(raw)
-    fecha_raw = _compact_fecha_texto(raw, parsed) if parsed else raw
+    if parsed is None:
+        frag = _first_spanish_date_fragment(raw)
+        if frag:
+            parsed = parse_fecha_hito(frag)
+    if parsed is not None:
+        return _compact_fecha_texto(raw, parsed), parsed
+    return raw, None
+
+
+def _hito_dict_from_canon(hito_id: str, valor_cronograma: str) -> Dict[str, Any]:
+    nombre = _NOMBRES_ES.get(hito_id, hito_id.replace("_", " ").title())
+    fecha_raw, parsed = _resolve_display_fecha_raw(valor_cronograma)
     return {
         "id": hito_id,
         "nombre": nombre,

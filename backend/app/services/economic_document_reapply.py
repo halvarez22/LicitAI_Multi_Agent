@@ -424,9 +424,11 @@ def reapply_obra_economic_annexes(
     from app.agents.formats import _save_docx
     from app.services.administrative_letter_clauses import resolve_letter_asunto
     from app.services.obra_economic_annex_clauses import (
+        assemble_obra_e1_corpus,
         build_obra_e1_carta_compromiso_markdown,
         build_obra_e4_programa_markdown,
         build_obra_e5_cotizaciones_markdown,
+        is_official_obra_e1_mirror_content,
     )
 
     economic_data, mapeo_items, resumen = load_economic_payload(
@@ -477,21 +479,33 @@ def reapply_obra_economic_annexes(
     # E-1 carta-compromiso de la proposición
     if resumen.get("obra_breakdown"):
         e1_snippet = snippet_by_key.get("obra|E1", "")
-        e1_corpus = "\n".join(
-            p
-            for p in (
-                str(session_state.get("_obra_e1_snippet") or ""),
-                str(e1_snippet or ""),
-                str(session_state.get("bases_corpus_hint") or "")[:120000],
-            )
-            if p
+        e1_corpus = assemble_obra_e1_corpus(
+            session_id=session_id,
+            session_state=session_state,
+            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
+            req_snippet=str(e1_snippet or ""),
         )
         e1_body = build_obra_e1_carta_compromiso_markdown(
             concurso=concurso,
             master_profile=master_profile,
             resumen=resumen,
             req_snippet=e1_corpus,
+            session_id=session_id,
+            session_state=session_state,
+            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
+            obra_descripcion=str(
+                session_state.get("objeto_obra")
+                or doc_meta.get("obra_descripcion")
+                or ""
+            ),
+            session_name=str(session_state.get("name") or ""),
         )
+        e1_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "official_bases_mirror": is_official_obra_e1_mirror_content(e1_body),
+            "formal_closing": not is_official_obra_e1_mirror_content(e1_body),
+        }
         e1_candidates = [
             _find_sobre_economic_path(session_id, "obra|E1"),
             os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx"),
@@ -506,8 +520,7 @@ def reapply_obra_economic_annexes(
             if not e1_path or not os.path.isfile(e1_path):
                 continue
             e1_meta = {
-                **doc_meta,
-                "obra_pliego_contract": True,
+                **e1_meta,
                 "document_title": resolve_letter_asunto(
                     os.path.basename(e1_path), e1_snippet, "obra|E1"
                 ),
@@ -524,9 +537,8 @@ def reapply_obra_economic_annexes(
                 updated.append(e1_path)
         e1_new = os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx")
         if not os.path.isfile(e1_new):
-            e1_meta = {
-                **doc_meta,
-                "obra_pliego_contract": True,
+            e1_meta_new = {
+                **e1_meta,
                 "document_title": "Carta-Compromiso de la Proposición",
                 "req_snippet": e1_snippet,
             }
@@ -534,7 +546,7 @@ def reapply_obra_economic_annexes(
                 "CARTA-COMPROMISO DE LA PROPOSICIÓN",
                 e1_body,
                 e1_new,
-                e1_meta,
+                e1_meta_new,
             )
             updated.append(e1_new)
 

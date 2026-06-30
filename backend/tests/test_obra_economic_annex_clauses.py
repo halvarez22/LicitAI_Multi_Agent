@@ -12,6 +12,55 @@ from app.services.obra_economic_annex_clauses import (
 )
 
 
+BARDA_E1_OFFICIAL_FORMAT = """
+ANEXO E-1 (FORMATO)
+CARTA COMPROMISO DE PROPOSICIÓN
+ARQ. LAURA ELENA BECERRA GARCÍA
+DIRECTOR GENERAL DE OBRA PÚBLICA
+P R E S E N T E.
+HACEMOS REFERENCIA AL PROCEDIMIENTO DE ADJUDICACIÓN POR LICITACIÓN PÚBLICA NUM. ___________________ CONVOCADO POR LA DIRECCIÓN A SU DIGNO CARGO, PARA ADJUDICAR EL CONTRATO RELATIVO A LA REALIZACIÓN DE LA OBRA: _________________________________________________________________________________________.
+SOBRE ESTE PARTICULAR, MANIFESTAMOS NUESTRO INTERÉS DE PARTICIPAR Y AL EFECTO, PARA PREPARAR Y PRESENTAR NUESTRA PROPUESTA, ADQUIRIMOS LAS BASES Y LA DOCUMENTACIÓN NECESARIA, ASIMISMO, CONOCEMOS Y OBSERVAMOS, LA LEY DE OBRA PÚBLICA Y SERVICIOS RELACIONADOS CON LA MISMA PARA EL ESTADO Y LOS MUNICIPIOS DE GUANAJUATO Y EL REGLAMENTO DE OBRA PÚBLICA Y SERVICIOS RELACIONADOS CON LA MISMA PARA EL MUNICIPIO DE LEÓN, GTO. Y DEMÁS DISPOSICIONES JURÍDICAS Y ADMINISTRATIVAS QUE PUDIEREN APLICARSE.
+DE CONFORMIDAD CON LO ANTERIOR, PRESENTAMOS A SU CONSIDERACIÓN NUESTRA PROPUESTA CON UN VALOR DE $_________________________(PESOS 00/100 M.N.). INCLUYENDO I.V.A.
+LA CUAL EJECUTAREMOS EN UN PLAZO DE EJECUCIÓN DE____________ AL _________ DE ACUERDO A LO ESTABLECIDO EN LA CONVOCATORIA Y EL PROGRAMA DE EJECUCIÓN PRESENTADO EN MI PROPUESTA.
+ESTA PROPOSICIÓN ECONÓMICA, SE INTEGRA DE MANERA SUCESIVA CON LA DOCUMENTACIÓN Y ANEXOS QUE ESTABLECEN LAS BASES Y REQUISITOS Y, QUE SE TIENEN POR REPRODUCIDAS ÍNTEGRAMENTE.
+FINALMENTE MANIFESTAMOS QUE, EN CASO DE RESULTAR FAVORECIDOS CON LA ADJUDICACIÓN DEL CONTRATO, NOS SUJETAMOS A FORMALIZARLO EN EL TÉRMINO DE CINCO DÍAS HÁBILES, POSTERIORES A ESTA NOTIFICACIÓN Y A OTORGAR LAS GARANTÍAS A QUE ESTAMOS OBLIGADOS CONFORME A LA LEY DE LA MATERIA.
+A T E N T A M E N T E
+NOMBRE Y FIRMA DEL PARTICIPANTE
+"""
+
+
+def test_obra_e1_uses_official_bases_format_when_embedded():
+    corpus = (
+        BARDA_E1_OFFICIAL_FORMAT
+        + "\nANEXO E-2 Catálogo de conceptos. "
+        "contando con 18 días naturales para la conclusión de la obra. "
+        "LICITACIÓN PÚBLICA NUM. D/080/2025"
+    )
+    body = build_obra_e1_carta_compromiso_markdown(
+        concurso="",
+        master_profile={
+            "razon_social": "Constructora Infraestructura Nacional, S.A. de C.V.",
+            "rfc": "CIN2506089A3",
+            "representante_legal": "Juan Carlos López Martínez",
+        },
+        resumen={"total": 1334.0, "iva": 184.0, "moneda": "MXN"},
+        req_snippet=corpus,
+        session_name="BARDA PRIMARIA LOPEZ RAYON",
+    )
+    up = body.upper()
+    assert "ANEXO E-1" in up
+    assert "CARTA COMPROMISO DE PROPOSICIÓN" in up
+    assert "ARQ. LAURA ELENA BECERRA GARCÍA" in up
+    assert "P R E S E N T E" in up
+    assert "D/080/2025" in body
+    assert "$1,334.00" in body
+    assert "18 DÍAS NATURALES" in up
+    assert "JUAN CARLOS LÓPEZ MARTÍNEZ" in up
+    assert "REPRESENTANTE LEGAL" in up
+    assert "manifestamos:" not in body.lower()
+    assert "1. Presentamos la presente carta-compromiso" not in body
+
+
 def test_obra_e1_total_and_plazo_from_bases_not_placeholder_note():
     corpus = (
         "ANEXO E-1 Carta-Compromiso de la Proposición importe total incluyendo I.V.A. "

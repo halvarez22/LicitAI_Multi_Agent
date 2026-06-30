@@ -137,6 +137,283 @@ def _clean_economic_req_line(snippet: str, annex_code: str, fallback: str) -> st
     return fallback
 
 
+_E1_FORMAT_START_RE = re.compile(
+    r"(?is)anexo\s+e[\s_.-]*1\s*(?:\(\s*formato\s*\))?\s*"
+    r"[\s\r\n]*carta\s+compromiso\s+de\s+proposici[oó]n"
+)
+_E1_FORMAT_ALT_START_RE = re.compile(
+    r"(?is)(?:^|\n)\s*carta\s+compromiso\s+de\s+proposici[oó]n\s*(?:\n|$)"
+)
+_E1_HACEMOS_REF_RE = re.compile(
+    r"(?is)hacemos\s+referencia\s+al\s+procedimiento\s+de\s+adjudicaci[oó]n"
+)
+
+
+def fetch_obra_e1_format_corpus_from_index(session_id: str) -> str:
+    """
+    Recupera chunks del índice que contienen el machote E-1 embebido en bases.
+    """
+    if not str(session_id or "").strip():
+        return ""
+    from app.services.vector_service import VectorDbServiceClient
+
+    vdb = VectorDbServiceClient()
+    parts: List[str] = []
+    seen: set = set()
+
+    def _add(text: str) -> None:
+        t = str(text or "").strip()
+        if not t or t in seen:
+            return
+        low = t.lower()
+        if "carta compromiso" not in low and "carta-compromiso" not in low:
+            return
+        if "anexo" in low and "e-1" not in low and "e 1" not in low:
+            if "hacemos referencia" not in low and "presente" not in low:
+                return
+        seen.add(t)
+        parts.append(t)
+
+    queries = (
+        "ANEXO E-1 FORMATO CARTA COMPROMISO DE PROPOSICION PRESENTE",
+        "CARTA COMPROMISO DE PROPOSICIÓN DIRECTOR GENERAL OBRA PÚBLICA PRESENTE",
+        "HACEMOS REFERENCIA AL PROCEDIMIENTO DE ADJUDICACIÓN POR LICITACIÓN PÚBLICA",
+        "REALIZACIÓN DE LA OBRA GUANAJUATO LEÓN CARTA COMPROMISO",
+    )
+    for q in queries:
+        try:
+            res = vdb.query_texts(session_id, q, n_results=20)
+            for doc in res.get("documents") or []:
+                _add(str(doc or ""))
+        except Exception:
+            continue
+
+    try:
+        for doc, _meta in vdb.scan_session_chunks(session_id):
+            _add(str(doc or ""))
+    except Exception:
+        pass
+
+    return "\n\n".join(parts)[:160000]
+
+
+def assemble_obra_e1_corpus(
+    *,
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+    bases_corpus_hint: str = "",
+    req_snippet: str = "",
+    req_desc: str = "",
+) -> str:
+    """Corpus unificado para detectar y rellenar el machote E-1 (HRU, sin hardcode)."""
+    state = session_state or {}
+    chunks: List[str] = []
+    for part in (
+        str(state.get("_obra_e1_format_corpus") or ""),
+        fetch_obra_e1_format_corpus_from_index(session_id),
+        str(state.get("_obra_e1_snippet") or ""),
+        str(bases_corpus_hint or ""),
+        str(req_snippet or ""),
+        str(req_desc or ""),
+        str(state.get("bases_corpus_hint") or "")[:120000],
+    ):
+        p = str(part or "").strip()
+        if p and p not in chunks:
+            chunks.append(p)
+    return "\n\n".join(chunks)
+
+
+def is_official_obra_e1_mirror_content(content: str) -> bool:
+    """True si el cuerpo ya es el machote E-1 de bases (no carta genérica)."""
+    up = str(content or "").upper()
+    if "ANEXO E-1" in up and "FORMATO" in up:
+        return True
+    return (
+        "CARTA COMPROMISO DE PROPOSICI" in up
+        and "HACEMOS REFERENCIA AL PROCEDIMIENTO" in up
+        and "PRESENTE" in up
+    )
+
+
+def extract_obra_e1_official_format(corpus: str) -> Optional[str]:
+    """
+    Extrae el machote «Anexo E-1 / Carta compromiso» embebido en bases (fail-closed).
+
+    Returns:
+        Texto del formato oficial o None si no hay ancla verificable.
+    """
+    text = str(corpus or "")
+    if len(text) < 120:
+        return None
+    start = -1
+    start_m = _E1_FORMAT_START_RE.search(text)
+    if start_m:
+        start = start_m.start()
+    else:
+        alt_m = _E1_FORMAT_ALT_START_RE.search(text)
+        if alt_m:
+            start = alt_m.start()
+        else:
+            carta_m = re.search(r"(?is)carta\s+compromiso\s+de\s+proposici[oó]n", text)
+            if carta_m:
+                window = text[carta_m.start() : carta_m.start() + 2400]
+                if "presente" in window.lower() or _E1_HACEMOS_REF_RE.search(window):
+                    start = carta_m.start()
+            if start < 0:
+                ref_m = _E1_HACEMOS_REF_RE.search(text)
+                if ref_m:
+                    head = text[max(0, ref_m.start() - 1200) : ref_m.start()]
+                    carta_back = re.search(
+                        r"(?is)carta\s+compromiso\s+de\s+proposici[oó]n",
+                        head,
+                    )
+                    start = (
+                        max(0, ref_m.start() - 1200) + carta_back.start()
+                        if carta_back
+                        else max(0, ref_m.start() - 400)
+                    )
+    if start < 0:
+        return None
+    tail = text[start:]
+    end_m = re.search(
+        r"(?is)(a\s*t\s*e\s*n\s*t\s*a\s*m\s*e\s*n\s*t\s*e"
+        r"(?:\s*\n+\s*nombre\s+y\s+firma\s+del\s+participante)?)",
+        tail,
+    )
+    chunk = tail[: end_m.end()] if end_m else tail[:4000]
+    chunk = re.sub(r"[ \t]+\n", "\n", chunk)
+    chunk = re.sub(r"\n{3,}", "\n\n", chunk).strip()
+    if len(chunk) < 180:
+        return None
+    low = chunk.lower()
+    if "presente" not in low and "licitaci" not in low:
+        return None
+    if "propuesta" not in low and "proposici" not in low:
+        return None
+    return chunk
+
+
+def extract_obra_descripcion_from_corpus(corpus: str, fallback: str = "") -> str:
+    """Objeto de la obra publicado en bases (sin inventar denominación)."""
+    text = str(corpus or "")
+    patterns = (
+        r"(?is)realizaci[oó]n de la obra[:\s_]+(.+?)(?:\.|_{4,}|\n)",
+        r"(?is)adjudicar el contrato relativo a la realizaci[oó]n de la obra[:\s_]+(.+?)(?:\.|_{4,})",
+        r"(?is)obra p[uú]blica[^.\n]{0,60}(?:denominada|consistente en)[:\s]+(.+?)(?:\.|_{4,})",
+        r"(?is)construcci[oó]n de[^.\n]{10,160}",
+    )
+    for pat in patterns:
+        m = re.search(pat, text)
+        if not m:
+            continue
+        desc = re.sub(r"\s+", " ", m.group(1) if m.lastindex else m.group(0)).strip(" _.")
+        if len(desc) >= 10:
+            return desc.upper()
+    fb = str(fallback or "").strip()
+    return fb.upper() if fb else ""
+
+
+def _extract_licitacion_numero(concurso: str, corpus: str) -> str:
+    blob = f"{concurso} {corpus}"
+    for pat in (
+        r"(?i)licitaci[oó]n\s+p[uú]blica\s+(?:num\.?\s*)?([A-Z]/\d+/\d+)",
+        r"(?i)\b([A-Z]/\d+/\d+)\b",
+        r"(?i)num\.?\s*([A-Z]/\d+/\d+)",
+    ):
+        m = re.search(pat, blob)
+        if m:
+            return m.group(1).replace(" ", "").upper()
+    label = str(concurso or "").strip()
+    return label[:80] if label else "[Consignar]"
+
+
+def fill_obra_e1_official_format(
+    template: str,
+    *,
+    concurso: str,
+    corpus: str,
+    obra_descripcion: str,
+    master_profile: Dict[str, Any],
+    resumen: Dict[str, Any],
+    plazo_ejecucion: str,
+) -> str:
+    """Rellena el machote E-1 de bases con datos del oferente y motor económico."""
+    out = str(template or "")
+    num = _extract_licitacion_numero(concurso, corpus)
+    obra = str(obra_descripcion or "").strip() or extract_obra_descripcion_from_corpus(
+        corpus, ""
+    )
+    razon = _slot(master_profile.get("razon_social"), "[Consignar — razón social]")
+    rfc = _slot(master_profile.get("rfc"), "[Consignar — RFC]")
+    rep = _slot(
+        master_profile.get("representante_legal") or master_profile.get("representante"),
+        "[Consignar — representante legal]",
+    )
+    total = float(resumen.get("total") or 0)
+    plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
+    plazo_fill = plazo.upper() if plazo else "[CONSIGNAR — PLAZO EN BASES]"
+
+    out = re.sub(
+        r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}",
+        rf"\g<1>{num}",
+        out,
+    )
+    out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
+    out = re.sub(r"(?i)\bnum\.?\s*_{3,}", f"NUM. {num}", out, count=1)
+
+    if obra:
+        out = re.sub(
+            r"(?is)(realizaci[oó]n de la obra[:\s]*)_{3,}",
+            rf"\g<1>{obra}",
+            out,
+            count=1,
+        )
+        if re.search(r"_{10,}", out):
+            out = re.sub(r"_{10,}", obra, out, count=1)
+
+    if total > 0:
+        money = f"${total:,.2f}"
+        out = re.sub(r"\$\s*_{3,}", money, out)
+        out = re.sub(
+            r"\(PESOS\s+00/100",
+            f"(PESOS {money}",
+            out,
+            count=1,
+        )
+    else:
+        out = re.sub(
+            r"\$\s*_{3,}",
+            "[Consignar — importe total con I.V.A. del motor económico]",
+            out,
+        )
+
+    out = re.sub(
+        r"(?i)plazo de ejecuci[oó]n de\s*_{3,}\s*al\s*_{3,}",
+        f"PLAZO DE EJECUCIÓN DE {plazo_fill}",
+        out,
+    )
+    out = re.sub(
+        r"(?i)plazo de ejecuci[oó]n de_{3,} al _{3,}",
+        f"PLAZO DE EJECUCIÓN DE {plazo_fill}",
+        out,
+    )
+
+    signature = (
+        f"\n\n{rep.upper()}\n"
+        f"REPRESENTANTE LEGAL\n"
+        f"{razon.upper()}\n"
+        f"R.F.C. {rfc.upper()}"
+    )
+    out = re.sub(
+        r"(?i)nombre\s+y\s+firma\s+del\s+participante\.?",
+        signature.strip(),
+        out,
+    )
+    if "REPRESENTANTE LEGAL" not in out.upper():
+        out = out.rstrip() + signature
+    return out.strip()
+
+
 def build_obra_e1_carta_compromiso_markdown(
     *,
     concurso: str,
@@ -144,13 +421,42 @@ def build_obra_e1_carta_compromiso_markdown(
     resumen: Dict[str, Any],
     req_snippet: str = "",
     plazo_ejecucion: str = "",
+    obra_descripcion: str = "",
+    session_name: str = "",
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+    bases_corpus_hint: str = "",
+    req_desc: str = "",
 ) -> str:
     """
     Carta-compromiso de la proposición (Anexo E-1) con importe total e IVA desde motor.
 
-    El plazo se toma de bases; si no hay evidencia, se deja [Consignar] (HITL).
+    Si las bases publican el machote E-1, se usa como espejo (HRU); si no, carta genérica.
     """
-    corpus = str(req_snippet or "")
+    corpus = assemble_obra_e1_corpus(
+        session_id=session_id,
+        session_state=session_state,
+        bases_corpus_hint=bases_corpus_hint,
+        req_snippet=req_snippet,
+        req_desc=req_desc,
+    )
+    plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
+    official = extract_obra_e1_official_format(corpus)
+    if official:
+        obra = (
+            str(obra_descripcion or "").strip()
+            or extract_obra_descripcion_from_corpus(corpus, session_name)
+        )
+        return fill_obra_e1_official_format(
+            official,
+            concurso=concurso,
+            corpus=corpus,
+            obra_descripcion=obra,
+            master_profile=master_profile,
+            resumen=resumen,
+            plazo_ejecucion=plazo,
+        )
+
     req_line = _clean_economic_req_line(
         req_snippet,
         "E-1",
@@ -176,7 +482,6 @@ def build_obra_e1_carta_compromiso_markdown(
         if total > 0
         else "**[Consignar]** — importe total con I.V.A. verificado en el motor económico"
     )
-    plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
     plazo_line = plazo if plazo else "**[Consignar]** — plazo congruente con el programa de ejecución"
 
     parts = [

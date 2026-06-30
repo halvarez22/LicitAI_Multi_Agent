@@ -23,6 +23,23 @@ _MAX_PAGE_CHARS = 12000
 _MAX_PARAGRAPH_CHARS = 2400
 
 
+def _sanitize_indexed_hru_text(text: str) -> str:
+    """Quita metadatos de chunk indexados ([FUENTE:…], páginas sueltas) para UI HRU."""
+    t = str(text or "")
+    t = re.sub(r"\[FUENTE:[^\]]*\]\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(
+        r"[^\[\n]{8,200}?\.pdf\s*\|\s*PÁGINA:\s*\d+\]",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(r"\s*\|\s*PÁGINA:\s*\d+\]", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"---\s*PÁGINA\s+\d+\s*---", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*\d{1,3}\s*$", "", t, flags=re.MULTILINE)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
 def _find_match_span(text: str, literal: str) -> tuple[int, int]:
     if not text or not literal:
         return -1, -1
@@ -204,6 +221,9 @@ async def fetch_bases_excerpt_v1(
         page_text = snippet_fallback
         prov_source = ev.get("provenance") or "evidence_snippet"
 
+    page_text = _sanitize_indexed_hru_text(page_text)
+    snippet_fallback = _sanitize_indexed_hru_text(snippet_fallback)
+
     if not page_text:
         reason = "page_not_indexed" if page_val is None else "empty_page_content"
         try:
@@ -225,13 +245,32 @@ async def fetch_bases_excerpt_v1(
             },
         }
 
-    paragraph = _extract_paragraph(page_text, literal)
+    paragraph = _sanitize_indexed_hru_text(_extract_paragraph(page_text, literal))
     if not paragraph and snippet_fallback:
         paragraph = snippet_fallback
     if not paragraph:
-        paragraph = _snippet_from_doc(literal, page_text, max_len=_MAX_PARAGRAPH_CHARS)
+        paragraph = _sanitize_indexed_hru_text(
+            _snippet_from_doc(literal, page_text, max_len=_MAX_PARAGRAPH_CHARS)
+        )
+
+    lit_fp = alert_fingerprint(literal)
+    para_fp = alert_fingerprint(paragraph)
+    if lit_fp and lit_fp[:48] not in para_fp and len(literal) >= 40:
+        paragraph = literal[:_MAX_PARAGRAPH_CHARS].strip()
 
     excerpt_mode = "full_page" if page_val is not None and prov_source in ("vector_index", "index_scan") else "snippet_fallback"
+
+    match_confidence = ev.get("match_confidence")
+    para_fp_final = alert_fingerprint(paragraph)
+    if lit_fp and lit_fp[:48] in para_fp_final:
+        match_confidence = "alta"
+    elif not match_confidence:
+        if page_val is not None:
+            match_confidence = "media"
+        else:
+            match_confidence = "baja"
+
+    sanitized_page = page_text[:_MAX_PAGE_CHARS] if len(page_text) > _MAX_PAGE_CHARS else page_text
 
     return {
         "schema_version": _SCHEMA,
@@ -241,8 +280,8 @@ async def fetch_bases_excerpt_v1(
         "source": resolved_source,
         "paragraph": paragraph,
         "excerpt_mode": excerpt_mode,
-        "page_text_truncated": page_text[:_MAX_PAGE_CHARS] if len(page_text) > _MAX_PAGE_CHARS else None,
-        "match_confidence": ev.get("match_confidence") or ("alta" if page_val else "media"),
+        "page_text_truncated": sanitized_page if len(page_text) > _MAX_PAGE_CHARS else None,
+        "match_confidence": match_confidence,
         "provenance_ui": {
             "source": prov_source,
             "session_id": session_id,

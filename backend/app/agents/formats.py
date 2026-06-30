@@ -729,6 +729,21 @@ class FormatsAgent(BaseAgent):
                     error=str(exc)[:120],
                 )
         try:
+            from app.services.obra_economic_annex_clauses import (
+                fetch_obra_e1_format_corpus_from_index,
+            )
+
+            e1_blob = fetch_obra_e1_format_corpus_from_index(session_id)
+            hint = str(session_state.get("bases_corpus_hint") or "")
+            if e1_blob and "carta compromiso de proposici" not in hint.lower():
+                session_state["bases_corpus_hint"] = f"{hint}\n\n{e1_blob}"[:160000]
+        except Exception as exc:
+            logger.warning(
+                "formats_e1_corpus_hint_failed",
+                session_id=session_id,
+                error=str(exc)[:120],
+            )
+        try:
             from app.services.convocante_resolver import (
                 extract_convocante_from_text,
                 merge_convocante_into_session_patch,
@@ -1488,6 +1503,9 @@ class FormatsAgent(BaseAgent):
                 strip_redundant_signature_blocks,
                 try_build_clause_markdown,
             )
+            from app.services.obra_economic_annex_clauses import (
+                is_official_obra_e1_mirror_content,
+            )
 
             req_letter_meta = resolve_letter_session_metadata(
                 session_state,
@@ -1498,6 +1516,9 @@ class FormatsAgent(BaseAgent):
                 **doc_metadata,
                 **{k: v for k, v in req_letter_meta.items() if v},
                 "req_snippet": req_snippet or req_desc,
+                "req_desc": req_desc,
+                "session_id": session_id,
+                "session_state": session_state,
             }
             req_doc_metadata["obra_tabular"] = is_obra_tabular_annex(raw_name)
             req_doc_metadata["obra_pliego_contract"] = is_obra_pliego_contract_annex(
@@ -1551,6 +1572,9 @@ class FormatsAgent(BaseAgent):
             if clause_body and not template_id:
                 content = clause_body
                 materialization_route = "deterministic_clause"
+                if is_official_obra_e1_mirror_content(clause_body):
+                    req_doc_metadata["official_bases_mirror"] = True
+                    req_doc_metadata["formal_closing"] = False
             elif template_id:
                 tpl_data = self._template_data(session_id, master_profile, doc_metadata, user_inputs)
                 content = self.template_engine.render(template_id, tpl_data)
@@ -1938,12 +1962,18 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         if (metadata or {}).get("obra_pliego_contract")
         else title
     )
-    doc.add_heading(heading.upper(), 1)
-
     obra_tabular = bool((metadata or {}).get("obra_tabular"))
     obra_pliego_contract = bool((metadata or {}).get("obra_pliego_contract"))
+    from app.services.obra_economic_annex_clauses import is_official_obra_e1_mirror_content
 
-    # LUGAR Y FECHA
+    official_mirror = bool((metadata or {}).get("official_bases_mirror")) or (
+        obra_pliego_contract and is_official_obra_e1_mirror_content(content)
+    )
+
+    if not official_mirror:
+        doc.add_heading(heading.upper(), 1)
+
+    # LUGAR Y FECHA (omitido en espejo del machote E-1 publicado en bases)
     footer_text = metadata.get("footer_text", "") if metadata else ""
     domicilio_ref = str((metadata or {}).get("domicilio") or "").strip()
     if not domicilio_ref and "Domicilio:" in footer_text:
@@ -1953,7 +1983,8 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         ciudad = format_letter_lugar_ciudad(city_from_domicilio(domicilio_ref), domicilio_ref)
     if is_invalid_letter_lugar(ciudad):
         ciudad = "México"
-    doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
+    if not official_mirror:
+        doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
     if not obra_pliego_contract:
         doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
@@ -2016,8 +2047,8 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     if table_buffer:
         flush_table(table_buffer)
             
-    # Firma al calce (formal)
-    if metadata and metadata.get("formal_closing", True):
+    # Firma al calce (formal) — el machote E-1 ya trae ATENTAMENTE y firma del participante
+    if metadata and metadata.get("formal_closing", True) and not official_mirror:
         doc.add_paragraph("\n\n")
         p_at = doc.add_paragraph("A T E N T A M E N T E\n")
         p_at.alignment = WD_ALIGN_PARAGRAPH.CENTER

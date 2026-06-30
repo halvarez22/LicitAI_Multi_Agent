@@ -17,8 +17,30 @@ from app.agents.mission_data_extractor import MissionDataExtractor
 from app.services.numeric_validator import NumericValidator
 from app.services.job_service import get_job_status, get_active_session_job
 from app.services.tender_router_service import TenderRouterService
+from app.services.junta_bases_corpus import _BASES_FILENAME_RE
 
 logger = get_logger(__name__)
+
+# Documentos de licitante/cotización — no bases del procedimiento (universal, sin mapa por convocante).
+_LITERARY_NON_BASES_SOURCE_RE = re.compile(
+    r"(?i)\b(cat[aá]logo|cotizaci[oó]n|cotizador|presupuesto|conceptos|"
+    r"propuesta\s+econ[oó]mica|lista\s+de\s+precios)\b"
+)
+
+_CRONOGRAM_MONTH_NAMES = (
+    r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+    r"septiembre|octubre|noviembre|diciembre"
+)
+_CRONOGRAM_ACT_MARKERS = (
+    "junta",
+    "aclaraci",
+    "visita",
+    "apertura",
+    "fallo",
+    "presentaci",
+    "inscripci",
+    "cronograma",
+)
 
 
 def _looks_like_bases_clarification_query(user_query: str) -> bool:
@@ -5147,6 +5169,28 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         nk = unicodedata.normalize("NFD", (query or "").strip().lower())
         return "".join(c for c in nk if unicodedata.category(c) != "Mn")
 
+    @staticmethod
+    def _resolve_primary_bases_doc(sources: List[str]) -> Optional[str]:
+        """Prioriza PDF de bases sobre convocatoria/catálogo al anclar el pliego."""
+        if not sources:
+            return None
+
+        def _rank(name: str) -> tuple[int, str]:
+            sl = str(name or "").lower()
+            if "bases" in sl and "convocatoria" not in sl:
+                return (0, name)
+            if "bases" in sl:
+                return (1, name)
+            if "convocatoria" in sl:
+                return (2, name)
+            if "licitacion" in sl or "licitación" in sl:
+                return (3, name)
+            if sl.endswith(".pdf"):
+                return (4, name)
+            return (9, name)
+
+        return sorted(sources, key=_rank)[0]
+
     @classmethod
     def _detect_cronogram_intent(cls, query: str) -> bool:
         """
@@ -5340,26 +5384,51 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         focal_docs: List[str],
     ) -> tuple[List[str], List[Dict[str, Any]]]:
         """
-        Hidrata solo páginas con calendario real (actos + fechas), máx. 4. Sin fijar número de página.
+        Hidrata páginas con calendario real (actos + fechas), máx. 6.
+        Incluye barrido del índice además de hits focal RAG (recupera p. ej. junta en pág. 29).
         """
         if not primary_doc:
             return [], []
         pinned_pages: List[Any] = []
         seen_pg: set = set()
+
+        def _pin_page(pg: Any) -> None:
+            if pg is None or pg in seen_pg:
+                return
+            seen_pg.add(pg)
+            pinned_pages.append(pg)
+
         for meta, doc in zip(focal_metas, focal_docs):
             pg = meta.get("page")
-            if pg is None or pg in seen_pg:
-                continue
             if self._is_cronogram_calendar_chunk(doc or ""):
-                seen_pg.add(pg)
-                pinned_pages.append(pg)
+                _pin_page(pg)
+        try:
+            for doc, meta in self.vector_db.scan_session_chunks(
+                session_id, source_filter=primary_doc
+            ):
+                pg = meta.get("page")
+                if pg in seen_pg:
+                    continue
+                full = "\n".join(
+                    self.vector_db.fetch_page_documents(session_id, primary_doc, pg) or []
+                )
+                blob = full or doc or ""
+                if self._is_cronogram_calendar_chunk(blob):
+                    _pin_page(pg)
+                if len(pinned_pages) >= 6:
+                    break
+        except Exception:
+            pass
+
         out_docs: List[str] = []
         out_metas: List[Dict[str, Any]] = []
-        for pg in pinned_pages[:4]:
-            for full in self.vector_db.fetch_page_documents(session_id, primary_doc, pg):
-                if full and full not in out_docs and self._is_cronogram_calendar_chunk(full):
-                    out_docs.append(full)
-                    out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
+        for pg in pinned_pages[:6]:
+            merged = "\n".join(
+                self.vector_db.fetch_page_documents(session_id, primary_doc, pg) or []
+            )
+            if merged and self._is_cronogram_calendar_chunk(merged):
+                out_docs.append(merged)
+                out_metas.append({"source": primary_doc, "page": pg, "hydrated": True})
         return out_docs, out_metas
 
     # Combo garantías: búsqueda focal contractuales (sin % ni montos fijos por expediente).
@@ -5571,7 +5640,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         metadatas: List[Dict[str, Any]],
         user_query: str,
         primary_doc: Optional[str] = None,
-    ) -> str:
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
         """Citas literales de garantías desde fragmentos indexados (sin narrativa del LLM)."""
         q_low = str(user_query or "").lower()
         annex_ref = bool(re.search(r"anexo\s+1\b", q_low))
@@ -5589,8 +5658,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             parts.append("Según los fragmentos indexados de las bases, sobre **garantías**:")
         seen: set[str] = set()
         ranked: List[tuple[float, str]] = []
+        top: Optional[Dict[str, Any]] = None
         for doc, meta in zip(context_docs, metadatas):
-            cite = cls._format_literary_cite(meta if isinstance(meta, dict) else {}, primary_doc)
+            meta_dict = meta if isinstance(meta, dict) else {}
+            cite = cls._format_literary_cite(meta_dict, primary_doc)
             for body in cls._iter_sanitized_chunk_bodies(doc or ""):
                 for sent in cls._split_penalty_sentences(body):
                     s = cls._strip_chunk_source_prefix(sent).strip()
@@ -5608,52 +5679,71 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     if key in seen:
                         continue
                     seen.add(key)
-                    ranked.append(
-                        (
-                            cls._score_guarantee_literary_sentence(s),
-                            f"- {s}\n  {cite}",
-                        )
-                    )
+                    score = cls._score_guarantee_literary_sentence(s)
+                    ranked.append((score, f"- {s}\n  {cite}"))
+                    if score > 0 and (top is None or score > top.get("_score", 0)):
+                        top = {
+                            "literal": s,
+                            "source": meta_dict.get("source"),
+                            "page": meta_dict.get("page"),
+                            "_score": score,
+                        }
         ranked.sort(key=lambda pair: (-pair[0], pair[1]))
-        bullets = [line for _, line in ranked[:8]]
+        bullets = [line for score, line in ranked if score > 0][:8]
         if not bullets:
-            return ""
+            return "", None
         parts.extend(bullets)
         parts.append("")
         parts.append(
             "**Siguiente paso:** Revisa **Fuentes (bases)** para el contexto completo del capítulo de garantías."
         )
-        return "\n".join(parts)
+        if top:
+            top.pop("_score", None)
+        return "\n".join(parts), top
 
     @staticmethod
     def _literary_sources_actions() -> List[Dict[str, Any]]:
         return [
             {
                 "label": "Ver Fuentes (bases)",
-                "payload": "CMD_SHOW_SOURCES",
+                "payload": "",
                 "style": "primary",
+                "action_kind": "ui",
+                "action_id": "OPEN_SOURCES_PANEL",
             },
         ]
 
+    @staticmethod
+    def _top_literary_citation_from_ranked(
+        ranked: List[tuple[float, str, str, Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        for score, sentence, _cite, meta in ranked:
+            if score > 0:
+                return {
+                    "literal": sentence,
+                    "source": meta.get("source"),
+                    "page": meta.get("page"),
+                }
+        return None
+
     @classmethod
-    def _build_ranked_literary_bullets(
+    def _rank_literary_items(
         cls,
         context_docs: List[str],
         metadatas: List[Dict[str, Any]],
         primary_doc: Optional[str],
         topic_predicate: Any,
         score_fn: Any,
-        max_bullets: int = 8,
         source_predicate: Any = None,
-    ) -> List[str]:
+        source_score_fn: Any = None,
+    ) -> List[tuple[float, str, str, Dict[str, Any]]]:
         seen: set[str] = set()
-        ranked: List[tuple[float, str]] = []
+        ranked: List[tuple[float, str, str, Dict[str, Any]]] = []
         for doc, meta in zip(context_docs, metadatas):
-            if source_predicate and not source_predicate(meta if isinstance(meta, dict) else {}):
+            meta_dict = meta if isinstance(meta, dict) else {}
+            if source_predicate and not source_predicate(meta_dict):
                 continue
-            cite = cls._format_literary_cite(
-                meta if isinstance(meta, dict) else {}, primary_doc
-            )
+            cite = cls._format_literary_cite(meta_dict, primary_doc)
             for body in cls._iter_sanitized_chunk_bodies(doc or ""):
                 for sent in cls._split_penalty_sentences(body):
                     s = cls._strip_chunk_source_prefix(sent).strip()
@@ -5671,9 +5761,39 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     if key in seen:
                         continue
                     seen.add(key)
-                    ranked.append((float(score_fn(s)), f"- {s}\n  {cite}"))
+                    score = float(score_fn(s))
+                    if source_score_fn:
+                        score += float(source_score_fn(meta_dict))
+                    ranked.append((score, s, cite, meta_dict))
         ranked.sort(key=lambda pair: (-pair[0], pair[1]))
-        return [line for score, line in ranked if score > 0][:max_bullets]
+        return ranked
+
+    @classmethod
+    def _build_ranked_literary_bullets(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        primary_doc: Optional[str],
+        topic_predicate: Any,
+        score_fn: Any,
+        max_bullets: int = 8,
+        source_predicate: Any = None,
+        source_score_fn: Any = None,
+    ) -> List[str]:
+        ranked = cls._rank_literary_items(
+            context_docs,
+            metadatas,
+            primary_doc,
+            topic_predicate,
+            score_fn,
+            source_predicate=source_predicate,
+            source_score_fn=source_score_fn,
+        )
+        return [
+            f"- {s}\n  {cite}"
+            for score, s, cite, _meta in ranked
+            if score > 0
+        ][:max_bullets]
 
     @classmethod
     def _finalize_literary_parts(
@@ -5722,21 +5842,28 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         metadatas: List[Dict[str, Any]],
         user_query: str,
         primary_doc: Optional[str] = None,
-    ) -> str:
-        bullets = cls._build_ranked_literary_bullets(
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        ranked = cls._rank_literary_items(
             context_docs,
             metadatas,
             primary_doc,
             cls._penalty_literary_predicate,
             cls._score_penalty_literary_sentence,
         )
-        return cls._finalize_literary_parts(
+        bullets = [
+            f"- {s}\n  {cite}"
+            for score, s, cite, _meta in ranked
+            if score > 0
+        ][:8]
+        top = cls._top_literary_citation_from_ranked(ranked)
+        text = cls._finalize_literary_parts(
             [
                 "Según los fragmentos indexados de las bases, sobre **penas convencionales y sanciones**:"
             ],
             bullets,
             "**Siguiente paso:** Revisa **Fuentes (bases)** para el capítulo de penas y sanciones.",
         )
+        return text, top
 
     @staticmethod
     def _is_solvency_literary_noise_sentence(sentence: str) -> bool:
@@ -5852,21 +5979,94 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         metadatas: List[Dict[str, Any]],
         user_query: str,
         primary_doc: Optional[str] = None,
-    ) -> str:
-        bullets = cls._build_ranked_literary_bullets(
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        ranked = cls._rank_literary_items(
             context_docs,
             metadatas,
             primary_doc,
             cls._solvency_literary_predicate,
             cls._score_solvency_literary_sentence,
         )
-        return cls._finalize_literary_parts(
+        bullets = [
+            f"- {s}\n  {cite}"
+            for score, s, cite, _meta in ranked
+            if score > 0
+        ][:8]
+        top = cls._top_literary_citation_from_ranked(ranked)
+        text = cls._finalize_literary_parts(
             [
                 "Según los fragmentos indexados de las bases, sobre **solvencia y opiniones de cumplimiento**:"
             ],
             bullets,
             "**Siguiente paso:** Revisa **Fuentes (bases)** para requisitos de solvencia (SAT/IMSS/INFONAVIT y normas).",
         )
+        return text, top
+
+    @staticmethod
+    def _cronogram_has_schedule_anchor(sl: str) -> bool:
+        """Fecha u hora de acto (no menciones económicas sin calendario)."""
+        if re.search(
+            rf"\d{{1,2}}\s+de\s+({_CRONOGRAM_MONTH_NAMES})",
+            sl,
+        ):
+            return True
+        if re.search(r"\d{1,2}:\d{2}\s*(hrs|horas)", sl):
+            return True
+        return False
+
+    @staticmethod
+    def _cronogram_has_procedural_act(sl: str) -> bool:
+        """Actos del procedimiento con calendario (no reglas durante el acto)."""
+        markers = (
+            "junta de aclaraciones",
+            "visita al sitio",
+            "visita a instalaciones",
+            "visita obligatoria",
+            "apertura de proposiciones",
+            "apertura de propuestas",
+            "recepción y apertura de propuestas",
+            "recepcion y apertura de propuestas",
+            "presentación de proposiciones",
+            "presentacion de proposiciones",
+            "presentación y apertura de proposiciones",
+            "presentacion y apertura de proposiciones",
+            "acto de presentación y apertura",
+            "acto de presentacion y apertura",
+            "acto de fallo",
+            "fallo y adjudicación",
+            "fallo y adjudicacion",
+        )
+        return any(m in sl for m in markers)
+
+    @staticmethod
+    def _is_cronogram_caps_schedule_noise(sentence: str, sl: str) -> bool:
+        """Líneas de tabla/portada: solo fecha y hora en mayúsculas sin acto."""
+        s = str(sentence or "").strip()
+        if len(s) > 130:
+            return False
+        letters = [c for c in s if c.isalpha()]
+        if not letters:
+            return False
+        upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+        if upper_ratio < 0.55:
+            return False
+        if not re.search(r"\d{1,2}\s+DE\s+", sentence):
+            return False
+        return not ChatbotRAGAgent._cronogram_has_procedural_act(sl)
+
+    @staticmethod
+    def _is_official_letter_signature_noise(sl: str) -> bool:
+        """Ciudad/fecha + firma del servidor público (el H./el C.) sin acto de cronograma."""
+        if not re.search(r"\bel\s+[hc]\.\s", sl):
+            return False
+        if not re.search(
+            rf"\d{{1,2}}\s+de\s+({_CRONOGRAM_MONTH_NAMES})",
+            sl,
+        ):
+            return False
+        if any(m in sl for m in _CRONOGRAM_ACT_MARKERS):
+            return False
+        return True
 
     @staticmethod
     def _is_cronogram_literary_noise_sentence(sentence: str) -> bool:
@@ -5880,13 +6080,49 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         if sentence.strip().startswith("|"):
             return True
         sl = sentence.lower()
-        if re.search(r"león, gto", sl) and "el h." in sl:
+        if ChatbotRAGAgent._is_official_letter_signature_noise(sl):
             return True
         if re.search(r"licitaci[oó]n obra descripci[oó]n", sl):
             return True
         if "inscripciones visita al sitio" in sl.replace(" ", ""):
             return True
         if "32-d" in sl or "miscelánea fiscal" in sl or "miscelanea fiscal" in sl:
+            return True
+        if "modificaci" in sl and (
+            "parte integrante" in sl or "derivada del resultado" in sl
+        ):
+            return True
+        if "que tiene pleno conocimiento" in sl:
+            return True
+        if re.search(r"^\s*[a-z]\)\s", sl) and "que tiene" in sl:
+            return True
+        if ChatbotRAGAgent._is_cronogram_caps_schedule_noise(sentence, sl):
+            return True
+        if "durante el acto" in sl and any(
+            k in sl
+            for k in (
+                "firmad",
+                "anexo e",
+                "catálogo de conceptos",
+                "catalogo de conceptos",
+                "escrito de proposición",
+                "escrito de proposicion",
+            )
+        ):
+            return True
+        if any(
+            k in sl
+            for k in (
+                "ajuste de costos",
+                "revisión y ajuste",
+                "revision y ajuste",
+                "fecha de origen de los precios",
+            )
+        ):
+            return True
+        if re.search(r"^\s*[a-z]\)\s", sl) and not ChatbotRAGAgent._cronogram_has_schedule_anchor(
+            sl
+        ):
             return True
         if "representante legal" in sl and re.search(r"d/\d+/\d+", sl):
             return True
@@ -5896,32 +6132,14 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             sl,
         ):
             return True
-        caps_runs = re.findall(r"\b[A-ZÁÉÍÓÚÑ]{5,}\b", sentence)
-        if len(caps_runs) >= 4:
-            return True
-        month_pat = (
-            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
-            r"septiembre|octubre|noviembre|diciembre"
-        )
         has_date = bool(
-            re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl)
-            or re.search(rf"({month_pat})\s+de\s+20\d{{2}}", sl)
-            or re.search(r"\d{{1,2}}\s+de\s+diciembre", sl)
+            re.search(rf"\d{{1,2}}\s+de\s+({_CRONOGRAM_MONTH_NAMES})", sl)
+            or re.search(rf"({_CRONOGRAM_MONTH_NAMES})\s+de\s+20\d{{2}}", sl)
         )
-        act_hit = any(
-            k in sl
-            for k in (
-                "junta",
-                "aclaraci",
-                "visita",
-                "apertura",
-                "fallo",
-                "presentación",
-                "presentacion",
-                "inscripcion",
-                "inscripción",
-            )
-        )
+        act_hit = ChatbotRAGAgent._cronogram_has_procedural_act(sl)
+        caps_runs = re.findall(r"\b[A-ZÁÉÍÓÚÑ]{5,}\b", sentence)
+        if len(caps_runs) >= 4 and not has_date and not act_hit:
+            return True
         if not has_date and not act_hit:
             return True
         return False
@@ -5946,6 +6164,14 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             score += 240.0
         if "acto de fallo" in sl or ("fallo" in sl and "adjudic" in sl):
             score += 220.0
+        if "recepción y apertura" in sl or "recepcion y apertura" in sl:
+            score += 260.0
+        if ChatbotRAGAgent._cronogram_has_procedural_act(
+            sl
+        ) and ChatbotRAGAgent._cronogram_has_schedule_anchor(sl):
+            score += 200.0
+        elif ChatbotRAGAgent._cronogram_has_schedule_anchor(sl):
+            score -= 80.0
         if "fechas y horas" in sl or "cronograma" in sl:
             score += 150.0
         if "inicio:" in sl and "terminación" in sl or "terminacion" in sl:
@@ -5955,40 +6181,159 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         return score
 
     @staticmethod
-    def _cronogram_literary_predicate(sentence: str, sl: str) -> bool:
+    def _cronogram_literary_predicate(sentence: str, sl: str, body_sl: str = "") -> bool:
         if ChatbotRAGAgent._is_cronogram_literary_noise_sentence(sentence):
             return False
+        if not ChatbotRAGAgent._cronogram_has_schedule_anchor(sl):
+            return False
+        if ChatbotRAGAgent._cronogram_has_procedural_act(sl):
+            return True
+        ctx = body_sl or sl
+        if ChatbotRAGAgent._cronogram_has_procedural_act(ctx):
+            if len(sentence) <= 180 and re.search(r"\d{1,2}:\d{2}", sl):
+                return True
+            if re.search(
+                rf"el\s+d[ií]a\s+\d{{1,2}}\s+de\s+({_CRONOGRAM_MONTH_NAMES})",
+                sl,
+            ):
+                return True
         if any(
             k in sl
             for k in (
+                "visita",
+                "inscripci",
                 "junta",
                 "aclaraci",
-                "visita",
-                "apertura",
                 "fallo",
-                "cronograma",
-                "fechas y horas",
-                "presentación",
-                "presentacion",
-                "inscripcion",
-                "inscripción",
+                "apertura",
+                "presentaci",
             )
         ):
             return True
-        month_pat = (
-            r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
-            r"septiembre|octubre|noviembre|diciembre"
-        )
-        return bool(re.search(rf"\d{{1,2}}\s+de\s+({month_pat})", sl))
+        if any(k in sl for k in ("cronograma", "fechas y horas")):
+            return True
+        return False
+
+    @staticmethod
+    def _cronogram_literary_source_score(meta: Dict[str, Any]) -> float:
+        src = str(meta.get("source") or "").lower()
+        score = 0.0
+        if "bases" in src:
+            score += 150.0
+        if "convocatoria" in src and "bases" not in src:
+            score -= 200.0
+        try:
+            pg = int(str(meta.get("page") or "0"))
+            if pg <= 1:
+                score -= 120.0
+        except (TypeError, ValueError):
+            pass
+        return score
 
     @staticmethod
     def _cronogram_literary_source_ok(meta: Dict[str, Any]) -> bool:
-        src = str(meta.get("source") or "").upper()
-        if "CATÁLOGO" in src or "CATALOGO" in src:
+        src = str(meta.get("source") or "").strip()
+        if not src:
             return False
-        if "CONSTRUCTORA" in src and "CONCEPTO" in src:
+        if _LITERARY_NON_BASES_SOURCE_RE.search(src):
             return False
-        return True
+        low = src.lower()
+        if "convocatoria" in low and "bases" not in low:
+            try:
+                if int(str(meta.get("page") or "0")) <= 1:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        if _BASES_FILENAME_RE.search(src):
+            return True
+        return bool(re.search(r"(?i)\banexo\s+(no\.?|n[uú]m\.?|número|numero)\b", src))
+
+    @classmethod
+    def _rank_cronogram_literary_items(
+        cls,
+        context_docs: List[str],
+        metadatas: List[Dict[str, Any]],
+        primary_doc: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> List[tuple[float, str, str, Dict[str, Any]]]:
+        """Ranking cronograma: agrupa por página y usa texto íntegro indexado cuando hay session_id."""
+        from app.services.vector_service import VectorDbServiceClient
+
+        page_map: Dict[tuple, Dict[str, Any]] = {}
+        for doc, meta in zip(context_docs, metadatas):
+            meta_dict = meta if isinstance(meta, dict) else {}
+            if not cls._cronogram_literary_source_ok(meta_dict):
+                continue
+            src = str(meta_dict.get("source") or primary_doc or "")
+            pg = meta_dict.get("page")
+            key = (src, pg)
+            if key not in page_map:
+                page_map[key] = {"meta": meta_dict, "parts": []}
+            if doc:
+                page_map[key]["parts"].append(str(doc))
+
+        if session_id and primary_doc:
+            vdb = VectorDbServiceClient()
+            for _src, pg in list(page_map.keys()):
+                if pg is None:
+                    continue
+                full = "\n".join(
+                    vdb.fetch_page_documents(session_id, primary_doc, pg) or []
+                )
+                if full:
+                    page_map[(_src, pg)]["parts"] = [full]
+            try:
+                seen_scan: set = set(page_map.keys())
+                for _doc, meta in vdb.scan_session_chunks(
+                    session_id, source_filter=primary_doc
+                ):
+                    if not isinstance(meta, dict):
+                        continue
+                    pg = meta.get("page")
+                    key = (primary_doc, pg)
+                    if key in seen_scan or pg is None:
+                        continue
+                    full = "\n".join(
+                        vdb.fetch_page_documents(session_id, primary_doc, pg) or []
+                    )
+                    if full and cls._is_cronogram_calendar_chunk(full):
+                        page_map[key] = {
+                            "meta": {"source": primary_doc, "page": pg},
+                            "parts": [full],
+                        }
+                        seen_scan.add(key)
+            except Exception:
+                pass
+
+        seen: set[str] = set()
+        ranked: List[tuple[float, str, str, Dict[str, Any]]] = []
+        for (_src, _pg), entry in page_map.items():
+            meta_dict = entry["meta"]
+            merged = "\n".join(entry["parts"])
+            cite = cls._format_literary_cite(meta_dict, primary_doc)
+            for body in cls._iter_sanitized_chunk_bodies(merged):
+                body_sl = body.lower()
+                for sent in cls._split_penalty_sentences(body):
+                    s = cls._strip_chunk_source_prefix(sent).strip()
+                    s = re.sub(r"^-\s+", "", s).strip()
+                    sl = s.lower()
+                    if len(s) < 30 or len(s) > 480:
+                        continue
+                    if not cls._cronogram_literary_predicate(s, sl, body_sl):
+                        continue
+                    if re.search(r"\.pdf\s*\|\s*página", sl):
+                        continue
+                    if "| página" in sl and "fuente" not in sl:
+                        continue
+                    key = s[:90]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    score = float(cls._score_cronogram_literary_sentence(s))
+                    score += float(cls._cronogram_literary_source_score(meta_dict))
+                    ranked.append((score, s, cite, meta_dict))
+        ranked.sort(key=lambda pair: (-pair[0], pair[1]))
+        return ranked
 
     @classmethod
     def _compose_cronogram_literary_fallback(
@@ -5997,22 +6342,47 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         metadatas: List[Dict[str, Any]],
         user_query: str,
         primary_doc: Optional[str] = None,
-    ) -> str:
-        bullets = cls._build_ranked_literary_bullets(
+        session_id: Optional[str] = None,
+        session_state: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        if session_state and session_id and primary_doc:
+            from app.services.literary_cronogram_service import (
+                build_canonical_literary_cronogram,
+            )
+
+            canon_bullets, top = build_canonical_literary_cronogram(
+                session_state, session_id, primary_doc
+            )
+            if len(canon_bullets) >= 2:
+                text = cls._finalize_literary_parts(
+                    [
+                        "Según los fragmentos indexados de las bases, sobre **cronograma y actos del procedimiento**:"
+                    ],
+                    canon_bullets[:6],
+                    "**Siguiente paso:** Revisa **Fuentes (bases)** para fechas, horas y modalidad de cada acto.",
+                )
+                return text, top
+
+        ranked = cls._rank_cronogram_literary_items(
             context_docs,
             metadatas,
             primary_doc,
-            cls._cronogram_literary_predicate,
-            cls._score_cronogram_literary_sentence,
-            source_predicate=cls._cronogram_literary_source_ok,
+            session_id=session_id,
         )
-        return cls._finalize_literary_parts(
+        bullets = [
+            f"- {s}\n  {cite}"
+            for score, s, cite, _meta in ranked
+            if score > 0
+        ][:5]
+        top = cls._top_literary_citation_from_ranked(ranked)
+        text = cls._finalize_literary_parts(
             [
                 "Según los fragmentos indexados de las bases, sobre **cronograma y actos del procedimiento**:"
             ],
             bullets,
             "**Siguiente paso:** Revisa **Fuentes (bases)** para fechas, horas y modalidad de cada acto.",
         )
+        return text, top
 
     @classmethod
     def _build_support_evidence_literary_message(
@@ -6025,8 +6395,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         penalty_intent: bool,
         solvency_intent: bool,
         cronogram_intent: bool,
-    ) -> Optional[tuple[str, str]]:
-        """Devuelve (tipo, mensaje) para preguntas «qué dice» con citas literales del índice."""
+        session_id: Optional[str] = None,
+        session_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[tuple[str, str, Optional[Dict[str, Any]]]]:
+        """Devuelve (tipo, mensaje, cita_top) para preguntas «qué dice» con citas literales del índice."""
         if not cls._detect_support_evidence_intent(user_query) or not context_docs:
             return None
         builders: List[tuple[str, Any]] = []
@@ -6047,10 +6419,48 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 ("rag_literal_guarantee", cls._compose_guarantee_literary_fallback)
             )
         for tipo, builder in builders:
-            text = builder(context_docs, metadatas, user_query, primary_doc)
+            if tipo == "rag_literal_cronogram":
+                result = builder(
+                    context_docs,
+                    metadatas,
+                    user_query,
+                    primary_doc,
+                    session_id=session_id,
+                    session_state=session_state,
+                )
+            else:
+                result = builder(context_docs, metadatas, user_query, primary_doc)
+            if isinstance(result, tuple):
+                text, top_citation = result[0], result[1] if len(result) > 1 else None
+            else:
+                text, top_citation = str(result or ""), None
             if text and len(text) > 100:
-                return tipo, text
+                return tipo, text, top_citation
         return None
+
+    async def _fetch_literary_bases_excerpt(
+        self,
+        session_id: str,
+        citation: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Párrafo indexado para la viñeta literaria top (fail-closed)."""
+        if not citation or not citation.get("literal"):
+            return None
+        from app.services.literary_bases_excerpt_service import fetch_literary_bases_excerpt_v1
+
+        try:
+            return await fetch_literary_bases_excerpt_v1(
+                session_id,
+                citation,
+                memory=self.context_manager.memory,
+            )
+        except Exception as exc:
+            logger.warning(
+                "literary_bases_excerpt_failed session=%s err=%s",
+                session_id,
+                exc,
+            )
+            return None
 
     @staticmethod
     def _is_solvencia_fiscal_noise(text: str) -> bool:
@@ -8330,12 +8740,8 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         all_sources = self.vector_db.get_sources(session_id)
         print(f"DEBUG_SOURCES: all_sources={all_sources}, type={type(all_sources)}")
 
-        # Detectar documento principal (bases/convocatoria)
-        primary_keywords = ["bases", "convocatoria", "licitacion", "vigilancia", "pdf"]
-        primary_doc = next(
-            (s for s in all_sources if any(kw in s.lower() for kw in primary_keywords)),
-            None
-        )
+        # Detectar documento principal (bases antes que convocatoria)
+        primary_doc = self._resolve_primary_bases_doc(all_sources)
 
         # HITO: Bypass de Resiliencia (Gemini v1.8)
         # Si la pregunta es sobre el número de licitación y primary_doc tiene el formato, 
@@ -9206,10 +9612,20 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             penalty_intent,
             solvency_intent,
             cronogram_intent,
+            session_id=session_id,
+            session_state=_sess,
         )
         if literary_hit:
-            lit_tipo, lit_early = literary_hit
+            lit_tipo, lit_early, lit_top = (
+                literary_hit
+                if len(literary_hit) >= 3
+                else (literary_hit[0], literary_hit[1], None)
+            )
+            bases_excerpt = await self._fetch_literary_bases_excerpt(session_id, lit_top)
             await self._save_chat_history(session_id, user_query, lit_early)
+            response_kwargs: Dict[str, Any] = {}
+            if bases_excerpt:
+                response_kwargs["bases_excerpt_v1"] = bases_excerpt
             return self._format_response(
                 session_id=session_id,
                 correlation_id=correlation_id,
@@ -9218,6 +9634,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 tipo=lit_tipo,
                 suggested_actions=suggested_actions
                 or self._literary_sources_actions(),
+                **response_kwargs,
             )
 
         llm_response = await self.llm.chat(
@@ -9242,6 +9659,8 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     penalty_intent,
                     solvency_intent,
                     cronogram_intent,
+                    session_id=session_id,
+                    session_state=_sess,
                 )
                 if lit_hit:
                     content = lit_hit[1]

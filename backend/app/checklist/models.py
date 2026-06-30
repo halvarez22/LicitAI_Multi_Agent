@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,14 @@ class HitoModel(BaseModel):
     evidencia: Optional[str] = Field(
         None,
         description="Referencia opcional (nombre de archivo o nota); no es upload en MVP.",
+    )
+    bases_literal: Optional[str] = Field(
+        None,
+        description="Oración literal del acto en bases (alineada al chat HRU).",
+    )
+    provenance_ui: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Procedencia visible: fuente indexada, página o calendario del expediente.",
     )
     notificado: bool = False
 

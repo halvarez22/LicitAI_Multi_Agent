@@ -521,7 +521,7 @@ def parse_spanish_date_fragment(text: str):
     if not text:
         return None
     m = re.search(
-        r"(?i)(\d{1,2})\s+de\s+([a-záéíóúñü]+)\s+(?:de|del)\s+(20\d{2})",
+        r"(?i)(\d{1,2})\s+de\s+([a-záéíóúñü]+)\s+(?:de|del)\s+(?:año\s+)?(20\d{2})",
         str(text),
     )
     if not m:

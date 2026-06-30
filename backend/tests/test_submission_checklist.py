@@ -40,6 +40,17 @@ def test_build_hitos_incluye_seis_claves_canonicas():
     assert "junta_aclaraciones" in ids
 
 
+def test_build_hitos_compacta_junta_narrativa():
+    narrative = (
+        "de adjudicación, se convoca a todos los participantes para su desahogo "
+        "el día 10 de diciembre del año 2025 a las 10:30 hrs"
+    )
+    hitos = build_hitos_from_cronograma({"junta_aclaraciones": narrative})
+    junta = next(h for h in hitos if h["id"] == "junta_aclaraciones")
+    assert "10 de diciembre de 2025" in junta["fecha_texto_raw"]
+    assert "adjudicación" not in junta["fecha_texto_raw"]
+
+
 def test_merge_preserva_completado():
     nuevos = build_hitos_from_cronograma({"visita_instalaciones": "15/02/2025 10:00"})
     prev = [
@@ -331,7 +342,10 @@ async def test_sync_checklist_fallback_when_analyst_cronograma_missing():
     assert model is not None
     assert len(model.hitos) == 6
     by_id = {h.id: h.fecha_texto_raw for h in model.hitos}
-    assert "10 de diciembre del año 2025" in by_id["visita_instalaciones"]
+    assert "10 de diciembre de 2025" in by_id["visita_instalaciones"]
     assert "19 de diciembre" in by_id["presentacion_proposiciones"]
     assert "2025" in by_id["presentacion_proposiciones"]
     assert "26 de diciembre" in by_id["fallo"]
+    junta = next(h for h in model.hitos if h.id == "junta_aclaraciones")
+    if junta.bases_literal:
+        assert "junta" in junta.bases_literal.lower()
