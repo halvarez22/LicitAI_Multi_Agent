@@ -414,6 +414,213 @@ def fill_obra_e1_official_format(
     return out.strip()
 
 
+_E3E_FORMAT_START_RE = re.compile(
+    r"(?is)anexo\s+e[\s_.-]*3\s*e\b"
+)
+_E3E_UTILIDAD_RE = re.compile(
+    r"(?is)la\s+utilidad\s+propuesta\s+para\s+el\s+concurso"
+)
+
+
+def fetch_obra_e3e_format_corpus_from_index(session_id: str) -> str:
+    """Recupera chunks del índice con el machote Anexo E-3 E (utilidad %)."""
+    if not str(session_id or "").strip():
+        return ""
+    from app.services.vector_service import VectorDbServiceClient
+
+    vdb = VectorDbServiceClient()
+    parts: List[str] = []
+    seen: set = set()
+
+    def _add(text: str) -> None:
+        t = str(text or "").strip()
+        if not t or t in seen:
+            return
+        low = t.lower()
+        if "e-3 e" not in low and "e 3 e" not in low and "utilidad propuesta" not in low:
+            return
+        seen.add(t)
+        parts.append(t)
+
+    for q in (
+        "ANEXO E-3 E LA UTILIDAD PROPUESTA PARA EL CONCURSO",
+        "UTILIDAD PROPUESTA ART 63 FRACCIÓN IV LEY DE OBRA PÚBLICA GUANAJUATO",
+        "CARGO POR UTILIDAD OBLIGACIONES LABORALES FISCALES FIRMA",
+    ):
+        try:
+            res = vdb.query_texts(session_id, q, n_results=16)
+            for doc in res.get("documents") or []:
+                _add(str(doc or ""))
+        except Exception:
+            continue
+    try:
+        for doc, _meta in vdb.scan_session_chunks(session_id):
+            _add(str(doc or ""))
+    except Exception:
+        pass
+    return "\n\n".join(parts)[:120000]
+
+
+def assemble_obra_e3e_corpus(
+    *,
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+    bases_corpus_hint: str = "",
+    req_snippet: str = "",
+) -> str:
+    """Corpus unificado para detectar y rellenar el machote E-3 E."""
+    state = session_state or {}
+    chunks: List[str] = []
+    for part in (
+        fetch_obra_e3e_format_corpus_from_index(session_id),
+        str(state.get("_obra_e3_snippet") or ""),
+        str(bases_corpus_hint or ""),
+        str(req_snippet or ""),
+        str(state.get("bases_corpus_hint") or "")[:120000],
+    ):
+        p = str(part or "").strip()
+        if p and p not in chunks:
+            chunks.append(p)
+    return "\n\n".join(chunks)
+
+
+def is_official_obra_e3e_mirror_content(content: str) -> bool:
+    """True si el cuerpo es el machote E-3 E de bases."""
+    up = str(content or "").upper()
+    return (
+        "UTILIDAD PROPUESTA" in up
+        and ("ANEXO E-3 E" in up or "ART. 63" in up or "ART 63" in up)
+    )
+
+
+def extract_obra_e3e_official_format(corpus: str) -> Optional[str]:
+    """Extrae machote Anexo E-3 E embebido en bases (fail-closed)."""
+    text = str(corpus or "")
+    if len(text) < 80:
+        return None
+    start = -1
+    m = _E3E_FORMAT_START_RE.search(text)
+    if m:
+        start = m.start()
+    else:
+        u = _E3E_UTILIDAD_RE.search(text)
+        if u:
+            start = max(0, u.start() - 200)
+    if start < 0:
+        return None
+    tail = text[start:]
+    end_m = re.search(r"(?is)\bfirma\b", tail)
+    chunk = tail[: end_m.end()] if end_m else tail[:2200]
+    chunk = re.sub(r"\n{3,}", "\n\n", chunk).strip()
+    if len(chunk) < 100:
+        return None
+    if "utilidad" not in chunk.lower() or "%" not in chunk:
+        return None
+    return chunk
+
+
+def fill_obra_e3e_official_format(
+    template: str,
+    *,
+    concurso: str,
+    corpus: str,
+    obra_descripcion: str,
+    master_profile: Dict[str, Any],
+    utilidad_rate: float,
+) -> str:
+    """Rellena machote E-3 E con % utilidad verificado del motor económico."""
+    out = str(template or "")
+    num = _extract_licitacion_numero(concurso, corpus)
+    obra = str(obra_descripcion or "").strip() or extract_obra_descripcion_from_corpus(
+        corpus, ""
+    )
+    rep = _slot(
+        master_profile.get("representante_legal") or master_profile.get("representante"),
+        "[Consignar — representante legal]",
+    )
+    rate = float(utilidad_rate or 0)
+    pct = f"{rate * 100:.2f}%" if 0 < rate < 1 else (f"{rate:.2f}%" if rate > 0 else "")
+    pct_fill = pct if pct else "[Consignar — % utilidad del motor económico]"
+
+    out = re.sub(r"(?i)concurso\s+no[:\s]*_{3,}", f"CONCURSO NO: {num}", out)
+    out = re.sub(r"(?i)no[:\s]*_{3,}", f"NO: {num}", out, count=1)
+    if obra:
+        out = re.sub(
+            r"(?i)relacionado\s+con\s+la\s+obra[:\s]*_{3,}",
+            f"RELACIONADO CON LA OBRA: {obra}",
+            out,
+            count=1,
+        )
+        if re.search(r"_{8,}", out):
+            out = re.sub(r"_{8,}", obra, out, count=1)
+    out = re.sub(
+        r"(?i)es\s+del\s+_{3,}\s*%",
+        f"ES DEL {pct_fill}",
+        out,
+        count=1,
+    )
+    out = re.sub(r"(?i)es\s+del\s+_{3,}", f"ES DEL {pct_fill}", out, count=1)
+    out = re.sub(
+        r"(?i)\bfirma\b\.?",
+        f"\n\n{rep.upper()}\nFIRMA",
+        out,
+        count=1,
+    )
+    return out.strip()
+
+
+def build_obra_e3e_utilidad_markdown(
+    *,
+    concurso: str,
+    master_profile: Dict[str, Any],
+    utilidad_rate: float = 0.0,
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+    bases_corpus_hint: str = "",
+    req_snippet: str = "",
+    obra_descripcion: str = "",
+    session_name: str = "",
+) -> str:
+    """Anexo E-3 E — utilidad propuesta (espejo HRU o shell fail-closed)."""
+    corpus = assemble_obra_e3e_corpus(
+        session_id=session_id,
+        session_state=session_state,
+        bases_corpus_hint=bases_corpus_hint,
+        req_snippet=req_snippet,
+    )
+    official = extract_obra_e3e_official_format(corpus)
+    obra = (
+        str(obra_descripcion or "").strip()
+        or extract_obra_descripcion_from_corpus(corpus, session_name)
+    )
+    if official:
+        return fill_obra_e3e_official_format(
+            official,
+            concurso=concurso,
+            corpus=corpus,
+            obra_descripcion=obra,
+            master_profile=master_profile,
+            utilidad_rate=utilidad_rate,
+        )
+    from app.services.official_format_resolver import (
+        build_official_miss_shell,
+        should_use_miss_shell_instead_of_generic,
+    )
+
+    req_line = _clean_economic_req_line(
+        req_snippet,
+        "E-3 E",
+        "Declaración de utilidad propuesta conforme al Art. 63 LOPSRM.",
+    )
+    concurso_label = _resolve_concurso_label(concurso, corpus, concurso)
+    return build_official_miss_shell(
+        "obra|E3E",
+        concurso=concurso_label,
+        req_line=req_line,
+        master_profile=master_profile,
+    )
+
+
 def build_obra_e1_carta_compromiso_markdown(
     *,
     concurso: str,
@@ -457,6 +664,11 @@ def build_obra_e1_carta_compromiso_markdown(
             plazo_ejecucion=plazo,
         )
 
+    from app.services.official_format_resolver import (
+        build_official_miss_shell,
+        should_use_miss_shell_instead_of_generic,
+    )
+
     req_line = _clean_economic_req_line(
         req_snippet,
         "E-1",
@@ -464,6 +676,14 @@ def build_obra_e1_carta_compromiso_markdown(
         "de la proposición (incluyendo I.V.A.) y el plazo de ejecución solicitado.",
     )
     concurso_label = _resolve_concurso_label(concurso, corpus, concurso)
+    if should_use_miss_shell_instead_of_generic(corpus, "obra|E1"):
+        return build_official_miss_shell(
+            "obra|E1",
+            concurso=concurso_label,
+            req_line=req_line,
+            master_profile=master_profile,
+        )
+
     razon = _slot(master_profile.get("razon_social"), "la empresa concursante")
     rfc = _slot(master_profile.get("rfc"), "S/D")
     rep = _slot(

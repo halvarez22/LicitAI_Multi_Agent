@@ -1582,21 +1582,38 @@ class FormatsAgent(BaseAgent):
                     raise TemplateIntegrityError(f"Integridad inválida para template {template_id}")
                 materialization_route = "template_locked"
             else:
-                resp = await llm.generate(
-                    prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id
+                from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+                from app.services.official_format_resolver import (
+                    build_official_miss_shell,
+                    is_llm_blocked_obra_annex,
                 )
-                if not resp.success:
-                    logger.error(
-                        "llm_generation_failed",
-                        agent=self.agent_id,
-                        req_name=raw_name,
-                        error=resp.error,
+
+                panel_dedupe = pliego_format_dedupe_key(raw_name)
+                if is_llm_blocked_obra_annex(panel_dedupe, raw_name):
+                    shell = build_official_miss_shell(
+                        panel_dedupe or "obra|?",
+                        concurso=str(req_doc_metadata.get("concurso_label") or ""),
+                        req_line=str(req_snippet or req_desc or "")[:500],
+                        master_profile=master_profile,
                     )
-                    _record_generation_skip(raw_name, "llm_generation_failed", req_id=rid)
-                    continue
-                llm_content = (resp.response or "").strip()
-                if llm_content:
-                    content = strip_llm_meta_leaks(llm_content)
+                    content = shell
+                    materialization_route = "official_miss_shell"
+                else:
+                    resp = await llm.generate(
+                        prompt=prompt, system_prompt=system_prompt, correlation_id=correlation_id
+                    )
+                    if not resp.success:
+                        logger.error(
+                            "llm_generation_failed",
+                            agent=self.agent_id,
+                            req_name=raw_name,
+                            error=resp.error,
+                        )
+                        _record_generation_skip(raw_name, "llm_generation_failed", req_id=rid)
+                        continue
+                    llm_content = (resp.response or "").strip()
+                    if llm_content:
+                        content = strip_llm_meta_leaks(llm_content)
             if not content.strip():
                 logger.warning("llm_empty_response", agent=self.agent_id, req_name=raw_name)
                 _record_generation_skip(raw_name, "llm_empty_response", req_id=rid)

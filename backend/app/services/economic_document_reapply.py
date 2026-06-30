@@ -550,6 +550,41 @@ def reapply_obra_economic_annexes(
             )
             updated.append(e1_new)
 
+    # E-3 E — utilidad propuesta (machote publicado en bases)
+    if resumen.get("obra_breakdown"):
+        from app.services.obra_economic_annex_clauses import (
+            build_obra_e3e_utilidad_markdown,
+            is_official_obra_e3e_mirror_content,
+        )
+
+        util_rate = float(resumen.get("utilidad_rate") or 0)
+        if util_rate <= 0:
+            calc = (economic_data or {}).get("calculator_result") or {}
+            util_rate = float(calc.get("utilidad_rate") or 0)
+        e3e_snippet = snippet_by_key.get("obra|E3", "")
+        e3e_body = build_obra_e3e_utilidad_markdown(
+            concurso=concurso,
+            master_profile=master_profile,
+            utilidad_rate=util_rate,
+            session_id=session_id,
+            session_state=session_state,
+            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
+            req_snippet=e3e_snippet,
+            obra_descripcion=str(session_state.get("objeto_obra") or ""),
+            session_name=str(session_state.get("name") or ""),
+        )
+        e3e_mirror = is_official_obra_e3e_mirror_content(e3e_body)
+        e3e_meta = {
+            **doc_meta,
+            "obra_pliego_contract": True,
+            "official_bases_mirror": e3e_mirror,
+            "formal_closing": not e3e_mirror,
+            "document_title": "Anexo E-3 E — Utilidad propuesta",
+        }
+        e3e_path = os.path.join(econ_dir, "Anexo_E-3E_Utilidad_Propuesta.docx")
+        _save_docx("ANEXO E-3 E — UTILIDAD PROPUESTA", e3e_body, e3e_path, e3e_meta)
+        updated.append(e3e_path)
+
     # E-4 programas Gantt
     e4_snippet = snippet_by_key.get("obra|E4", "")
     e4_body = build_obra_e4_programa_markdown(concurso=concurso, req_snippet=e4_snippet)
@@ -644,6 +679,7 @@ def reapply_obra_economic_annexes(
         ("CARTA_COMPROMISO_PROPOSICION", ("COMPROMISO", "PROPOSIC")),
         ("CARTA_COMPROMISO_PRECIOS", ("CARTA_COMPROMISO", "PRECIOS")),
         ("Anexo_E-5_Cotizaciones_Materiales", ("E-5", "MATERIAL")),
+        ("Anexo_E-3E_Utilidad_Propuesta", ("E-3E", "UTILIDAD")),
         ("TABLA_PRECIOS_UNITARIOS", ("TABLA_PRECIOS",)),
     )
 
@@ -686,6 +722,8 @@ def reapply_obra_economic_annexes(
             _sync_to_sobre(path, "obra|E1")
         if "ANALISIS_PRECIOS_UNITARIOS" in src_up:
             _sync_to_sobre(path, "obra|E3")
+        if "Anexo_E-3E" in src_base or "UTILIDAD_PROPUESTA" in src_up:
+            _sync_to_sobre(path, "obra|E3E")
         if "Anexo_E-5" in src_base or "COTIZACIONES_MATERIALES" in src_up:
             _sync_to_sobre(path, "obra|E5")
         if "Anexo_E-4" in src_base or "PROGRAMAS_OBRA" in src_up:

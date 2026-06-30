@@ -33,6 +33,7 @@ _OBRA_DEDUPE_DISPLAY: Dict[str, str] = {
     "obra|E1": "Anexo E-1 — Carta-compromiso de la proposición",
     "obra|E2": "Anexo E-2 — Catálogo de conceptos (propuesta económica)",
     "obra|E3": "Anexo E-3 — Análisis de precios unitarios",
+    "obra|E3E": "Anexo E-3 E — Utilidad propuesta",
     "obra|E4": "Anexo E-4 — Programas de obra (Gantt)",
     "obra|E5": "Anexo E-5 — Cotizaciones de materiales",
 }

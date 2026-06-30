@@ -135,6 +135,15 @@ class Settings(BaseSettings):
     # En analysis_only/full: registra semáforo y brechas sin GO_NO_GO_PENDING ni panel UI.
     GO_NO_GO_SILENT_IN_ANALYSIS: bool = True
 
+    # Machotes oficiales en bases: sin LLM sustituto en obra|T/E; shell [Consignar] si falla espejo.
+    OFFICIAL_MIRROR_STRICT: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "OFFICIAL_MIRROR_STRICT",
+            "LICITAI_OFFICIAL_MIRROR_STRICT",
+        ),
+    )
+
     # Espejo de plantillas Office ingestadas (fase 2 universal).
     TEMPLATE_MIRROR_ENABLED: bool = True
     TEMPLATE_MIRROR_MAX_ADMIN: int = 40

@@ -1,0 +1,50 @@
+{
+  "policy_version": "official-format-v0.1.0",
+  "description": "HRU: anclas universales para detectar machotes publicados en bases (sin hardcode por convocante). Prioridad de cobertura: sobre económico E-1..E-5. Modo estricto: shell [Consignar] si hay evidencia de machote y no se extrajo espejo; prohibido LLM en obra|T/E.",
+  "decisions": {
+    "strict_mode_fallback": "official_miss_shell_with_consignar",
+    "coverage_priority": "economic_envelope_e1_e5_first",
+    "apu_hitl": "upload_excel_or_template_plus_chat_revalidation",
+    "uat_gate": "barda_primaria_primary_plus_oracle_fixture_second_vertical"
+  },
+  "annexes": {
+    "obra|E1": {
+      "label_es": "Carta-compromiso de la proposición",
+      "anchors": [
+        "CARTA COMPROMISO DE PROPOSICI",
+        "HACEMOS REFERENCIA AL PROCEDIMIENTO",
+        "PRESENTE"
+      ],
+      "min_anchors": 2,
+      "slot_sources": {
+        "licitacion_num": "concurso_label",
+        "importe_total_iva": "economic.total",
+        "plazo_ejecucion": "bases.plazo_ejecucion",
+        "obra": "bases.objeto_obra"
+      }
+    },
+    "obra|E3E": {
+      "label_es": "Utilidad propuesta (Anexo E-3 E)",
+      "anchors": [
+        "ANEXO E-3 E",
+        "LA UTILIDAD PROPUESTA",
+        "ART. 63"
+      ],
+      "min_anchors": 2,
+      "slot_sources": {
+        "licitacion_num": "concurso_label",
+        "obra": "bases.objeto_obra",
+        "utilidad_pct": "economic.utilidad_rate"
+      }
+    }
+  },
+  "llm_blocked_dedupe_prefixes": ["obra|E", "obra|T"],
+  "economic_envelope_dedupe_keys": [
+    "obra|E1",
+    "obra|E2",
+    "obra|E3",
+    "obra|E3E",
+    "obra|E4",
+    "obra|E5"
+  ]
+}
