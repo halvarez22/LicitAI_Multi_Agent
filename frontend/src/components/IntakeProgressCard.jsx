@@ -1,4 +1,5 @@
 import React from 'react';
+import { EXPEDIENTE_PROGRESS_UI } from '../expedienteProgressUi.js';
 
 function clampPct(current, total) {
     const c = Number(current);
@@ -19,6 +20,10 @@ export default function IntakeProgressCard({
     if (!progressTotal || progressTotal <= 0) return null;
     const pct = clampPct(progressCurrent, progressTotal);
     const risk = Number(blockingCount || 0) > 0;
+    const ui = EXPEDIENTE_PROGRESS_UI;
+    const stepLabel =
+        progressLabel ||
+        ui.progressStep(Number(progressCurrent) || 1, Number(progressTotal) || 1);
 
     return (
         <div
@@ -33,25 +38,25 @@ export default function IntakeProgressCard({
             }}
         >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                <div style={{ fontSize: '12px', fontWeight: 800, color: '#e2e8f0' }}>Estado de Intake</div>
+                <div style={{ fontSize: '12px', fontWeight: 800, color: '#e2e8f0' }}>{ui.cardTitle}</div>
                 <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                     {isResumed && (
                         <span style={{ fontSize: '10px', padding: '3px 8px', borderRadius: 999, background: 'rgba(99,102,241,0.2)', color: '#c7d2fe' }}>
-                            Reanudado
+                            {ui.resumedBadge}
                         </span>
                     )}
                     {auditMode && (
                         <span style={{ fontSize: '10px', padding: '3px 8px', borderRadius: 999, background: 'rgba(148,163,184,0.2)', color: '#cbd5e1' }}>
-                            Modo auditoría
+                            {ui.auditBadge}
                         </span>
                     )}
                 </div>
             </div>
 
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{progressLabel || `Pregunta ${progressCurrent} de ${progressTotal}`}</div>
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{stepLabel}</div>
 
             <div
-                aria-label="Progreso de intake"
+                aria-label="Progreso del expediente"
                 style={{
                     height: '8px',
                     borderRadius: '999px',
@@ -73,14 +78,12 @@ export default function IntakeProgressCard({
             </div>
 
             <div style={{ display: 'flex', gap: '12px', fontSize: '11px' }}>
-                <span style={{ color: '#fbbf24' }}>Bloqueantes: <strong>{Number(blockingCount || 0)}</strong></span>
-                <span style={{ color: '#cbd5e1' }}>Pendientes: <strong>{Number(remainingCount || 0)}</strong></span>
+                <span style={{ color: '#fbbf24' }}>{ui.blockingLabel}: <strong>{Number(blockingCount || 0)}</strong></span>
+                <span style={{ color: '#cbd5e1' }}>{ui.pendingLabel}: <strong>{Number(remainingCount || 0)}</strong></span>
             </div>
 
             <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.35 }}>
-                {risk
-                    ? 'Prioriza los bloqueantes para habilitar generación segura.'
-                    : 'Avance estable. Continuemos con los pendientes de integridad.'}
+                {risk ? ui.blockingHint : ui.steadyHint}
             </div>
         </div>
     );

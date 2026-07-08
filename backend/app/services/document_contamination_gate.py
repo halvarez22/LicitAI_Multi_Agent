@@ -265,6 +265,29 @@ def scan_text_contamination(
     return hits
 
 
+_GENERATION_HEADER_STAMP_RE = re.compile(
+    r"^\s*LUGAR Y FECHA:\s*.+,\s*a\s+.+$",
+    re.IGNORECASE,
+)
+
+
+def _text_excluding_generation_header_stamp(text: str) -> str:
+    """
+    Omite el sello «LUGAR Y FECHA» del encabezado (fecha de generación).
+
+    HRU: el encabezado certifica materialización; el gate de fecha documental
+    aplica solo al cuerpo / fecha canónica del expediente.
+    """
+    if not text:
+        return ""
+    kept: List[str] = []
+    for line in text.splitlines():
+        if _GENERATION_HEADER_STAMP_RE.match(line.strip()):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def scan_date_after_deadline(
     text: str,
     *,
@@ -284,7 +307,8 @@ def scan_date_after_deadline(
     if not deadline:
         return None
 
-    for fragment in (fecha_es, text[:800]):
+    body_for_scan = _text_excluding_generation_header_stamp(text)
+    for fragment in (fecha_es, body_for_scan[:800]):
         doc_dt = parse_spanish_date_fragment(fragment)
         if doc_dt and doc_dt.date() > deadline.date():
             return ContaminationHit(
@@ -318,7 +342,15 @@ def scan_all_document_dates(
 
     hits: List[ContaminationHit] = []
     seen: set[str] = set()
-    for m in _DATE_ES_BODY_RE.finditer(text):
+    from app.services.document_date_resolver import is_generation_header_stamp_text
+
+    body_lines: List[str] = []
+    for line in text.splitlines():
+        if is_generation_header_stamp_text(line):
+            continue
+        body_lines.append(line)
+    body_for_scan = "\n".join(body_lines)
+    for m in _DATE_ES_BODY_RE.finditer(body_for_scan):
         frag = m.group(0)
         key = frag.lower()
         if key in seen:
@@ -336,7 +368,7 @@ def scan_all_document_dates(
             )
     if canonical_fecha_es:
         one = scan_date_after_deadline(
-            text,
+            body_for_scan,
             deadline_dt_iso=deadline_dt_iso,
             fecha_es=canonical_fecha_es,
         )

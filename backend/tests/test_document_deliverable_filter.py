@@ -1,12 +1,15 @@
 import unicodedata
 
 from app.services.document_deliverable_filter import (
+    count_actionable_generation_actions,
     enforce_deterministic_tipo_accion,
     filter_compliance_for_generation,
     filter_compliance_master_list,
     filter_consolidated_document_candidates,
     is_company_credential_present_only,
+    is_inventory_expanded_compliance_item,
     is_pliego_causal_or_prohibition,
+    is_technical_writer_queue_eligible,
     should_show_deliverable_in_ui,
 )
 from app.services.document_candidate_list_service import build_candidate_document_list
@@ -596,3 +599,55 @@ def test_enforce_deterministic_tipo_accion_causal_and_fisico():
     )
     assert imss["tipo_accion"] == "presentar_fisico"
     assert "enforced_company_credential_fisico" in (imss.get("quality_flags") or [])
+    eeff = enforce_deterministic_tipo_accion(
+        {
+            "nombre": "Estados financieros dictaminados",
+            "descripcion": "Último ejercicio fiscal",
+            "tipo_accion": "generar",
+            "quality_flags": [],
+        }
+    )
+    assert eeff["tipo_accion"] == "presentar_fisico"
+    assert "enforced_solvency_physical" in (eeff.get("quality_flags") or [])
+    decl = enforce_deterministic_tipo_accion(
+        {
+            "nombre": "Declaración capital contable comprometido",
+            "descripcion": "Manifiesto bajo protesta capital contable y liquidez",
+            "tipo_accion": "generar",
+            "quality_flags": [],
+        }
+    )
+    assert decl["tipo_accion"] == "generar"
+
+
+def test_is_technical_writer_queue_eligible_synthetic_and_generar():
+    assert is_technical_writer_queue_eligible(
+        {
+            "nombre": "Programa calendarizado",
+            "tipo_accion": "generar",
+        }
+    )
+    assert is_technical_writer_queue_eligible(
+        {
+            "nombre": "Cédulas de áreas",
+            "inventory_synthetic": True,
+            "evidence_match": True,
+        }
+    )
+    assert not is_technical_writer_queue_eligible(
+        {
+            "nombre": "Fecha del acto",
+            "tipo_accion": "informativo",
+        }
+    )
+
+
+def test_count_actionable_generation_actions():
+    counts = {"generar": 2, "requiere_datos_licitante": 1, "informativo": 5}
+    assert count_actionable_generation_actions(counts) == 3
+
+
+def test_is_inventory_expanded_compliance_item_flags():
+    assert is_inventory_expanded_compliance_item({"inventory_synthetic": True})
+    assert is_inventory_expanded_compliance_item({"from_document_inventory": True})
+    assert not is_inventory_expanded_compliance_item({"tipo_accion": "generar"})

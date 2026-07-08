@@ -1,6 +1,6 @@
 import React from 'react';
 import { AlertTriangle, CheckCircle2, CalendarClock } from 'lucide-react';
-import { formatFechaDisplay } from '../utils/criticalDatesDisplay.js';
+import { formatHitoFechaDisplay } from '../utils/criticalDatesDisplay.js';
 
 /** @param {Record<string, unknown>|undefined|null} prov */
 function hitoProvenanceLabel(prov) {
@@ -51,7 +51,7 @@ export default function CriticalDatesList({
             }}
         >
             {hitos.map((h) => {
-                const fecha = formatFechaDisplay(h.fecha_texto_raw);
+                const fecha = formatHitoFechaDisplay(h);
                 const provLabel = hitoProvenanceLabel(h.provenance_ui);
                 const literal = String(h.bases_literal || '').trim();
                 const vencido = h.estado === 'vencido';

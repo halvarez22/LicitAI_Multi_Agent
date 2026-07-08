@@ -1,0 +1,316 @@
+[
+  {
+    "case_id": "OR-01",
+    "description": "Sesión limpia sin captura",
+    "session_state": {
+      "session_id": "sess_or01",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}]
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.ready": false,
+      "generation.economic_writer_allowed": false,
+      "generation.technical_writer_allowed": true
+    }
+  },
+  {
+    "case_id": "OR-02",
+    "description": "Matriz 8/8 sin pending",
+    "session_state": {
+      "session_id": "sess_or02",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [
+        {"task": "stage_completed:analysis"},
+        {"task": "economic_proposal", "result": {"status": "complete", "total_base": 1000.0, "line_items": [{"n": 1}]}}
+      ],
+      "capture_matrix_blocks": [
+        {
+          "matrix_rows": [
+            {"field": "f0", "label": "Z0"},
+            {"field": "f1", "label": "Z1"},
+            {"field": "f2", "label": "Z2"},
+            {"field": "f3", "label": "Z3"},
+            {"field": "f4", "label": "Z4"},
+            {"field": "f5", "label": "Z5"},
+            {"field": "f6", "label": "Z6"},
+            {"field": "f7", "label": "Z7"}
+          ]
+        }
+      ],
+      "economic_user_inputs": {
+        "f0": 1.0, "f1": 2.0, "f2": 3.0, "f3": 4.0,
+        "f4": 5.0, "f5": 6.0, "f6": 7.0, "f7": 8.0
+      },
+      "pending_questions": []
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.ready": true,
+      "generation.economic_writer_allowed": true
+    }
+  },
+  {
+    "case_id": "OR-03",
+    "description": "Matriz 8/8 + economic_price_source pendiente",
+    "session_state": {
+      "session_id": "sess_or03",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "capture_matrix_blocks": [
+        {
+          "matrix_rows": [
+            {"field": "f0", "label": "Z0"},
+            {"field": "f1", "label": "Z1"},
+            {"field": "f2", "label": "Z2"},
+            {"field": "f3", "label": "Z3"},
+            {"field": "f4", "label": "Z4"},
+            {"field": "f5", "label": "Z5"},
+            {"field": "f6", "label": "Z6"},
+            {"field": "f7", "label": "Z7"}
+          ]
+        }
+      ],
+      "economic_user_inputs": {
+        "f0": 1.0, "f1": 2.0, "f2": 3.0, "f3": 4.0,
+        "f4": 5.0, "f5": 6.0, "f6": 7.0, "f7": 8.0
+      },
+      "pending_questions": [
+        {"type": "economic_validation_blocking", "field": "economic_price_source", "input_mode": "price_source"}
+      ]
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.ready": false,
+      "generation.economic_writer_allowed": false,
+      "blocker_types_include": ["ECONOMIC_PRICE_SOURCE_PENDING"]
+    }
+  },
+  {
+    "case_id": "OR-04",
+    "description": "Inputs GYN en sesión ISSSTE",
+    "session_state": {
+      "session_id": "vigilancia_issste",
+      "licitacion_id": "vigilancia_issste",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "economic_user_inputs": {
+        "concept_prices": {"price_LA-51-GYN-051GYN025-N-8-2024": 5800.0}
+      }
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.cross_tender_contamination": true,
+      "capture.ready": false,
+      "blocker_types_include": ["ECONOMIC_CROSS_TENDER_INPUTS"]
+    }
+  },
+  {
+    "case_id": "OR-05",
+    "description": "company_id huérfano",
+    "session_state": {
+      "session_id": "sess_or05",
+      "company_id": "co_deleted",
+      "master_profile": {"rfc": "SPI060200AG5", "razon_social": "Manavil"}
+    },
+    "company_exists": false,
+    "expect": {
+      "company_binding.binding_valid": false,
+      "company_binding.orphan_company_id": true,
+      "blocker_types_include": ["COMPANY_ORPHAN_ID"]
+    }
+  },
+  {
+    "case_id": "OR-06",
+    "description": "Binding Mayo, disco Manavil sin fingerprint",
+    "session_state": {
+      "session_id": "vigilancia_issste",
+      "company_id": "co_mayo",
+      "master_profile": {"rfc": "SPI060200AG5", "razon_social": "Manavil"},
+      "tasks_completed": [
+        {"task": "stage_completed:analysis"},
+        {"task": "economic_proposal", "result": {"status": "complete", "total_base": 13326.63}}
+      ],
+      "capture_matrix_blocks": [
+        {
+          "matrix_rows": [
+            {"field": "f0", "label": "Z0"},
+            {"field": "f1", "label": "Z1"},
+            {"field": "f2", "label": "Z2"},
+            {"field": "f3", "label": "Z3"},
+            {"field": "f4", "label": "Z4"},
+            {"field": "f5", "label": "Z5"},
+            {"field": "f6", "label": "Z6"},
+            {"field": "f7", "label": "Z7"}
+          ]
+        }
+      ],
+      "economic_user_inputs": {
+        "f0": 1.0, "f1": 2.0, "f2": 3.0, "f3": 4.0,
+        "f4": 5.0, "f5": 6.0, "f6": 7.0, "f7": 8.0
+      },
+      "pending_questions": []
+    },
+    "company_profile": {"rfc": "CMT160107S83", "razon_social": "Mayo y Torres"},
+    "company_exists": true,
+    "disk_setup": {
+      "subdirs": ["2.propuesta_economica"],
+      "files": ["ANEXO_AE.docx"],
+      "fingerprint": null
+    },
+    "expect": {
+      "company_binding.session_profile_stale": true,
+      "delivery.economic_scope_safe": false,
+      "blocker_types_include": ["SESSION_PROFILE_STALE", "ARTIFACT_FINGERPRINT_MISMATCH"]
+    }
+  },
+  {
+    "case_id": "OR-07",
+    "description": "Binding Mayo, fingerprint coincidente en disco",
+    "session_state": {
+      "session_id": "sess_or07",
+      "company_id": "co_mayo",
+      "master_profile": {"rfc": "CMT160107S83", "razon_social": "Mayo y Torres"},
+      "tasks_completed": [
+        {"task": "stage_completed:analysis"},
+        {"task": "economic_proposal", "result": {"status": "complete", "total_base": 5000.0, "line_items": [{"a": 1}]}}
+      ],
+      "capture_matrix_blocks": [{"matrix_rows": [{"field": "f1", "label": "A"}]}],
+      "economic_user_inputs": {"f1": 100.0},
+      "pending_questions": [],
+      "generation_state": {"jobs": [{"id": "economic_writer", "status": "done"}]}
+    },
+    "company_profile": {"rfc": "CMT160107S83", "razon_social": "Mayo y Torres"},
+    "company_exists": true,
+    "disk_setup": {
+      "subdirs": ["2.propuesta_economica"],
+      "files": ["ANEXO_AE.docx"],
+      "fingerprint_from_session": true
+    },
+    "expect": {
+      "delivery.economic_scope_safe": true,
+      "artifact_fingerprints.economic.match": true
+    }
+  },
+  {
+    "case_id": "OR-08",
+    "description": "formats blocked",
+    "session_state": {
+      "session_id": "sess_or08",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "generation_state": {
+        "jobs": [
+          {"id": "technical", "status": "done"},
+          {"id": "formats", "status": "blocked"}
+        ]
+      }
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "generation.formats_allowed": false,
+      "blocker_types_include": ["FORMATS_DATA_INCOMPLETE"]
+    }
+  },
+  {
+    "case_id": "OR-09",
+    "description": "Legacy FSR inputs en sesión no-FSR",
+    "session_state": {
+      "session_id": "vigilancia_issste",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "economic_user_inputs": {
+        "sar": 1.0,
+        "imss": 2.0,
+        "infonavit": 3.0,
+        "aguinaldo_dias": 15,
+        "dias_laborados": 30
+      }
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.legacy_fsr_inputs_detected": true,
+      "capture.ready": false
+    }
+  },
+  {
+    "case_id": "OR-10",
+    "description": "Motor HITL pendiente (precio unitario)",
+    "session_state": {
+      "session_id": "sess_or10",
+      "company_id": "co_test",
+      "master_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "capture_matrix_blocks": [{"matrix_rows": [{"field": "f1", "label": "A"}]}],
+      "economic_user_inputs": {"f1": 100.0},
+      "pending_questions": [
+        {"type": "economic_price", "field": "price_zona_b", "label": "Precio de: Zona B"}
+      ]
+    },
+    "company_profile": {"rfc": "AAA010101AAA", "razon_social": "Empresa Test"},
+    "company_exists": true,
+    "expect": {
+      "capture.ready": false,
+      "blocker_types_include": ["ECONOMIC_MOTOR_HITL_PENDING"]
+    }
+  },
+  {
+    "case_id": "OR-11",
+    "description": "Sin company_id",
+    "session_state": {
+      "session_id": "sess_or11",
+      "tasks_completed": [{"task": "stage_completed:analysis"}]
+    },
+    "expect": {
+      "company_binding.binding_valid": false,
+      "generation.economic_writer_allowed": false,
+      "blocker_types_include": ["COMPANY_BINDING_INVALID"]
+    }
+  },
+  {
+    "case_id": "OR-12",
+    "description": "CONTAM01 — fingerprint mismatch explícito",
+    "session_state": {
+      "session_id": "sess_contam01",
+      "company_id": "co_mayo",
+      "master_profile": {"rfc": "CMT160107S83", "razon_social": "Mayo y Torres"},
+      "tasks_completed": [
+        {"task": "stage_completed:analysis"},
+        {"task": "economic_proposal", "result": {"status": "complete", "total_base": 5000.0, "line_items": [{"a": 1}]}}
+      ],
+      "capture_matrix_blocks": [{"matrix_rows": [{"field": "f1", "label": "A"}]}],
+      "economic_user_inputs": {"f1": 100.0},
+      "pending_questions": [],
+      "generation_state": {"jobs": [{"id": "economic_writer", "status": "done"}]}
+    },
+    "company_profile": {"rfc": "CMT160107S83", "razon_social": "Mayo y Torres"},
+    "company_exists": true,
+    "disk_setup": {
+      "subdirs": ["2.propuesta_economica"],
+      "files": ["ANEXO_AE.docx"],
+      "fingerprint": {
+        "schema_version": "artifact_fingerprint_v1",
+        "scope": "economic",
+        "company_id": "co_manavil",
+        "company_rfc": "SPI060200AG5",
+        "economic_snapshot_hash": "deadbeef00000000"
+      }
+    },
+    "expect": {
+      "delivery.economic_scope_safe": false,
+      "blocker_types_include": ["ARTIFACT_FINGERPRINT_MISMATCH"]
+    }
+  }
+]

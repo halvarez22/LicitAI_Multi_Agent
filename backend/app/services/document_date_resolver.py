@@ -1,13 +1,17 @@
 """
 Resuelve la fecha a imprimir en documentos de propuesta (universal, sin hardcode por licitación).
 
-Cascada: override usuario > cronograma (presentación de proposiciones) > fecha sistema acotada al hito.
+Política HRU (impresión real):
+- Sin override del usuario → **fecha de generación** (momento de crear/imprimir el DOCX).
+  En la práctica se imprime un día antes o el mismo día de la presentación.
+- Override usuario (chat/HITL) → fecha indicada, acotada al día de presentación como máximo.
+- El cronograma aporta el **tope** (cierre de proposiciones) para validación, no una fecha retroactiva.
 """
 from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 _DATE_ES_BODY_REPLACE_RE = re.compile(
@@ -16,6 +20,26 @@ _DATE_ES_BODY_REPLACE_RE = re.compile(
     r")\s+de\s+(\d{4})\b",
     re.IGNORECASE,
 )
+
+_GENERATION_HEADER_STAMP_RE = re.compile(
+    r"^\s*LUGAR Y FECHA:\s*.+,\s*a\s+.+$",
+    re.IGNORECASE,
+)
+
+
+def is_generation_header_stamp_text(text: str) -> bool:
+    """
+    True si el texto pertenece al sello de fecha de materialización (encabezado).
+
+    HRU: no normalizar estas líneas a la fecha documental del expediente.
+    """
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if _GENERATION_HEADER_STAMP_RE.match(stripped):
+            return True
+        if re.match(r"^Fecha:\s*.+$", stripped, re.IGNORECASE):
+            return True
+    return False
 
 from app.agents.analyst import normalize_cronograma_dict
 from app.config.settings import settings
@@ -55,24 +79,31 @@ _DOCUMENT_DATE_CHAT_PATTERNS = (
 )
 
 
-def _subtract_business_days(dt: datetime, days: int) -> datetime:
-    if days <= 0:
-        return dt
-    cur = dt
-    remaining = days
-    while remaining > 0:
-        cur -= timedelta(days=1)
-        if cur.weekday() < 5:
-            remaining -= 1
-    return cur
-
-
 def _format_fecha_es(dt: datetime) -> str:
     return f"{dt.day} de {_MESES_ES_OUT[dt.month - 1]} de {dt.year}"
 
 
 def _format_fecha_corta(dt: datetime) -> str:
     return dt.strftime("%d/%m/%Y")
+
+
+def resolve_generation_header_date(
+    *,
+    at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Fecha de generación material (encabezado DOCX).
+
+    Siempre es el instante de creación del archivo — distinta de la fecha
+    documental canónica usada en el cuerpo cuando el machote de bases la exige.
+    """
+    now = at if isinstance(at, datetime) else datetime.now()
+    return {
+        "fecha_es": _format_fecha_es(now),
+        "fecha_corta": _format_fecha_corta(now),
+        "source": "generation_timestamp",
+        "generated_at_iso": now.isoformat(timespec="seconds"),
+    }
 
 
 def _cronograma_from_session(session_state: Dict[str, Any]) -> Dict[str, str]:
@@ -182,13 +213,10 @@ def _deadline_from_cronograma(
     return deadline_raw, deadline_dt
 
 
-def _doc_date_from_deadline(deadline_dt: datetime, offset_business_days: int) -> datetime:
-    doc_dt = _subtract_business_days(deadline_dt, offset_business_days)
+def _clamp_doc_date_to_deadline(doc_dt: datetime, deadline_dt: datetime) -> datetime:
+    """Acota la fecha documental al día de presentación (máximo permitido)."""
     if doc_dt.date() > deadline_dt.date():
-        doc_dt = _subtract_business_days(deadline_dt, 1)
-    now = datetime.now()
-    if now.date() <= deadline_dt.date() and doc_dt.date() > now.date():
-        doc_dt = now
+        return deadline_dt
     return doc_dt
 
 
@@ -265,8 +293,7 @@ def apply_document_date_override_from_chat(
     parsed = parse_spanish_date_fragment(fecha_es)
     clamped = False
     if parsed and deadline_dt and parsed.date() > deadline_dt.date():
-        offset = int(getattr(settings, "DOCUMENT_DATE_OFFSET_BUSINESS_DAYS", 2) or 2)
-        parsed = _doc_date_from_deadline(deadline_dt, offset)
+        parsed = _clamp_doc_date_to_deadline(parsed, deadline_dt)
         fecha_es = _format_fecha_es(parsed)
         clamped = True
 
@@ -301,20 +328,25 @@ def resolve_document_date(
     *,
     user_override: Optional[str] = None,
     hito_key: str = "presentacion_proposiciones",
+    at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Devuelve fecha canónica para documentos.
+
+    Por defecto usa la fecha de generación (``at`` o ahora). El cronograma solo
+    delimita el cierre de proposiciones para overrides y señales de calidad.
 
     Returns:
         dict con ``fecha_es``, ``fecha_corta``, ``source``, ``deadline_raw``,
         ``deadline_dt`` (iso o None), ``is_after_deadline``.
     """
+    now = at if isinstance(at, datetime) else datetime.now()
     if user_override is None and isinstance(session_state, dict):
         user_override = extract_document_date_user_override(session_state)
 
     cronograma = _merged_cronograma(session_state or {})
     deadline_raw, deadline_dt = _deadline_from_cronograma(cronograma, hito_key)
-    offset = int(getattr(settings, "DOCUMENT_DATE_OFFSET_BUSINESS_DAYS", 2) or 2)
+    is_late = bool(deadline_dt and now.date() > deadline_dt.date())
 
     if user_override and str(user_override).strip():
         parsed = parse_spanish_date_fragment(str(user_override))
@@ -322,10 +354,8 @@ def resolve_document_date(
             doc_dt = parsed
             clamped = False
             if deadline_dt and doc_dt.date() > deadline_dt.date():
-                doc_dt = _doc_date_from_deadline(deadline_dt, offset)
+                doc_dt = _clamp_doc_date_to_deadline(doc_dt, deadline_dt)
                 clamped = True
-            now = datetime.now()
-            is_late = bool(deadline_dt and now.date() > deadline_dt.date())
             return {
                 "fecha_es": _format_fecha_es(doc_dt),
                 "fecha_corta": _format_fecha_corta(doc_dt),
@@ -335,27 +365,13 @@ def resolve_document_date(
                 "is_after_deadline": is_late,
             }
 
-    if deadline_dt:
-        doc_dt = _doc_date_from_deadline(deadline_dt, offset)
-        now = datetime.now()
-        is_late = now.date() > deadline_dt.date()
-        return {
-            "fecha_es": _format_fecha_es(doc_dt),
-            "fecha_corta": _format_fecha_corta(doc_dt),
-            "source": f"cronograma:{hito_key}",
-            "deadline_raw": deadline_raw,
-            "deadline_dt": deadline_dt.isoformat(),
-            "is_after_deadline": is_late,
-        }
-
-    now = datetime.now()
     return {
         "fecha_es": _format_fecha_es(now),
         "fecha_corta": _format_fecha_corta(now),
-        "source": "system_fallback",
-        "deadline_raw": "",
-        "deadline_dt": None,
-        "is_after_deadline": False,
+        "source": "generation_timestamp",
+        "deadline_raw": deadline_raw,
+        "deadline_dt": deadline_dt.isoformat() if deadline_dt else None,
+        "is_after_deadline": is_late,
     }
 
 
@@ -379,25 +395,37 @@ def normalize_docx_spanish_dates(docx_path: str, canonical_fecha_es: str) -> boo
 
     def _patch(text: str) -> str:
         nonlocal changed
+        if is_generation_header_stamp_text(text):
+            return text
         new_text = normalize_body_spanish_dates(text, canon)
         if new_text != text:
             changed = True
         return new_text
 
-    for paragraph in doc.paragraphs:
+    def _iter_paragraphs(document):
+        for paragraph in document.paragraphs:
+            yield paragraph
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        yield paragraph
+        for section in document.sections:
+            for paragraph in section.header.paragraphs:
+                yield paragraph
+            for table in section.header.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.paragraphs:
+                            yield paragraph
+            for paragraph in section.footer.paragraphs:
+                yield paragraph
+
+    for paragraph in _iter_paragraphs(doc):
         raw = paragraph.text or ""
         new = _patch(raw)
         if new != raw:
             paragraph.text = new
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    raw = paragraph.text or ""
-                    new = _patch(raw)
-                    if new != raw:
-                        paragraph.text = new
 
     if changed:
         doc.save(docx_path)

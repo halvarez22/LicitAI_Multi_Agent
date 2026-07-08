@@ -1,0 +1,71 @@
+{
+  "policy_version": "operational-deduction-v1.0.0",
+  "description": "HRU: deducciones operativas por personal (servicios en sitio) vs penas por mora de bienes. Sin convocante fijo.",
+  "intent": {
+    "personnel_markers": [
+      "falta",
+      "inasist",
+      "ausenc",
+      "retard",
+      "turno no cubierto",
+      "turno vacio",
+      "turno vacío",
+      "elemento que falte",
+      "personal",
+      "dotacion",
+      "dotación",
+      "guardia",
+      "elementos"
+    ],
+    "service_context_markers": [
+      "vigilancia",
+      "seguridad",
+      "limpieza",
+      "servicio",
+      "custodia",
+      "turno"
+    ],
+    "penalty_markers": [
+      "penaliz",
+      "deducc",
+      "descuento",
+      "sancion",
+      "sanción"
+    ],
+    "require_penalty_marker": true,
+    "require_personnel_marker": true
+  },
+  "fragment_scan": {
+    "topic_markers": [
+      "deducciones",
+      "deducción",
+      "deduccion",
+      "descuento",
+      "turno no cubierto",
+      "inasistencia",
+      "ausencia",
+      "elemento que falte",
+      "deficiencia",
+      "sanción",
+      "sancion"
+    ],
+    "substance_markers": [
+      "por cada elemento",
+      "turno",
+      "cuota diaria",
+      "servicio no prestado",
+      "facturación",
+      "facturacion",
+      "1%",
+      "2%",
+      "10%"
+    ]
+  },
+  "goods_mora_hallucination_phrases": [
+    "se aplicará una pena convencional del 2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar, hasta su cumplimiento a entera satisfacción del Instituto.",
+    "se aplicará una pena convencional del 2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar",
+    "2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar"
+  ],
+  "goods_mora_replacement": "se aplicarán deducciones proporcionales por cada hora o turno no cubierto conforme al pliego de bases.",
+  "llm_system_rule_id": "operational_deduction_vs_goods_penalty"
+}

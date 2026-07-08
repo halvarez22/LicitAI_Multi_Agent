@@ -215,6 +215,13 @@ def resolve_letter_session_metadata(
 
     session_state = session_state or {}
     tc = triage_context if isinstance(triage_context, dict) else {}
+    cached_dest = str(session_state.get("letter_destinatario_resolved") or "").strip()
+    session_id = str(session_state.get("session_id") or "")
+    index_header = ""
+    if session_id:
+        from app.services.convocante_resolver import fetch_convocante_header_from_index
+
+        index_header = fetch_convocante_header_from_index(session_id)
     blob = " ".join(
         str(x or "")
         for x in (
@@ -239,6 +246,7 @@ def resolve_letter_session_metadata(
                 )
             )
     blob += " " + str(session_state.get("bases_corpus_hint") or "")[:12000]
+    blob += " " + str(index_header or "")[:8000]
     blob += " " + str(req_snippet or "")
 
     extracted = extract_convocante_from_text(blob)
@@ -284,6 +292,8 @@ def resolve_letter_session_metadata(
         or extracted.get("destinatario")
         or ""
     ).strip()
+    if not destinatario and cached_dest and cached_dest.upper() != "A QUIEN CORRESPONDA:":
+        destinatario = cached_dest
     if not destinatario:
         for key in ("last_analysis", "analysis_snapshot"):
             block = session_state.get(key)
@@ -298,6 +308,9 @@ def resolve_letter_session_metadata(
             destinatario = f"{convocante.upper()}\nPRESENTE.-"
         else:
             destinatario = "A QUIEN CORRESPONDA:"
+
+    if destinatario and destinatario.upper() != "A QUIEN CORRESPONDA:":
+        session_state["letter_destinatario_resolved"] = destinatario
 
     out: Dict[str, str] = {"destinatario": destinatario}
     if convocante:
@@ -1409,8 +1422,12 @@ def _body_obra_tb2_experiencia(doc_metadata: Dict[str, Any]) -> str:
 
 def _body_obra_e4_programa(doc_metadata: Dict[str, Any]) -> str:
     """Programas de obra en Gantt (obra pública, Anexo E-4)."""
-    from app.services.obra_economic_annex_clauses import build_obra_e4_programa_markdown
+    from app.services.economic_document_reapply import load_economic_payload
+    from app.services.official_format_resolver import resolve_official_deliverable
 
+    session_state = doc_metadata.get("session_state") or {}
+    session_id = str(doc_metadata.get("session_id") or session_state.get("session_id") or "")
+    _, _, resumen = load_economic_payload(session_state, session_id=session_id)
     corpus = " ".join(
         str(doc_metadata.get(k) or "")
         for k in ("bases_corpus_hint", "req_snippet", "req_desc")
@@ -1419,13 +1436,25 @@ def _body_obra_e4_programa(doc_metadata: Dict[str, Any]) -> str:
         doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
         "[Número de concurso/licitación]",
     )
-    return build_obra_e4_programa_markdown(concurso=concurso, req_snippet=corpus)
+    result = resolve_official_deliverable(
+        "obra|E4",
+        session_id=session_id,
+        session_state={**session_state, "concurso_label": concurso, "bases_corpus_hint": corpus},
+        master_profile=doc_metadata.get("master_profile") or {},
+        resumen=resumen,
+        snippets_by_key={"obra|E4": corpus},
+    )
+    return result.content
 
 
 def _body_obra_e5_cotizaciones(doc_metadata: Dict[str, Any]) -> str:
     """Cotizaciones de materiales (obra pública, Anexo E-5)."""
-    from app.services.obra_economic_annex_clauses import build_obra_e5_cotizaciones_markdown
+    from app.services.economic_document_reapply import load_economic_payload
+    from app.services.official_format_resolver import resolve_official_deliverable
 
+    session_state = doc_metadata.get("session_state") or {}
+    session_id = str(doc_metadata.get("session_id") or session_state.get("session_id") or "")
+    _, _, resumen = load_economic_payload(session_state, session_id=session_id)
     corpus = " ".join(
         str(doc_metadata.get(k) or "")
         for k in ("bases_corpus_hint", "req_snippet", "req_desc")
@@ -1434,7 +1463,15 @@ def _body_obra_e5_cotizaciones(doc_metadata: Dict[str, Any]) -> str:
         doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
         "",
     )
-    return build_obra_e5_cotizaciones_markdown(concurso=concurso, req_snippet=corpus)
+    result = resolve_official_deliverable(
+        "obra|E5",
+        session_id=session_id,
+        session_state={**session_state, "concurso_label": concurso, "bases_corpus_hint": corpus},
+        master_profile=doc_metadata.get("master_profile") or {},
+        resumen=resumen,
+        snippets_by_key={"obra|E5": corpus},
+    )
+    return result.content
 
 
 def _body_obra_e1_carta_compromiso(
@@ -1444,10 +1481,8 @@ def _body_obra_e1_carta_compromiso(
 ) -> str:
     """Carta-compromiso de la proposición (Anexo E-1) con montos del motor económico."""
     from app.services.economic_document_reapply import load_economic_payload
-    from app.services.obra_economic_annex_clauses import (
-        assemble_obra_e1_corpus,
-        build_obra_e1_carta_compromiso_markdown,
-    )
+    from app.services.obra_economic_annex_clauses import assemble_obra_e1_corpus
+    from app.services.official_format_resolver import resolve_official_deliverable
 
     session_state = doc_metadata.get("session_state") or {}
     session_id = str(doc_metadata.get("session_id") or session_state.get("session_id") or "")
@@ -1466,22 +1501,25 @@ def _body_obra_e1_carta_compromiso(
         doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
         "",
     )
-    return build_obra_e1_carta_compromiso_markdown(
-        concurso=concurso,
+    result = resolve_official_deliverable(
+        "obra|E1",
+        session_id=session_id,
+        session_state={
+            **session_state,
+            "concurso_label": concurso,
+            "bases_corpus_hint": bases_hint,
+            "objeto_obra": str(
+                doc_metadata.get("obra_descripcion")
+                or doc_metadata.get("objeto_obra")
+                or session_state.get("objeto_obra")
+                or ""
+            ),
+        },
         master_profile=master_profile or {},
         resumen=resumen,
-        req_snippet=corpus,
-        bases_corpus_hint=bases_hint,
-        req_desc=req_desc,
-        session_id=session_id,
-        session_state=session_state,
-        obra_descripcion=str(
-            doc_metadata.get("obra_descripcion")
-            or doc_metadata.get("objeto_obra")
-            or ""
-        ),
-        session_name=str(session_state.get("name") or doc_metadata.get("session_name") or ""),
+        snippets_by_key={"obra|E1": corpus},
     )
+    return result.content
 
 
 def is_short_acceptance_annex(
@@ -1754,6 +1792,56 @@ def _body_anexo_xi(doc_metadata: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _body_obra_tb_solvencia(
+    doc_metadata: Dict[str, Any],
+    *,
+    master_profile: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Capital contable comprometido / liquidez (obra|T_B_SOLVENCIA) — HRU sin LLM."""
+    from app.services.obra_solvency_annex_clauses import (
+        build_obra_tb_solvencia_markdown,
+        is_official_obra_tb_solvencia_mirror_content,
+        resolve_solvency_figures,
+        solvency_provenance_ui,
+    )
+
+    mp = master_profile or {}
+    st = session_state if isinstance(session_state, dict) else {}
+    if not st and isinstance(doc_metadata.get("session_state"), dict):
+        st = doc_metadata["session_state"]
+    session_id = str(doc_metadata.get("session_id") or st.get("session_id") or "")
+    concurso = _slot(
+        doc_metadata.get("concurso_label") or doc_metadata.get("tender_name"),
+        "",
+    )
+    corpus_hint = str(doc_metadata.get("bases_corpus_hint") or st.get("bases_corpus_hint") or "")
+    snippet = str(doc_metadata.get("req_snippet") or "")
+    desc = str(doc_metadata.get("req_desc") or "")
+    body = build_obra_tb_solvencia_markdown(
+        concurso=concurso,
+        master_profile=mp,
+        session_state=st,
+        session_id=session_id,
+        req_snippet=snippet,
+        req_desc=desc,
+        bases_corpus_hint=corpus_hint,
+    )
+    figures = resolve_solvency_figures(
+        master_profile=mp,
+        session_state=st,
+        corpus=snippet + corpus_hint,
+    )
+    doc_metadata["solvency_provenance_ui"] = solvency_provenance_ui(figures)
+    doc_metadata["official_bases_mirror"] = is_official_obra_tb_solvencia_mirror_content(body)
+    doc_metadata["materialization_route"] = (
+        "official_bases_mirror"
+        if doc_metadata["official_bases_mirror"]
+        else "deterministic_solvency_clause"
+    )
+    return body
+
+
 _ASUNTO_BY_DEDUPE: Dict[str, str] = {
     "obra|T1": "Relación de maquinaria y equipo de construcción",
     "obra|T2": "Relación de contratos de obras vigentes",
@@ -1767,6 +1855,7 @@ _ASUNTO_BY_DEDUPE: Dict[str, str] = {
     "obra|E5": "Cotizaciones de Materiales",
     "obra|T8_PRIVACIDAD": "Aceptación del Aviso de Privacidad",
     "obra|T8": "Aceptación del Aviso de Privacidad",
+    "obra|T_B_SOLVENCIA": "Capital contable comprometido y liquidez",
     "pliego|ANEXO_II": "Manifiesto de conformidad con las bases del concurso",
     "pliego|ANEXO_III": "Datos generales del participante",
     "pliego|ANEXO_IV": "Carta en papel membretado de la empresa",
@@ -1810,6 +1899,7 @@ _CLAUSE_BY_DEDUPE: Dict[str, Any] = {
     "obra|E5": _body_obra_e5_cotizaciones,
     "obra|T8_PRIVACIDAD": _body_obra_t8_privacidad,
     "obra|T8": _body_obra_t8_privacidad,
+    "obra|T_B_SOLVENCIA": _body_obra_tb_solvencia,
     "pliego|ANEXO_II": _body_anexo_ii,
     "pliego|ANEXO_III": _body_anexo_iii,
     "pliego|ANEXO_IV": _body_anexo_iv,

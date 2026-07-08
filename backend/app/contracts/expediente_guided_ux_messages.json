@@ -1,0 +1,53 @@
+{
+  "messages_version": "expediente-guided-ux-v1.0.0",
+  "description": "Copy UX P0 expediente guiado — un CTA por paso, sin códigos internos.",
+  "steps": {
+    "bases": {
+      "label": "Bases",
+      "hint": "Sube PDFs/Excel y relee el dictamen forense"
+    },
+    "cotizacion": {
+      "label": "Cotización",
+      "hint": "Captura precios en el chat o matriz"
+    },
+    "validar_economica": {
+      "label": "Validar económica",
+      "hint": "Escribe «generar propuesta económica» en el chat"
+    },
+    "plan_documentos": {
+      "label": "Plan documental",
+      "hint": "Confirma qué archivos generar"
+    },
+    "materializar": {
+      "label": "Crear archivos",
+      "hint": "Materializa la propuesta en disco"
+    }
+  },
+  "step_status": {
+    "current_prefix": "Paso actual:",
+    "done_badge": "Listo",
+    "pending_badge": "Pendiente"
+  },
+  "capture_honesty": {
+    "matrix_complete_motor_pending": "Matriz **{filled}/{total}** — falta **{motor_pending}** partida del motor de cotización (**{motor_label}**). Indícala en el chat.",
+    "matrix_incomplete": "Capturaste **{filled}** de **{total}** precio(s) en la matriz. Faltan **{missing}**.",
+    "matrix_complete_ready_validate": "Cotización **{filled}/{total}** en matriz. **Siguiente paso:** escribe **generar propuesta económica** para validar.",
+    "matrix_complete_validated": "Cotización validada (**{filled}/{total}**). **Siguiente paso:** crea los archivos económicos."
+  },
+  "overlays": {
+    "bases_analysis_title": "Releyendo bases…",
+    "bases_analysis_subtitle": "Extracción, índice vectorial y dictamen forense",
+    "document_generation_title": "Creando archivos…",
+    "document_generation_subtitle": "Generación de propuesta y formatos en disco",
+    "dismiss_hint": "Seguir navegando (trabajo en segundo plano)"
+  },
+  "panel_hints": {
+    "generation_blocked_analysis": "La generación se habilita cuando termine de releer las bases.",
+    "generation_blocked_no_company": "Selecciona una empresa en el menú superior.",
+    "generation_blocked_quality": "Confirma el plan documental en el chat antes de generar completo.",
+    "primary_materialize_economic": "Usa **Crear archivos económicos** tras validar la cotización en chat."
+  },
+  "price_preempt": {
+    "routed_to_economic": "Interpreté tu mensaje como **precio de cotización** para **{label}** (no como dato administrativo)."
+  }
+}

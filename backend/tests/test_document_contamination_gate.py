@@ -1,6 +1,7 @@
 """Tests del gate de contaminación documental (universal)."""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -82,7 +83,7 @@ def test_is_apu_document():
     assert is_apu_document("Análisis de precios unitarios", "panel administrativo")
 
 
-def test_resolve_document_date_from_cronograma():
+def test_resolve_document_date_from_cronograma_exposes_deadline_only():
     state = {
         "last_analysis": {
             "cronograma": {
@@ -90,10 +91,11 @@ def test_resolve_document_date_from_cronograma():
             }
         }
     }
-    out = resolve_document_date(state)
-    assert out["source"].startswith("cronograma")
-    assert "abril" in out["fecha_es"].lower()
-    assert "2026" in out["fecha_es"]
+    gen_at = datetime(2026, 4, 26, 8, 0, 0)
+    out = resolve_document_date(state, at=gen_at)
+    assert out["source"] == "generation_timestamp"
+    assert out["fecha_es"] == "26 de abril de 2026"
+    assert "2026-04-27" in str(out["deadline_dt"])
 
 
 def test_fill_gate_blocks_contaminated_docx(tmp_path, monkeypatch):

@@ -388,8 +388,45 @@ _EMBEDDED_FIANZA_TEMPLATE_RE = re.compile(
     r"(?i)texto\s+fianza|por\s+_{2,}|a\s+favor\s+de\s+la\s+(?:universidad|instituto|dependencia|convocante)"
 )
 
+_FORMATS_BROKEN_PARENTHETICAL_RE = re.compile(r"(?i)^[\)\(\s,;:\-]+|^\)\s*,|^\)\s+y\s+")
+
+_FORMATS_EVALUATION_CRITERIA_RE = re.compile(
+    r"(?i)\b("
+    r"\d+\.\d+\.?\s*puntos\b|puntos\s+sus\s+ingresos|ingresos\s+son\s+iguales\s+\d+\s*%|"
+    r"penas\s+convencionales|pago\s+de\s+penas\s+convencionales"
+    r")\b"
+)
+
+_FORMATS_FEDERAL_REFERENCE_RE = re.compile(
+    r"(?i)\b("
+    r"modelo\s+(de\s+)?contrato\s+federal|anexo\s+s\s*[\"']?modelo\s+contrato\s+federal|"
+    r"modelo\s+de\s+p[oó]liza\s+de\s+fianza\s+para\s+garantizar.*contrato\s+federal|"
+    r"el\s+modelo\s+de\s+contrato\s+as[ií]\s+como\s+las\s+condiciones\s+establecidas"
+    r")\b"
+)
+
+_LPN_IN_TEXT_RE = re.compile(
+    r"(?i)\b("
+    r"la[\s\-]*[\d\w\-]+?[\s\-]*n[\s\-]*\d{2}[\s\-]*\d{4}|"
+    r"\d{7,8}[\s\-]\d{3}[\s\-]\d{2}"
+    r")\b"
+)
+
 _FORMATO_ANEXAR_PANEL_RE = re.compile(
     r"(?i)formato\s+para\s+anexar|anexar\s+documentos?\s*$"
+)
+
+# Encabezados sueltos (sin cuerpo de requisito) y obligaciones operativas, no documentos físicos.
+_CORPORATE_HEADER_ONLY_RE = re.compile(
+    r"(?i)^(?:identificaci[oó]n\s+y\s+uniformes|uniformes\s+y\s+equipo|equipo\s+de\s+protecci[oó]n)$"
+)
+
+_CORPORATE_OPERATIONAL_UNIFORM_RE = re.compile(
+    r"(?i)\b("
+    r"portar[aá]n?\s+en\s+todo\s+momento|equipo\s+de\s+protecci[oó]n\s+personal|"
+    r"cubrebocas|careta\s+y/o\s+lentes|uniformes?\s+del\s+personal|"
+    r"prestador\s+del\s+servicio\s+queda\s+obligado\s+a\s+garantizar"
+    r")\b"
 )
 
 # Anexos operativos del procedimiento, no expediente corporativo.
@@ -403,6 +440,100 @@ _NON_CORPORATE_PLIEGO_RE = re.compile(
 )
 
 
+def is_broken_anexo_inventory_label(nombre: str, snippet: str = "") -> bool:
+    """True si la etiqueta proviene de un parseo roto «Anexo V: ), …» del índice de anexos."""
+    n = str(nombre or "").strip()
+    s = str(snippet or "").strip()
+    if re.search(r"(?i)anexo\s+[ivxlc]+\s*:\s*\)\s*,", n):
+        return True
+    if re.search(r"(?i)anexo\s+[ivxlc]+\s*:\s*\)\s*$", n):
+        return True
+    if re.search(r"(?i)anexo\s+[ivxlc]+\s*:\s*\)\s+y\s+", n):
+        return True
+    if _FORMATS_BROKEN_PARENTHETICAL_RE.search(s[:48]):
+        return True
+    return False
+
+
+def infer_primary_licitacion_tokens(corpus: Any) -> set[str]:
+    """Tokens de LPN/número de licitación inferidos del documento primario de bases."""
+    from app.services.junta_bases_corpus import primary_bases_combined
+
+    head = primary_bases_combined(corpus)[:30000].lower()
+    tokens: set[str] = set()
+    for m in _LPN_IN_TEXT_RE.finditer(head):
+        tokens.add(re.sub(r"[\s\-]+", "", m.group(1).lower()))
+    return tokens
+
+
+def snippet_has_foreign_licitacion_id(blob: str, primary_tokens: set[str]) -> bool:
+    """True si el fragmento cita un número de licitación distinto al de las bases primarias."""
+    if not primary_tokens:
+        return False
+    text = str(blob or "")
+    for m in _LPN_IN_TEXT_RE.finditer(text):
+        tok = re.sub(r"[\s\-]+", "", m.group(1).lower())
+        if not tok:
+            continue
+        if any(tok in p or p in tok for p in primary_tokens):
+            continue
+        return True
+    return False
+
+
+def passes_formats_panel_bases_gate(
+    nombre: str,
+    snippet: str,
+    corpus: Any,
+    *,
+    session_hint: str = "",
+) -> bool:
+    """
+    Gate universal anti-contaminación para el panel Formatos/Anexos detectados.
+
+    Exige ancla en bases primarias, rechaza ítems rotos, criterios de evaluación y LPN ajenas.
+    """
+    from app.config.settings import settings
+    from app.services.junta_bases_corpus import primary_bases_combined
+
+    if is_formats_panel_noise(nombre, "", snippet):
+        return False
+    if is_broken_anexo_inventory_label(nombre, snippet):
+        return False
+    if not bool(getattr(settings, "FORMATS_PANEL_CONTAMINATION_GATE_ENABLED", True)):
+        combined = str(getattr(corpus, "combined", "") or "")
+        return pliego_format_anchor_in_corpus(nombre, snippet, combined)
+
+    primary_text = primary_bases_combined(corpus)
+    anchor_blob = primary_text if primary_text.strip() else str(getattr(corpus, "combined", "") or "")
+    blob = " ".join((nombre, snippet))
+    if snippet_has_foreign_licitacion_id(blob, infer_primary_licitacion_tokens(corpus)):
+        return False
+
+    sn = re.sub(r"\s+", " ", str(snippet or "").strip())
+    if len(sn) >= 20:
+        probe = sn[: min(80, len(sn))].lower()
+        if probe not in anchor_blob.lower():
+            if not pliego_format_anchor_in_corpus(nombre, snippet, anchor_blob):
+                return False
+    elif not pliego_format_anchor_in_corpus(nombre, snippet, anchor_blob):
+        return False
+
+    if snippet_contaminated_across_corpus(snippet, corpus):
+        return False
+
+    hint = str(session_hint or "").strip()
+    if hint:
+        try:
+            from app.services.document_fill_quality_gate import detect_cross_tender_marker
+
+            if detect_cross_tender_marker([snippet, nombre], hint):
+                return False
+        except Exception:
+            pass
+    return True
+
+
 def is_corporate_physical_panel_noise(
     nombre: str, descripcion: str = "", snippet: str = ""
 ) -> bool:
@@ -412,6 +543,16 @@ def is_corporate_physical_panel_noise(
     name = str(nombre or "").strip()
     blob = " ".join((nombre, descripcion, snippet)).strip()
     if not name and not blob:
+        return True
+    norm_name = _normalize_text(name)
+    if _CORPORATE_HEADER_ONLY_RE.match(norm_name) or _CORPORATE_HEADER_ONLY_RE.match(
+        _normalize_text(blob[:120])
+    ):
+        return True
+    if _CORPORATE_OPERATIONAL_UNIFORM_RE.search(blob) and not re.search(
+        r"(?i)\b(original|copia\s+certificada|presentar|constancia|certificaci[oó]n)\b",
+        blob,
+    ):
         return True
     if _FORMATO_ANEXAR_PANEL_RE.search(name) or _FORMATO_ANEXAR_PANEL_RE.search(blob):
         return True
@@ -425,6 +566,72 @@ def is_corporate_physical_panel_noise(
         if re.search(r"(?i)\bfianza\b", name):
             return True
     return False
+
+
+def snippet_contaminated_across_corpus(snippet: str, corpus: Any) -> bool:
+    """
+    True si un fragmento sustantivo ancla en un PDF no primario pero no en bases/convocatoria.
+
+    HRU: detecta mezcla de licitaciones (p. ej. requisito citado desde otro pliego indexado).
+    """
+    from app.services.junta_bases_corpus import primary_bases_combined, primary_bases_segments
+
+    sn = re.sub(r"\s+", " ", str(snippet or "").strip())
+    if len(sn) < 20:
+        return False
+    probe = sn[: min(80, len(sn))].lower()
+    if len(probe) < 20:
+        return False
+    primary_text = primary_bases_combined(corpus).lower()
+    if probe in primary_text:
+        return False
+    primary_names = {fn for fn, _ in primary_bases_segments(corpus)}
+    for fn, text in getattr(corpus, "segments", []) or []:
+        if fn in primary_names:
+            continue
+        if probe in str(text or "").lower():
+            return True
+    return False
+
+
+def passes_corporate_physical_bases_gate(
+    nombre: str,
+    snippet: str,
+    corpus: Any,
+    *,
+    session_hint: str = "",
+) -> bool:
+    """
+    Gate universal anti-contaminación para el panel de credenciales físicas.
+
+    Exige ancla en el documento primario de bases y rechaza fragmentos de PDFs ajenos.
+    """
+    from app.config.settings import settings
+    from app.services.junta_bases_corpus import primary_bases_combined
+
+    if is_corporate_physical_panel_noise(nombre, "", snippet):
+        return False
+    if not bool(getattr(settings, "CORPORATE_PHYSICAL_CONTAMINATION_GATE_ENABLED", True)):
+        combined = str(getattr(corpus, "combined", "") or "")
+        return corporate_physical_anchor_in_corpus(nombre, snippet, combined)
+
+    primary_text = primary_bases_combined(corpus)
+    anchor_blob = primary_text if primary_text.strip() else str(getattr(corpus, "combined", "") or "")
+    if not corporate_physical_anchor_in_corpus(nombre, snippet, anchor_blob):
+        return False
+    if snippet_contaminated_across_corpus(snippet, corpus):
+        return False
+    hint = str(session_hint or "").strip()
+    if hint:
+        try:
+            from app.services.document_fill_quality_gate import detect_cross_tender_marker
+
+            marker = detect_cross_tender_marker([snippet, nombre], hint)
+            if marker:
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def corporate_physical_anchor_in_corpus(
@@ -766,6 +973,47 @@ def is_generable_tipo_accion(tipo_accion: Optional[str]) -> bool:
     return str(tipo_accion or "").strip().lower() in _GENERABLE_ACTIONS
 
 
+def is_inventory_expanded_compliance_item(item: Dict[str, Any]) -> bool:
+    """
+    True si el ítem proviene del merge universal de inventario en compliance.
+
+    Aplica a cualquier licitación: ``inventory_synthetic`` (RAG/regex/LLM) o
+    ``from_document_inventory`` (inventario canónico reflejado en la lista maestra).
+    """
+    if not isinstance(item, dict):
+        return False
+    return bool(item.get("inventory_synthetic")) or bool(item.get("from_document_inventory"))
+
+
+def is_technical_writer_queue_eligible(item: Dict[str, Any]) -> bool:
+    """
+    Criterio universal para encolar un requisito en TechnicalWriter.
+
+    Acepta acciones generables explícitas o ítems expandidos por inventario con
+    señal de evidencia (sin reglas por convocante ni tipo de licitación).
+    """
+    if not isinstance(item, dict):
+        return False
+    tipo = str(item.get("tipo_accion") or "").strip().lower()
+    if is_generable_tipo_accion(tipo):
+        return True
+    if is_inventory_expanded_compliance_item(item):
+        if item.get("evidence_match") is True:
+            return True
+        if item.get("inventory_synthetic") is True:
+            return True
+    return False
+
+
+def count_actionable_generation_actions(action_counts: Dict[str, int]) -> int:
+    """Suma acciones que pueden materializar documentos (generar + datos licitante)."""
+    if not isinstance(action_counts, dict):
+        return 0
+    return int(action_counts.get("generar", 0) or 0) + int(
+        action_counts.get("requiere_datos_licitante", 0) or 0
+    )
+
+
 def should_exclude_from_formats_panel(nombre: str, descripcion: str = "", snippet: str = "") -> bool:
     """True si el ítem es trámite/procedimiento, no un formato del pliego a generar."""
     blob = " ".join((nombre, descripcion, snippet)).strip()
@@ -776,11 +1024,24 @@ def is_formats_panel_noise(nombre: str, descripcion: str = "", snippet: str = ""
     """Ruido universal en panel Formatos/Anexos (CCC sin ancla, meta-portal, fianzas post-adjudicación)."""
     if is_corporate_physical_panel_noise(nombre, descripcion, snippet):
         return True
+    if is_broken_anexo_inventory_label(nombre, snippet):
+        return True
     head = str(snippet or "")[:320]
     if should_exclude_from_formats_panel(nombre, descripcion, head):
         return True
     blob = " ".join((nombre, descripcion, snippet)).strip()
     if not blob:
+        return True
+    if _FORMATS_EVALUATION_CRITERIA_RE.search(blob):
+        return True
+    if _FORMATS_FEDERAL_REFERENCE_RE.search(blob):
+        return True
+    if re.search(r"(?i)an[aá]lisis\s+de\s+precios\s+unitarios|\bapu\b", blob):
+        if not re.search(r"(?i)\banexo\s+e[\s.\-_]*3\b", blob):
+            return True
+    if re.search(r"(?i)\bcomprobante fiscal\b|\bcfdi\b", blob) and not re.search(
+        r"(?i)\b(formato|anexo|carta|declaraci[oó]n|manifiesto)\b", blob
+    ):
         return True
     if _PLIEGO_POST_ADJUDICATION_ANEXO_RE.search(str(nombre or "")[:80]):
         return True
@@ -879,6 +1140,18 @@ def enforce_deterministic_tipo_accion(item: Dict[str, Any]) -> Dict[str, Any]:
             out["tipo_accion"] = "requiere_datos_licitante"
             if "enforced_economic_domain" not in flags:
                 flags.append("enforced_economic_domain")
+    elif re.search(
+        r"(?i)\b(?:estados\s+financieros|cuadro\s+de\s+finiquito)\b",
+        " ".join((nombre, desc, snippet)),
+    ) and not re.search(
+        r"(?i)\b(?:declaraci[oó]n|manifiesto|carta|formato)\b",
+        " ".join((nombre, desc, snippet)),
+    ):
+        action = str(out.get("tipo_accion") or "").lower()
+        if action in ("generar", "requiere_datos_licitante", "unknown", ""):
+            out["tipo_accion"] = "presentar_fisico"
+            if "enforced_solvency_physical" not in flags:
+                flags.append("enforced_solvency_physical")
     else:
         action = str(out.get("tipo_accion") or "").lower()
         blob = " ".join((nombre, desc, snippet))

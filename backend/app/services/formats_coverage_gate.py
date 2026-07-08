@@ -11,13 +11,26 @@ from typing import Any, Dict, List, Optional
 from app.config.settings import settings
 
 
-def count_panel_admin_generar(panel_payload: Dict[str, Any]) -> int:
+def count_panel_admin_generar(
+    panel_payload: Dict[str, Any],
+    *,
+    exclude_obra_economic_envelope: bool = False,
+) -> int:
     """
     Cuenta ítems «generar» que el agente Formats intenta fusionar desde el panel.
 
     Replica la lógica de ``FormatsAgent`` (excluye modelo de propuesta técnica).
+    Con ``exclude_obra_economic_envelope``, omite E-1…E-5 (+ E-3E) materializados
+    por ``EconomicWriter`` cuando hay desglose obra.
     """
     import re
+
+    deferred_keys: set[str] = set()
+    if exclude_obra_economic_envelope:
+        from app.services.official_format_resolver import economic_envelope_dedupe_keys
+        from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+        deferred_keys = set(economic_envelope_dedupe_keys())
 
     total = 0
     for bucket in (
@@ -40,8 +53,20 @@ def count_panel_admin_generar(panel_payload: Dict[str, Any]) -> int:
                 nombre_low,
             ):
                 continue
+            if deferred_keys:
+                from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+                if pliego_format_dedupe_key(nombre) in deferred_keys:
+                    continue
             total += 1
     return total
+
+
+def count_obra_economic_envelope_deferred(panel_payload: Dict[str, Any]) -> int:
+    """Ítems «generar» del panel que EconomicWriter materializa (obra|E*)."""
+    full = count_panel_admin_generar(panel_payload, exclude_obra_economic_envelope=False)
+    admin = count_panel_admin_generar(panel_payload, exclude_obra_economic_envelope=True)
+    return max(0, full - admin)
 
 
 def evaluate_formats_stage_completeness(
@@ -51,14 +76,17 @@ def evaluate_formats_stage_completeness(
     llm_queue_size: int,
     generation_skipped: List[Dict[str, Any]],
     panel_expected: int,
+    deferred_to_economic_count: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """
     Bloquea cierre de la etapa ``formats`` si la materialización está muy por debajo
     de lo intentado o de lo esperado por el panel consolidado.
     """
     min_ratio = float(getattr(settings, "FORMATS_MIN_DELIVERABLE_RATIO", 0.85) or 0.85)
-    attempted = max(0, int(mirror_queue_size) + int(llm_queue_size))
-    expected = max(int(panel_expected or 0), attempted)
+    deferred = max(0, int(deferred_to_economic_count or 0))
+    raw_attempted = max(0, int(mirror_queue_size) + int(llm_queue_size))
+    attempted = max(0, raw_attempted - deferred)
+    expected = max(int(panel_expected or 0), raw_attempted) - deferred
     if expected < 3:
         return None
 
@@ -69,7 +97,9 @@ def evaluate_formats_stage_completeness(
     pending_names = [
         str(s.get("nombre") or s.get("req_name") or "")
         for s in generation_skipped
-        if isinstance(s, dict) and str(s.get("nombre") or s.get("req_name") or "").strip()
+        if isinstance(s, dict)
+        and not s.get("deferred_to_economic_writer")
+        and str(s.get("nombre") or s.get("req_name") or "").strip()
     ]
 
     return {
@@ -84,6 +114,7 @@ def evaluate_formats_stage_completeness(
         "threshold_count": threshold,
         "attempted_count": attempted,
         "panel_expected_count": int(panel_expected or 0),
+        "deferred_to_economic_count": deferred,
         "skipped_count": len(generation_skipped),
         "skipped": generation_skipped[:25],
         "pending_names": pending_names[:15],

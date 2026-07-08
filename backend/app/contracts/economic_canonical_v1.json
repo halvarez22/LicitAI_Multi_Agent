@@ -1,0 +1,28 @@
+{
+  "schema_version": "economic-canonical-v1.0.0",
+  "description": "HRU: verdad canónica versionada de precios capturados. Merge idempotente por concept_key.",
+  "concept_key_source": "structured_price_slot.field",
+  "precedence_rank": {
+    "user_direct": 100,
+    "user_chat": 90,
+    "user_chat_confirm": 88,
+    "user_tsv": 80,
+    "user_csv": 75,
+    "user_excel": 70,
+    "document_normalized": 50,
+    "catalog": 40,
+    "inference": 10
+  },
+  "confirm_min_confidence": 0.85,
+  "item_fields": [
+    "concept_key",
+    "label",
+    "amount_mxn",
+    "status",
+    "source_channel",
+    "precedence_rank",
+    "provenance_ui",
+    "updated_at"
+  ],
+  "status_values": ["pending", "captured", "conflict", "deferred"]
+}

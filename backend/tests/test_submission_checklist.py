@@ -51,6 +51,51 @@ def test_build_hitos_compacta_junta_narrativa():
     assert "adjudicación" not in junta["fecha_texto_raw"]
 
 
+def test_build_hitos_muestra_rango_visita_dos_dias():
+    cron = {
+        "visita_instalaciones": (
+            "Las visitas se llevarán a cabo los días 06 y 07 de febrero de 2024, "
+            "en horario de 09:00 a 15:00 hrs."
+        ),
+    }
+    hitos = build_hitos_from_cronograma(cron)
+    visita = next(h for h in hitos if h["id"] == "visita_instalaciones")
+    assert visita["fecha_texto_raw"].startswith("6 y 7 de febrero de 2024")
+    assert "09:00–15:00" in visita["fecha_texto_raw"]
+    assert visita["fecha_hora"] == datetime(2024, 2, 7, 15, 0, 0)
+
+
+def test_resolve_display_fecha_best_prefiere_literal_con_horario():
+    from app.checklist.hito_scheduler import resolve_display_fecha_best
+
+    literal = (
+        "Visita a instalaciones: Las visitas se llevarán a cabo los días "
+        "06 y 07 de febrero de 2024, en horario de 09:00 a 15:00 hrs."
+    )
+    display, dt = resolve_display_fecha_best("06 y 07 de febrero de 2024", literal)
+    assert display.startswith("6 y 7 de febrero de 2024")
+    assert "09:00" in display and "15:00" in display
+    assert dt == datetime(2024, 2, 7, 15, 0, 0)
+
+
+def test_resolve_display_fecha_best_rechaza_narrativa_sin_fecha():
+    from app.checklist.hito_scheduler import resolve_display_fecha_best
+
+    narrativa = (
+        "Junta de aclaraciones. De la presente licitación, con la finalidad de que "
+        "en su caso las respuestas formen parte integral de las presentes bases y "
+        "anexos técnicos a las 14:00 horas."
+    )
+    cron = (
+        "Junta (s) de Aclaraciones Se llevará a cabo el día 12 de febrero de 2024, "
+        "a las 14:00 horas."
+    )
+    display, dt = resolve_display_fecha_best(narrativa, cron)
+    assert display == "12 de febrero de 2024, 14:00"
+    assert dt is not None
+    assert dt.day == 12 and dt.hour == 14
+
+
 def test_merge_preserva_completado():
     nuevos = build_hitos_from_cronograma({"visita_instalaciones": "15/02/2025 10:00"})
     prev = [

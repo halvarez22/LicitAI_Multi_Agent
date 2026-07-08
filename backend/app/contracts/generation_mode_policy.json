@@ -1,0 +1,44 @@
+{
+  "policy_version": "1.0.0",
+  "description": "Política HRU de modos de generación desacoplados (F2). Sin hardcode por licitación.",
+  "modes": {
+    "full": {
+      "label": "Generación completa",
+      "jobs_active": ["datagap", "technical", "formats", "economic_writer", "packager", "delivery"],
+      "wipe_preserve_subdirs": [],
+      "economic_snapshot_required_before": ["economic_writer"]
+    },
+    "technical": {
+      "label": "Solo propuesta técnica y formatos administrativos",
+      "jobs_active": ["datagap", "technical", "formats"],
+      "wipe_preserve_subdirs": [
+        "2.propuesta_economica",
+        "2.propuesta economica",
+        "SOBRE_3_ECONOMICO"
+      ],
+      "economic_snapshot_required_before": []
+    },
+    "economic": {
+      "label": "Solo propuesta económica",
+      "jobs_active": ["economic_writer"],
+      "wipe_preserve_subdirs": [
+        "1.propuesta tecnica",
+        "1.propuesta_tecnica",
+        "3.documentos administrativos",
+        "SOBRE_1_ADMINISTRATIVO",
+        "SOBRE_2_TECNICO"
+      ],
+      "economic_snapshot_required_before": ["economic_writer"]
+    }
+  },
+  "aliases": {
+    "generation_full": "full",
+    "generation_technical": "technical",
+    "generation_economic": "economic"
+  },
+  "default_mode": "full",
+  "wipe_behavior": {
+    "preserve_artifacts_when_job_blocked": true,
+    "force_regenerate_company_data_key": "force_regenerate"
+  }
+}

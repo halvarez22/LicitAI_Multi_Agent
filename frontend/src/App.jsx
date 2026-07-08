@@ -23,9 +23,42 @@ import ForensicBasesExcerptCard from './components/ForensicBasesExcerptCard';
 import ForensicEvidenceBadge from './components/ForensicEvidenceBadge';
 import ValidationAlert from './components/ValidationAlert';
 import JustificationModal from './components/JustificationModal';
+import GenerationQueuePanel from './components/GenerationQueuePanel';
+import {
+    ScopeDownloadBlock,
+    CrossScopeDownloadHint,
+    useGenerationDownloadBundle,
+} from './components/GenerationDownloadActions.jsx';
+import {
+    GENERATION_MODE_OPTIONS,
+    formatGenerationStateJobsSummaryHuman,
+    generationModeLabelEs,
+    generationStageLabelEs,
+} from './generationModeUi.js';
+import {
+    createInitialGenerationStreamRuns,
+    dualStreamParallelBannerEs,
+    formatDualStreamJobsSummaryHuman,
+    generationStreamIdForMode,
+    generationStreamParamForMode,
+    isAnyGenerationStreamActive,
+    isGenerationModeButtonDisabled,
+    isGenerationStreamActive,
+    isStreamActiveForMode,
+    primaryGenerationProgressForDisplay,
+} from './generationStreamUi.js';
+import { EXPEDIENTE_CHAT_SHELL_UI } from './expedienteProgressUi.js';
 import ValidationPolicyAdmin from './components/ValidationPolicyAdmin';
 import BlockResolutionPanel from './components/BlockResolutionPanel';
 import CaptureMatrixPanel from './components/CaptureMatrixPanel';
+import ExpedienteGuidedStepBar from './components/ExpedienteGuidedStepBar';
+import {
+    mergeGenerationHints,
+    mergeOverlayMessages,
+    mergePanelLabels,
+    panelLabelForGenerationMode,
+    panelShortForGenerationMode,
+} from './expedienteGuidedUi.js';
 import DocumentQualityDiagnosticPanel from './components/DocumentQualityDiagnosticPanel';
 import IntakeProgressCard from './components/IntakeProgressCard';
 import DocumentCandidatePanel from './components/DocumentCandidatePanel';
@@ -161,7 +194,13 @@ async function pollAgentsJobUntilDone(jobId, onProgress, options = {}) {
         const rawPct = prog.pct;
         const pct = typeof rawPct === 'number' && !Number.isNaN(rawPct) ? rawPct : undefined;
         if (onProgress && (msg || pct !== undefined || job.status === 'COMPLETED' || job.status === 'FAILED')) {
-            onProgress({ message: msg, pct, status: job.status });
+            onProgress({
+                message: msg,
+                pct,
+                status: job.status,
+                orchestratorHeld: Boolean(prog.orchestrator_held),
+                orchestratorStatus: prog.orchestrator_status,
+            });
         }
         if (job.status === 'COMPLETED') {
             clearPendingAgentsJob();
@@ -221,26 +260,6 @@ async function tryLoadExistingDictamen(sessionId, fetchDictamenFn, pushGuidanceF
     } catch (_) {
         return false;
     }
-}
-
-/** Etiquetas legibles para etapas de la cola de generación (orchestrator / generation_state). */
-const GENERATION_STAGE_LABELS_ES = {
-    datagap: 'Verificación de datos',
-    technical: 'Propuesta técnica',
-    formats: 'Formatos administrativos',
-    economic_writer: 'Propuesta económica',
-    economic: 'Propuesta económica',
-    packager: 'Empaquetado',
-    document_packager: 'Empaquetado',
-    delivery: 'Entrega',
-};
-
-/**
- * @param {string} stage
- * @returns {string}
- */
-function generationStageLabelEs(stage) {
-    return GENERATION_STAGE_LABELS_ES[stage] || String(stage).replace(/_/g, ' ');
 }
 
 /**
@@ -548,15 +567,9 @@ function formatGenerationWaitingExtra(orchestrator) {
  * @returns {string}
  */
 function formatGenerationStateJobsSummary(generationState) {
-    const jobs = generationState?.jobs;
-    if (!Array.isArray(jobs) || jobs.length === 0) return '';
-    const lines = jobs.map((j) => {
-        if (!j || typeof j !== 'object') return null;
-        const id = generationStageLabelEs(j.id);
-        const st = String(j.status || 'pending');
-        return `• ${id}: ${st}`;
-    }).filter(Boolean);
-    return lines.length ? `\n\nEstado de la cola:\n${lines.join('\n')}` : '';
+    const dual = formatDualStreamJobsSummaryHuman(generationState);
+    if (dual) return dual;
+    return formatGenerationStateJobsSummaryHuman(generationState);
 }
 
 // --- Sub-componente para mostrar resultados de auditoría ---
@@ -946,7 +959,6 @@ const App = () => {
     const [showGoNoGoPanel, setShowGoNoGoPanel] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisOverlayVisible, setAnalysisOverlayVisible] = useState(true);
-    const [isGenerating, setIsGenerating] = useState(false);
     const [reprocessingDocId, setReprocessingDocId] = useState(null);
     const [auditProgress, setAuditProgress] = useState({ percent: 0, currentFile: "" });
     const [chatMessages, setChatMessages] = useState([]);
@@ -975,7 +987,81 @@ const App = () => {
     const [provenanceModalAnimIn, setProvenanceModalAnimIn] = useState(false);
     const [provenanceModalPrePulse, setProvenanceModalPrePulse] = useState(false);
     const { acknowledgeWarning, submitJustification, trackValidationEvent } = useValidationManager(sessionId);
-    const [generationProgress, setGenerationProgress] = useState({ percent: 0, message: "" });
+    const [generationStreamRuns, setGenerationStreamRuns] = useState(createInitialGenerationStreamRuns);
+    const [generationQueueState, setGenerationQueueState] = useState(null);
+    const [activeGenerationMode, setActiveGenerationMode] = useState(null);
+    const [expedienteGuided, setExpedienteGuided] = useState(null);
+    const [generationOverlayVisible, setGenerationOverlayVisible] = useState(true);
+
+    const panelLabels = useMemo(
+        () => mergePanelLabels(expedienteGuided?.panel_button_labels),
+        [expedienteGuided],
+    );
+    const generationHints = useMemo(
+        () => mergeGenerationHints(expedienteGuided?.generation_hints),
+        [expedienteGuided],
+    );
+    const overlayMessages = useMemo(
+        () => mergeOverlayMessages(expedienteGuided?.overlay_messages),
+        [expedienteGuided],
+    );
+
+    const isAnyGenerationActive = useMemo(
+        () => isAnyGenerationStreamActive(generationStreamRuns),
+        [generationStreamRuns],
+    );
+    const generationProgress = useMemo(
+        () => primaryGenerationProgressForDisplay(generationStreamRuns),
+        [generationStreamRuns],
+    );
+    const dualStreamBanner = useMemo(
+        () => dualStreamParallelBannerEs(generationStreamRuns),
+        [generationStreamRuns],
+    );
+
+    const setStreamProgressForMode = useCallback((mode, updater) => {
+        const streamId = generationStreamIdForMode(mode);
+        setGenerationStreamRuns((prev) => ({
+            ...prev,
+            [streamId]: {
+                ...prev[streamId],
+                progress:
+                    typeof updater === 'function'
+                        ? updater(prev[streamId]?.progress || { percent: 0, message: '', held: false })
+                        : updater,
+            },
+        }));
+    }, []);
+
+    const setStreamActiveForMode = useCallback((mode, active) => {
+        const streamId = generationStreamIdForMode(mode);
+        setGenerationStreamRuns((prev) => ({
+            ...prev,
+            [streamId]: { ...prev[streamId], active },
+        }));
+    }, []);
+    const [downloadHighlightMode, setDownloadHighlightMode] = useState(null);
+    const deliveryPanelRef = useRef(null);
+    const {
+        bundle: downloadBundle,
+        refreshAll: refreshDownloadBundle,
+        loadingAll: downloadBundleLoading,
+    } = useGenerationDownloadBundle(sessionId, deliveryRefreshToken);
+
+    const focusDownloadAfterGeneration = useCallback((mode) => {
+        const resolved = mode || 'full';
+        setDownloadHighlightMode(resolved);
+        setTimeout(() => {
+            document
+                .getElementById(`generation-download-${resolved}`)
+                ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 500);
+        setTimeout(() => setDownloadHighlightMode(null), 15000);
+    }, []);
+
+    const scrollToDeliveryPanel = useCallback(() => {
+        deliveryPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, []);
 
     // --- RESIZE STATES: Para anchos de páneles ajustables ---
     const [leftWidth, setLeftWidth] = useState(300);
@@ -1013,6 +1099,7 @@ const App = () => {
     const uploadAbortControllerRef = useRef(null);
     const chatEndRef = useRef(null);
     const chatInputRef = useRef(null);
+    const chatFormRef = useRef(null);
     const pendingForensicRiskContextRef = useRef(null);
     const companySelectRef = useRef(null);
     /** Solo para limpiar claves del Set de módulo al cambiar de sesión. */
@@ -1174,12 +1261,19 @@ const App = () => {
             });
         } catch (err) {
             console.warn('[LicitAI] Error en bootstrap del chat:', err);
+        } finally {
+            setIsThinking(false);
         }
     }, [sessionId, selectedCompanyId, updateIntakeUiSnapshotFromBotData]);
 
     useEffect(() => {
         triggerChatbotBootstrap();
     }, [sessionId, selectedCompanyId, triggerChatbotBootstrap]);
+
+    // Evitar que isThinking quede pegado tras reinicio de backend o peticiones abortadas.
+    useEffect(() => {
+        setIsThinking(false);
+    }, [sessionId, selectedCompanyId]);
 
     useEffect(() => {
         if (selectedCompanyId) {
@@ -1268,9 +1362,7 @@ const App = () => {
                 const checklistFromApi = res.data.data?.submission_checklist;
                 if (checklistFromApi && typeof checklistFromApi === 'object') {
                     enriched = { ...enriched, submissionChecklist: checklistFromApi };
-                    setSubmissionChecklist((prev) =>
-                        prev?.hitos?.length ? prev : checklistFromApi,
-                    );
+                    setSubmissionChecklist(checklistFromApi);
                     setSubmissionChecklistError(null);
                 }
                 const corpFromApi = res.data.data?.corporate_physical_document_candidates;
@@ -1391,6 +1483,22 @@ const App = () => {
         }
     }, [sessionId]);
 
+    const fetchExpedienteGuided = useCallback(async () => {
+        if (!sessionId || sessionId === 'null') return;
+        try {
+            const hasAudit = Boolean(auditResults?.fechaAuditoria || auditResults?.dictamen);
+            const res = await axios.get(
+                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/expediente-guided`,
+                { params: { analysis_done: hasAudit }, timeout: 15000 },
+            );
+            if (res.data?.success && res.data?.data) {
+                setExpedienteGuided(res.data.data);
+            }
+        } catch (err) {
+            console.warn('Error fetching expediente guided:', err?.message || err);
+        }
+    }, [sessionId, auditResults]);
+
     const runSessionRehydrate = useCallback(async () => {
         if (!sessionId || sessionId === 'null') return;
         setSessionHealthBusy(true);
@@ -1501,6 +1609,7 @@ const App = () => {
             fetchDictamen();
             fetchSubmissionChecklist();
             fetchSessionHealth();
+            fetchExpedienteGuided();
 
             const savedCompany = localStorage.getItem('licitai_selected_company');
             if (savedCompany) {
@@ -1509,7 +1618,13 @@ const App = () => {
                 setSelectedCompanyId('');
             }
         }
-    }, [sessionId, fetchSources, fetchDictamen, fetchSubmissionChecklist, fetchSessionHealth]);
+    }, [sessionId, fetchSources, fetchDictamen, fetchSubmissionChecklist, fetchSessionHealth, fetchExpedienteGuided]);
+
+    useEffect(() => {
+        if (sessionId && sessionId !== 'null') {
+            fetchExpedienteGuided();
+        }
+    }, [auditResults, sessionId, fetchExpedienteGuided]);
 
     const fetchSessionName = async () => {
         try {
@@ -2138,7 +2253,7 @@ const App = () => {
         }
     };
 
-    const triggerGeneration = async () => {
+    const triggerGeneration = async (generationMode = 'full') => {
         if (isAnalyzing) {
             pushAssistantGuidance(
                 "⏳ El análisis sigue en curso. Espera a que termine para generar propuesta y evitar inconsistencias.",
@@ -2153,13 +2268,47 @@ const App = () => {
             );
             return;
         }
+        if (isGenerationModeButtonDisabled({
+            runs: generationStreamRuns,
+            modeId: generationMode,
+            isAnalyzing: false,
+            hasCompany: true,
+        })) {
+            if (isStreamActiveForMode(generationStreamRuns, generationMode)) {
+                pushAssistantGuidance(
+                    `⏳ Ya hay una generación **${generationModeLabelEs(generationMode)}** en curso. Espera a que termine.`,
+                    true
+                );
+            } else if (
+                generationStreamIdForMode(generationMode) !== 'full'
+                && isGenerationStreamActive(generationStreamRuns, 'full')
+            ) {
+                pushAssistantGuidance(
+                    '⏳ El modo **completo** está en curso; los modos parciales quedan en espera hasta que termine.',
+                    true
+                );
+            } else {
+                pushAssistantGuidance(
+                    '⏳ Hay una generación en curso. Espera a que termine antes de iniciar otra.',
+                    true
+                );
+            }
+            return;
+        }
 
         setGenerationResults(null);
         setEconomicBlockingSessionLatch(false);
         setDocumentQualityGateSnapshot(null);
-        pushAssistantGuidance("🚀 Validando expediente y preparando documentos...", false);
-        setIsGenerating(true);
-        setGenerationProgress({ percent: 0, message: "Encolando trabajo de generación..." });
+        setActiveGenerationMode(generationMode);
+        const modeForRun = generationMode;
+        const modeLabel = generationModeLabelEs(generationMode);
+        pushAssistantGuidance(`🚀 **${modeLabel}** — validando expediente y preparando documentos…`, false);
+        setStreamActiveForMode(generationMode, true);
+        setStreamProgressForMode(generationMode, {
+            percent: 0,
+            message: 'Encolando trabajo de generación...',
+            held: false,
+        });
 
         let finalOrchStatus = null;
         try {
@@ -2175,11 +2324,19 @@ const App = () => {
                 console.warn('[LicitAI] No se pudo refrescar empresa antes de generar:', freshErr?.message || freshErr);
             }
 
+            const streamParam = generationStreamParamForMode(generationMode);
             const res = await axios.post(`${API_BASE}/agents/process`, {
                 session_id: sessionId,
                 company_id: selectedCompanyId,
                 resume_generation: true,
-                company_data: { ...companyPayload, mode: 'generation_only' },
+                generation_mode: generationMode,
+                ...(streamParam ? { generation_stream: streamParam } : {}),
+                company_data: {
+                    ...companyPayload,
+                    mode: 'generation_only',
+                    generation_mode: generationMode,
+                    ...(streamParam ? { generation_stream: streamParam } : {}),
+                },
             });
 
             const encolado = res.data?.data;
@@ -2187,14 +2344,23 @@ const App = () => {
 
             if (encolado?.job_id) {
                 orchestrator = await pollAgentsJobUntilDone(encolado.job_id, (u) => {
-                    setGenerationProgress((prev) => {
+                    setStreamProgressForMode(modeForRun, (prev) => {
                         const msg = u.message || prev.message || "Procesando propuesta…";
                         let pct = prev.percent;
                         if (typeof u.pct === "number" && !Number.isNaN(u.pct)) {
                             const p = Math.max(0, Math.min(100, u.pct));
-                            pct = Math.max(prev.percent, p);
+                            if (u.orchestratorHeld && u.status === 'COMPLETED') {
+                                pct = p;
+                            } else {
+                                pct = Math.max(prev.percent, p);
+                            }
                         }
-                        return { percent: pct, message: msg };
+                        const heldLabel = u.orchestratorHeld ? ' (en pausa)' : '';
+                        return {
+                            percent: pct,
+                            message: msg + (u.status === 'COMPLETED' && u.orchestratorHeld ? heldLabel : ''),
+                            held: Boolean(u.orchestratorHeld && u.status === 'COMPLETED'),
+                        };
                     });
                 });
             } else if (encolado) {
@@ -2211,13 +2377,26 @@ const App = () => {
             const orchStatus = orchestrator?.status;
             finalOrchStatus = orchStatus;
             const stopReason = orchestrator?.agent_decision?.stop_reason;
+            setGenerationQueueState(orchestrator?.generation_state || null);
             console.info('[LicitAI] Generación finalizó', {
                 status: orchStatus,
                 stop_reason: stopReason,
                 has_data: Boolean(orchestrator?.data),
                 generation_state: orchestrator?.generation_state,
             });
-            if (stopReason === "GO_NO_GO_PENDING" || orchStatus === "go_no_go_pending") {
+            if (orchStatus === 'already_running') {
+                pushAssistantGuidance(
+                    orchestrator?.chatbot_message
+                        || 'Ya hay una generación en curso para este mismo alcance. Puedes usar el otro modo en paralelo.',
+                    true,
+                );
+                setStreamProgressForMode(modeForRun, {
+                    percent: 0,
+                    message: 'Este alcance ya está en curso',
+                    held: false,
+                });
+                return;
+            } else if (stopReason === "GO_NO_GO_PENDING" || orchStatus === "go_no_go_pending") {
                 const gngResult = orchestrator?.go_no_go_result
                     || orchestrator?.data?.go_no_go_result
                     || orchestrator?.data?.go_no_go;
@@ -2234,7 +2413,7 @@ const App = () => {
                         true
                     );
                 }
-                setGenerationProgress({ percent: 0, message: "Pausado: pendiente autorización Go/No-Go" });
+                setStreamProgressForMode(modeForRun, { percent: 0, message: "Pausado: pendiente autorización Go/No-Go" });
                 setValidationEvents([]);
                 setValidationBlockingCount(0);
                 setEconomicBlockingSessionLatch(false);
@@ -2252,16 +2431,35 @@ const App = () => {
                 setDocumentQualityBlockingSessionLatch(!!qualityLatchOn);
                 setDocumentQualityGateSnapshot(qualitySnapshot);
                 setDeliveryRefreshToken((t) => t + 1);
+                const freshBundle = await refreshDownloadBundle();
+                focusDownloadAfterGeneration(modeForRun);
+                const ecoReadyNow = Boolean(freshBundle?.economic?.ready)
+                    && Number(freshBundle?.economic?.artifact_count || 0) > 0;
+                const techReadyNow = Boolean(freshBundle?.technical?.ready)
+                    && Number(freshBundle?.technical?.artifact_count || 0) > 0;
+                const economicPause = modeForRun === 'economic'
+                    || stopReason === 'ECONOMIC_PRICES_INCOMPLETE'
+                    || !!latchOn;
+                const downloadHint = qualityLatchOn
+                    ? '\n\n**No hay archivos técnicos para descargar aún** — el bloque debajo del botón TÉCNICA muestra el motivo. Resuelve el aviso y vuelve a generar.'
+                    : economicPause
+                      ? '\n\n**Aún no descargues** — los archivos en ECONÓMICA pueden ser de una corrida anterior. Cierra la cotización en el chat y vuelve a generar.'
+                      : ecoReadyNow
+                        ? '\n\n**La cotización económica sí está lista** — usa el bloque **ECONÓMICA** debajo para descargar.'
+                        : techReadyNow
+                          ? '\n\n**La propuesta técnica sí está lista** — usa el bloque **TÉCNICA** debajo para descargar.'
+                          : '\n\nSi ya se generó algo en otro alcance, revisa los bloques de descarga debajo de cada botón.';
                 pushAssistantGuidance(
-                    baseMsg
+                    baseMsg + downloadHint
                         + formatGenerationWaitingExtra(orchestrator)
                         + formatGenerationStateJobsSummary(orchestrator?.generation_state),
                     true
                 );
-                setGenerationProgress((prev) => ({
-                    percent: Math.max(prev.percent, 5),
-                    message: `Pausado: ${stopReason || 'faltan datos'}`,
-                }));
+                setStreamProgressForMode(modeForRun, {
+                    percent: 72,
+                    message: `Pausado: ${stopReason || 'faltan datos — revisa los bloques de descarga'}`,
+                    held: true,
+                });
                 const events = [];
                 const results = orchestrator?.data;
                 if (results && typeof results === "object") {
@@ -2291,34 +2489,39 @@ const App = () => {
             } else if (orchStatus === "partial") {
                 setGenerationResults(orchestrator.data || orchestrator);
                 setDeliveryRefreshToken((t) => t + 1);
+                focusDownloadAfterGeneration(modeForRun);
                 pushAssistantGuidance(
                     (orchestrator?.chatbot_message || 'Generación parcial.')
+                        + '\n\n**Descarga tus archivos** en el bloque verde justo debajo del botón que usaste.'
                         + formatGenerationWaitingExtra(orchestrator)
-                        + formatGenerationStateJobsSummary(orchestrator?.generation_state)
-                        + '\n\nRevisa **Logística y Expedientes** por si hay archivos listos; pulsa **ACTUALIZAR LISTA**.',
+                        + formatGenerationStateJobsSummary(orchestrator?.generation_state),
                     true
                 );
-                setGenerationProgress({ percent: 100, message: 'Completado con advertencias' });
+                setStreamProgressForMode(modeForRun, { percent: 100, message: 'Completado con advertencias', held: false });
             } else if (orchStatus === "success") {
                 setGenerationResults(orchestrator.data || orchestrator);
                 setDeliveryRefreshToken((t) => t + 1);
+                focusDownloadAfterGeneration(modeForRun);
                 // Req 6.3: No mostrar mensaje de éxito ambiguo si aún hay pending_questions activas.
                 // El intakeUiSnapshot refleja si el flujo de preguntas sigue activo.
                 const hasPendingIntake = intakeUiSnapshot && intakeUiSnapshot.progressTotal > 0 && intakeUiSnapshot.remainingCount > 0;
                 if (hasPendingIntake) {
                     pushAssistantGuidance(
-                        "✅ Documentos generados. Aún quedan datos pendientes del expediente — el asistente continuará solicitándolos para completar el perfil.",
+                        "✅ Documentos generados. Aún quedan datos pendientes en el chat. **Descarga lo ya generado** en los botones justo debajo del modo que elegiste.",
                         false
                     );
                 } else {
-                    pushAssistantGuidance("✅ Documentos generados con éxito. Revisa la sección 'Logística y Expedientes' (panel derecho) para descargar los archivos.", false);
+                    pushAssistantGuidance(
+                        "✅ Documentos generados. **Descárgalos aquí ↓** en el bloque debajo del botón que usaste (Completo, Técnica o Económica).",
+                        false
+                    );
                 }
                 setEconomicBlockingSessionLatch(false);
                 setDocumentQualityBlockingSessionLatch(false);
                 setDocumentQualityGateSnapshot(null);
                 setValidationEvents([]);
                 setValidationBlockingCount(0);
-                setGenerationProgress({ percent: 100, message: "Generación completada" });
+                setStreamProgressForMode(modeForRun, { percent: 100, message: "Generación completada", held: false });
             } else if (orchStatus === "hard_disqualification") {
                 setDeliveryRefreshToken((t) => t + 1);
                 const gateData =
@@ -2332,7 +2535,7 @@ const App = () => {
                         ? `Generación detenida por reglas 12.1: ${failed.join(', ')}.`
                         : "Generación detenida por reglas deterministas de descalificación (12.1).");
                 pushAssistantGuidance(errMsg, true);
-                setGenerationProgress({
+                setStreamProgressForMode(modeForRun, {
                     percent: 0,
                     message: stopReason === 'COMPLIANCE_GATE_BLOCKING'
                         ? 'Detenido: gate 12.1'
@@ -2362,7 +2565,7 @@ const App = () => {
                 setDocumentQualityGateSnapshot(null);
                 setValidationEvents([]);
                 setValidationBlockingCount(0);
-                setGenerationProgress({
+                setStreamProgressForMode(modeForRun, {
                     percent: 0,
                     message: `Error: ${stopReason || 'generación'}`,
                 });
@@ -2375,7 +2578,7 @@ const App = () => {
                         + formatGenerationStateJobsSummary(orchestrator?.generation_state),
                     true
                 );
-                setGenerationProgress((prev) => ({
+                setStreamProgressForMode(modeForRun, (prev) => ({
                     percent: Math.max(prev.percent, 10),
                     message: `Estado: ${stopReason || orchStatus || 'revisar'}`,
                 }));
@@ -2393,11 +2596,12 @@ const App = () => {
                 true
             );
         } finally {
-            setIsGenerating(false);
+            setStreamActiveForMode(modeForRun, false);
+            fetchExpedienteGuided();
             const keepBar = finalOrchStatus && finalOrchStatus !== 'success';
             if (!keepBar) {
                 setTimeout(() => {
-                    setGenerationProgress((prev) => ({ ...prev, percent: 0 }));
+                    setStreamProgressForMode(modeForRun, (prev) => ({ ...prev, percent: 0 }));
                 }, 4000);
             }
         }
@@ -2556,7 +2760,8 @@ const App = () => {
         setTimeout(() => {
             chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         }, 100);
-    }, [updateIntakeUiSnapshotFromBotData, showGoNoGoPanel]);
+        fetchExpedienteGuided();
+    }, [updateIntakeUiSnapshotFromBotData, showGoNoGoPanel, fetchExpedienteGuided]);
 
     const handleChatQuotationUpload = async (event) => {
         const file = event?.target?.files?.[0];
@@ -2673,6 +2878,7 @@ const App = () => {
                 }
 
                 applyChatbotResponse(res);
+                setIsServerDisconnected(false);
 
             } catch (err) {
                 console.error("Chat error:", err);
@@ -2685,7 +2891,7 @@ const App = () => {
                     true,
                 );
             } finally {
-                if (!isRetry) setIsThinking(false);
+                setIsThinking(false);
             }
         };
 
@@ -2975,6 +3181,7 @@ const App = () => {
                     </div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <ExpedienteGuidedStepBar guided={expedienteGuided} compact />
                         <button 
                             disabled={isAnalyzing} 
                             onClick={triggerFullAudit} 
@@ -2982,7 +3189,9 @@ const App = () => {
                             style={{ width: '100%', padding: '12px', borderRadius: '12px', background: 'var(--primary)', border: 'none', color: '#fff', fontWeight: 800, fontSize: '12px', cursor: isAnalyzing ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', boxShadow: '0 4px 15px var(--primary-shadow)' }}
                         >
                             {isAnalyzing ? <Loader2 className="animate-spin" size={16} /> : <FileSearch size={16} />}
-                            {auditResults ? 'ACTUALIZAR ANÁLISIS' : 'ANALIZAR BASES'}
+                            {auditResults
+                                ? panelLabels.analyze_bases
+                                : panelLabels.analyze_bases_first}
                         </button>
                         {auditResults?.fechaAuditoria && (
                             <p style={{ margin: 0, fontSize: '10px', color: 'var(--text-muted)', lineHeight: 1.45, textAlign: 'center' }}>
@@ -2993,36 +3202,151 @@ const App = () => {
                             </p>
                         )}
 
-                        <button 
-                            disabled={isGenerating || isAnalyzing || !selectedCompanyId} 
-                            onClick={triggerGeneration} 
-                            title={
-                                isAnalyzing
-                                    ? 'Espera a que termine el análisis para generar la propuesta'
-                                    : !selectedCompanyId
-                                        ? 'Selecciona una empresa en el menú superior para continuar'
-                                        : 'Generar documentos de la propuesta'
-                            }
-                            style={{ 
-                                width: '100%', 
-                                padding: '12px', 
-                                borderRadius: '12px', 
-                                background: (!selectedCompanyId || isAnalyzing) ? 'rgba(139, 92, 246, 0.3)' : 'linear-gradient(135deg, var(--primary), var(--secondary))', 
-                                border: 'none', 
-                                color: (!selectedCompanyId || isAnalyzing) ? 'rgba(255,255,255,0.4)' : '#fff', 
-                                fontWeight: 800, 
-                                fontSize: '12px', 
-                                cursor: (isGenerating || isAnalyzing || !selectedCompanyId) ? 'not-allowed' : 'pointer', 
-                                display: 'flex', 
-                                alignItems: 'center', 
-                                justifyContent: 'center', 
-                                gap: '10px', 
-                                boxShadow: (!selectedCompanyId || isAnalyzing) ? 'none' : '0 4px 15px var(--primary-glow)' 
-                            }}
-                        >
-                            {isGenerating ? <Loader2 className="animate-spin" size={16} /> : <DownloadCloud size={16} />}
-                            GENERAR PROPUESTA
-                        </button>
+                        {(() => {
+                            const renderBtn = (modeOpt, isPrimary) => {
+                                const disabled = isGenerationModeButtonDisabled({
+                                    runs: generationStreamRuns,
+                                    modeId: modeOpt.id,
+                                    isAnalyzing,
+                                    hasCompany: Boolean(selectedCompanyId),
+                                });
+                                const isActive = isStreamActiveForMode(generationStreamRuns, modeOpt.id);
+                                return (
+                                    <button
+                                        key={modeOpt.id}
+                                        type="button"
+                                        disabled={disabled}
+                                        onClick={() => triggerGeneration(modeOpt.id)}
+                                        title={
+                                            isAnalyzing
+                                                ? 'Espera a que termine el análisis'
+                                                : !selectedCompanyId
+                                                  ? 'Selecciona una empresa en el menú superior'
+                                                  : isActive
+                                                    ? `${panelLabelForGenerationMode(modeOpt.id, panelLabels)} en curso`
+                                                    : (generationHints[modeOpt.id] || modeOpt.hint)
+                                        }
+                                        style={{
+                                            width: isPrimary ? '100%' : 'calc(50% - 4px)',
+                                            padding: isPrimary ? '12px' : '10px 8px',
+                                            borderRadius: '12px',
+                                            background: disabled
+                                                ? 'rgba(139, 92, 246, 0.2)'
+                                                : isPrimary
+                                                  ? 'linear-gradient(135deg, var(--primary), var(--secondary))'
+                                                  : 'rgba(99,102,241,0.18)',
+                                            border: isPrimary ? 'none' : '1px solid rgba(99,102,241,0.35)',
+                                            color: disabled ? 'rgba(255,255,255,0.35)' : '#fff',
+                                            fontWeight: 800,
+                                            fontSize: isPrimary ? '12px' : '10px',
+                                            cursor: disabled ? 'not-allowed' : 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            gap: '8px',
+                                            boxShadow: disabled || !isPrimary ? 'none' : '0 4px 15px var(--primary-glow)',
+                                        }}
+                                    >
+                                        {isActive ? <Loader2 className="animate-spin" size={14} /> : <DownloadCloud size={isPrimary ? 16 : 14} />}
+                                        {isPrimary
+                                            ? panelLabelForGenerationMode(modeOpt.id, panelLabels).toUpperCase()
+                                            : panelShortForGenerationMode(modeOpt.id, panelLabels).toUpperCase()}
+                                    </button>
+                                );
+                            };
+                            const fullOpt = GENERATION_MODE_OPTIONS.find((m) => m.id === 'full');
+                            const splitOpts = GENERATION_MODE_OPTIONS.filter((m) => m.id !== 'full');
+                            return (
+                                <>
+                                    {fullOpt ? renderBtn(fullOpt, true) : null}
+                                    {sessionId ? (
+                                        <ScopeDownloadBlock
+                                            modeId="full"
+                                            sessionId={sessionId}
+                                            refreshToken={deliveryRefreshToken}
+                                            highlighted={downloadHighlightMode === 'full'}
+                                            scopePayload={downloadBundle.full}
+                                            onRefreshScope={refreshDownloadBundle}
+                                        />
+                                    ) : null}
+                                    <div style={{ display: 'flex', gap: '8px', width: '100%', alignItems: 'stretch' }}>
+                                        {splitOpts.map((opt) => (
+                                            <div
+                                                key={opt.id}
+                                                style={{
+                                                    flex: 1,
+                                                    minWidth: 0,
+                                                    display: 'flex',
+                                                    flexDirection: 'column',
+                                                }}
+                                            >
+                                                {renderBtn(opt, false)}
+                                                {sessionId ? (
+                                                    <ScopeDownloadBlock
+                                                        modeId={opt.id}
+                                                        sessionId={sessionId}
+                                                        refreshToken={deliveryRefreshToken}
+                                                        highlighted={downloadHighlightMode === opt.id}
+                                                        compact
+                                                        scopePayload={downloadBundle[opt.id]}
+                                                        onRefreshScope={refreshDownloadBundle}
+                                                    />
+                                                ) : null}
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <CrossScopeDownloadHint bundle={downloadBundle} />
+                                    {dualStreamBanner ? (
+                                        <p
+                                            style={{
+                                                margin: 0,
+                                                fontSize: '10px',
+                                                color: '#a5b4fc',
+                                                lineHeight: 1.45,
+                                                textAlign: 'center',
+                                            }}
+                                        >
+                                            {dualStreamBanner}
+                                        </p>
+                                    ) : null}
+                                    {sessionId ? (
+                                        <button
+                                            type="button"
+                                            onClick={scrollToDeliveryPanel}
+                                            style={{
+                                                marginTop: '4px',
+                                                background: 'none',
+                                                border: 'none',
+                                                color: '#64748b',
+                                                fontSize: '10px',
+                                                textDecoration: 'underline',
+                                                cursor: 'pointer',
+                                                alignSelf: 'center',
+                                                padding: '2px 0',
+                                            }}
+                                        >
+                                            Ver logística avanzada (CompraNet, ZIP completo)
+                                        </button>
+                                    ) : null}
+                                    {downloadBundleLoading ? (
+                                        <span
+                                            style={{
+                                                fontSize: '9px',
+                                                color: '#475569',
+                                                textAlign: 'center',
+                                            }}
+                                        >
+                                            Actualizando archivos disponibles…
+                                        </span>
+                                    ) : null}
+                                </>
+                            );
+                        })()}
+                        <GenerationQueuePanel
+                            generationState={generationQueueState}
+                            streamRuns={generationStreamRuns}
+                            activeMode={activeGenerationMode}
+                        />
                         {(isAnalyzing || !selectedCompanyId) && (
                             <p style={{ margin: 0, fontSize: '10px', color: 'var(--warning)', lineHeight: 1.45, textAlign: 'center' }}>
                                 {isAnalyzing
@@ -3454,6 +3778,7 @@ const App = () => {
                         </div>
                     )}
 
+                    <div ref={deliveryPanelRef}>
                     <DeliveryPanel
                         results={generationResults || auditResults || {}}
                         sessionName={sessionName}
@@ -3466,6 +3791,7 @@ const App = () => {
                             setDocumentQualityBlockingSessionLatch(false);
                         }}
                     />
+                    </div>
                 </section>
 
                 {/* VISUAL RESIZER DERECHO (CON HOVER Y LUZ) */}
@@ -3494,18 +3820,18 @@ const App = () => {
                                     <h3 style={{ fontSize: '15px', fontWeight: 800, margin: 0 }}>Asistente de Licitación</h3>
                                     <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600, marginTop: '2px' }}>
                                         {economicBlockingSessionLatch
-                                            ? 'Hay bloqueo de validación económica: lee los mensajes del asistente, ajusta tu Excel o cotización, y revalida o vuelve a generar desde la izquierda.'
+                                            ? EXPEDIENTE_CHAT_SHELL_UI.subtitleEconomicBlock
                                             : documentQualityBlockingSessionLatch
-                                                ? 'Hay bloqueo por calidad documental: revalida clasificación/evidencia antes de volver a generar.'
-                                            : 'Pregunta por fechas, requisitos o dudas de las bases — aquí abajo'}
+                                                ? EXPEDIENTE_CHAT_SHELL_UI.subtitleQualityBlock
+                                            : EXPEDIENTE_CHAT_SHELL_UI.subtitleDefault}
                                     </div>
                                 </div>
                             </div>
-                            {(isGenerating || generationProgress.percent > 0) && (
+                            {(isAnyGenerationActive || generationProgress.percent > 0) && (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: '140px' }}>
                                     <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                        {isGenerating && <Loader2 className="animate-spin" size={11} style={{ color: 'var(--primary)' }} />}
-                                        <span style={{ fontWeight: 700, color: 'var(--primary)' }}>
+                                        {isAnyGenerationActive && !generationProgress.held && <Loader2 className="animate-spin" size={11} style={{ color: 'var(--primary)' }} />}
+                                        <span style={{ fontWeight: 700, color: generationProgress.held ? '#fbbf24' : 'var(--primary)' }}>
                                             {Math.round(generationProgress.percent)}%
                                         </span>
                                         <span style={{ whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden', maxWidth: '160px' }}>
@@ -3516,7 +3842,7 @@ const App = () => {
                                         <div style={{
                                             height: '100%',
                                             width: `${Math.max(2, generationProgress.percent)}%`,
-                                            background: 'var(--primary)',
+                                            background: generationProgress.held ? '#fbbf24' : 'var(--primary)',
                                             borderRadius: '999px',
                                             transition: 'width 0.5s ease',
                                         }} />
@@ -3638,10 +3964,10 @@ const App = () => {
                                 }}
                             >
                                 <div style={{ fontSize: '11px', fontWeight: 800, color: '#fbbf24' }}>
-                                    Bloqueo por calidad documental
+                                    {EXPEDIENTE_CHAT_SHELL_UI.qualityPanelTitle}
                                 </div>
                                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.45 }}>
-                                    La clasificación documental no es confiable para generar sin riesgo. Revisa fuentes, clasificación de requisitos y vuelve a revalidar.
+                                    {EXPEDIENTE_CHAT_SHELL_UI.qualityPanelBody}
                                 </div>
                                 <button
                                     type="button"
@@ -3665,7 +3991,7 @@ const App = () => {
                                     }}
                                 >
                                     {validationBusy ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
-                                    Revalidar calidad documental
+                                    {EXPEDIENTE_CHAT_SHELL_UI.qualityPanelCta}
                                 </button>
                             </div>
                         )}
@@ -3922,6 +4248,33 @@ const App = () => {
                                         {msg.basesExcerpt?.available && (
                                             <ForensicBasesExcerptCard excerpt={msg.basesExcerpt} compact />
                                         )}
+                                        {Array.isArray(msg.citations) && msg.citations.length > 0 && (
+                                            <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                {msg.citations.map((cita, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        style={{
+                                                            fontSize: '11px',
+                                                            color: '#94a3b8',
+                                                            padding: '6px 10px',
+                                                            borderRadius: '8px',
+                                                            background: 'rgba(148,163,184,0.08)',
+                                                            border: '1px solid rgba(148,163,184,0.2)',
+                                                        }}
+                                                    >
+                                                        <strong style={{ color: '#cbd5e1' }}>
+                                                            {cita.documento || 'Bases'}
+                                                            {cita.pagina ? ` · Pág. ${cita.pagina}` : ''}
+                                                        </strong>
+                                                        {cita.fragmento ? (
+                                                            <div style={{ marginTop: '4px', opacity: 0.9 }}>
+                                                                «{String(cita.fragmento).slice(0, 160)}»
+                                                            </div>
+                                                        ) : null}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
                                         {msg.suggestedActions && msg.suggestedActions.length > 0 && (
                                             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                                                 {msg.suggestedActions.map((action, idx) => (
@@ -3937,17 +4290,26 @@ const App = () => {
                                                                     ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                                                                 return;
                                                             }
+                                                            if (kind === 'ui' && actionId === 'TRIGGER_ANALYZE_BASES') {
+                                                                triggerFullAudit();
+                                                                return;
+                                                            }
+                                                            if (kind === 'ui' && actionId === 'TRIGGER_GENERATION_ECONOMIC') {
+                                                                triggerGeneration('economic');
+                                                                return;
+                                                            }
+                                                            if (kind === 'ui' && actionId === 'TRIGGER_GENERATION_FULL') {
+                                                                triggerGeneration('full');
+                                                                return;
+                                                            }
+                                                            if (kind === 'ui' && actionId === 'TRIGGER_GENERATION_TECHNICAL') {
+                                                                triggerGeneration('technical');
+                                                                return;
+                                                            }
                                                             if (!action.payload) return;
                                                             setChatInput(action.payload);
-                                                            // Forzamos el envío
                                                             setTimeout(() => {
-                                                                const btn = document.querySelector('button[title="Enviar consulta"]');
-                                                                if (btn) btn.click();
-                                                                else {
-                                                                    // Fallback si el selector falla
-                                                                    const form = document.querySelector('input')?.parentElement?.querySelector('button');
-                                                                    if (form) form.click();
-                                                                }
+                                                                chatFormRef.current?.requestSubmit?.();
                                                             }, 50);
                                                         }}
                                                         style={{
@@ -3972,13 +4334,13 @@ const App = () => {
                         )}
                         <div ref={chatEndRef} />
                         {isThinking && <div style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'flex', gap: '10px' }}><Loader2 className="spin" size={14} /> Trabajando...</div>}
-                        {isGenerating && (
+                        {(isAnyGenerationActive || generationProgress.held) && (
                             <div style={{
                                 alignSelf: 'flex-start',
                                 maxWidth: '92%',
                                 width: '100%',
-                                background: 'rgba(99,102,241,0.08)',
-                                border: '1px solid rgba(99,102,241,0.25)',
+                                background: generationProgress.held ? 'rgba(251,191,36,0.08)' : 'rgba(99,102,241,0.08)',
+                                border: generationProgress.held ? '1px solid rgba(251,191,36,0.35)' : '1px solid rgba(99,102,241,0.25)',
                                 borderRadius: '0 15px 15px 15px',
                                 padding: '16px 18px',
                                 display: 'flex',
@@ -3987,11 +4349,15 @@ const App = () => {
                             }}>
                                 {/* Cabecera con spinner y etapa actual */}
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                    <Loader2 className="animate-spin" size={16} style={{ color: 'var(--primary)', flexShrink: 0 }} />
-                                    <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--primary)' }}>
-                                        Generando propuesta…
+                                    {isAnyGenerationActive && !generationProgress.held ? (
+                                        <Loader2 className="animate-spin" size={16} style={{ color: 'var(--primary)', flexShrink: 0 }} />
+                                    ) : null}
+                                    <span style={{ fontSize: '13px', fontWeight: 700, color: generationProgress.held ? '#fbbf24' : 'var(--primary)' }}>
+                                        {generationProgress.held
+                                            ? 'Generación en pausa'
+                                            : dualStreamBanner || 'Generando propuesta…'}
                                     </span>
-                                    <span style={{ marginLeft: 'auto', fontSize: '12px', fontWeight: 800, color: 'var(--primary)' }}>
+                                    <span style={{ marginLeft: 'auto', fontSize: '12px', fontWeight: 800, color: generationProgress.held ? '#fbbf24' : 'var(--primary)' }}>
                                         {Math.round(generationProgress.percent)}%
                                     </span>
                                 </div>
@@ -4007,7 +4373,9 @@ const App = () => {
                                     <div style={{
                                         height: '100%',
                                         width: `${Math.max(4, generationProgress.percent)}%`,
-                                        background: 'linear-gradient(90deg, var(--primary), #818cf8)',
+                                        background: generationProgress.held
+                                            ? 'linear-gradient(90deg, #fbbf24, #f59e0b)'
+                                            : 'linear-gradient(90deg, var(--primary), #818cf8)',
                                         borderRadius: '999px',
                                         transition: 'width 0.6s ease',
                                     }} />
@@ -4058,7 +4426,7 @@ const App = () => {
                         )}
                     </div>
 
-                    <form onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <form ref={chatFormRef} onSubmit={handleSendMessage} style={{ padding: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '10px', alignItems: 'center' }}>
                         <input
                             ref={chatQuotationFileRef}
                             type="file"
@@ -4091,45 +4459,47 @@ const App = () => {
                             </button>
                         )}
                         {(() => {
-                            const lastBotMsg = [...chatMessages].reverse().find(m => m.sender === 'bot');
-                            const isNumericStep = lastBotMsg?.text?.includes('Paso 1 de 4') || lastBotMsg?.text?.includes('Paso 3 de 4') || lastBotMsg?.text?.includes('Paso 4 de 4');
-                            
                             return (
                                 <input
                                     ref={chatInputRef}
                                     type="text"
                                     value={chatInput}
-                                    onChange={(e) => {
-                                        let val = e.target.value;
-                                        if (isNumericStep) {
-                                            val = val.replace(/[^0-9.]/g, '');
-                                            if (val.split('.').length > 2) {
-                                                const parts = val.split('.');
-                                                val = parts[0] + '.' + parts.slice(1).join('');
-                                            }
-                                        }
-                                        setChatInput(val);
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    placeholder={
+                                        economicBlockingSessionLatch
+                                            ? 'Adjunta 📎 tu Excel o DOCX de cotización, o usa Revalidar arriba'
+                                            : intakeUiSnapshot
+                                            ? 'Pregunta sobre las bases o adjunta 📎 tu Excel de cotización…'
+                                            : 'Pregunta sobre las bases o aporta un dato del expediente…'
+                                    }
+                                    style={{
+                                        flex: 1,
+                                        background: 'rgba(255,255,255,0.05)',
+                                        border: '1px solid rgba(255,255,255,0.1)',
+                                        padding: '12px 15px',
+                                        borderRadius: '10px',
+                                        color: '#fff',
+                                        outline: 'none',
                                     }}
-                            placeholder={
-                                economicBlockingSessionLatch
-                                    ? 'Adjunta 📎 tu Excel o DOCX de cotización, o usa Revalidar arriba'
-                                    : intakeUiSnapshot
-                                    ? 'Pregunta sobre las bases o adjunta 📎 tu Excel de cotización…'
-                                    : 'Pregunta sobre las bases o aporta un dato del expediente…'
-                            }
-                            style={{
-                                flex: 1,
-                                background: 'rgba(255,255,255,0.05)',
-                                border: '1px solid rgba(255,255,255,0.1)',
-                                padding: '12px 15px',
-                                borderRadius: '10px',
-                                color: '#fff',
-                                    outline: 'none',
-                                }}
-                            />
+                                />
                             );
                         })()}
-                        <button type="submit" style={{ background: 'var(--primary)', border: 'none', color: '#fff', padding: '10px 15px', borderRadius: '10px', cursor: 'pointer' }}><Send size={18} /></button>
+                        <button
+                            type="submit"
+                            disabled={isThinking || !chatInput.trim()}
+                            title={isThinking ? 'Espera la respuesta del asistente…' : 'Enviar mensaje'}
+                            style={{
+                                background: 'var(--primary)',
+                                border: 'none',
+                                color: '#fff',
+                                padding: '10px 15px',
+                                borderRadius: '10px',
+                                cursor: isThinking || !chatInput.trim() ? 'not-allowed' : 'pointer',
+                                opacity: isThinking || !chatInput.trim() ? 0.5 : 1,
+                            }}
+                        >
+                            <Send size={18} />
+                        </button>
                     </form>
                 </aside>
 
@@ -4196,13 +4566,15 @@ const App = () => {
                     }}
                 >
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-                        <span style={{ fontSize: '12px', fontWeight: 800 }}>PROCESANDO...</span>
+                        <span style={{ fontSize: '12px', fontWeight: 800 }}>{overlayMessages.bases_analysis_title}</span>
                         <span style={{ fontSize: '12px', color: 'var(--primary)' }}>{auditProgress.percent}%</span>
                     </div>
                     <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
                         <div style={{ height: '100%', width: `${auditProgress.percent}%`, background: 'var(--primary)', transition: 'width 0.3s' }}></div>
                     </div>
-                    <div style={{ fontSize: '10px', marginTop: '10px', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{auditProgress.currentFile}</div>
+                    <div style={{ fontSize: '10px', marginTop: '10px', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
+                        {auditProgress.currentFile || overlayMessages.bases_analysis_subtitle}
+                    </div>
 
                     <button
                         type="button"
@@ -4245,6 +4617,52 @@ const App = () => {
                     </button>
 
                     <div style={{ fontSize: '9px', textAlign: 'center', marginTop: '10px', opacity: 0.5 }}>Arrastra para mover</div>
+                </div>
+            )}
+
+            {isAnyGenerationActive && generationOverlayVisible && !isAnalyzing && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        bottom: `${dragOffset.y + 120}px`,
+                        right: `${dragOffset.x}px`,
+                        background: 'rgba(0,0,0,0.95)',
+                        padding: '20px',
+                        borderRadius: '15px',
+                        border: '2px solid #a78bfa',
+                        width: '300px',
+                        zIndex: 10000,
+                        boxShadow: '0 20px 50px rgba(0,0,0,0.7)',
+                    }}
+                >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+                        <span style={{ fontSize: '12px', fontWeight: 800 }}>{overlayMessages.document_generation_title}</span>
+                        <span style={{ fontSize: '12px', color: '#c4b5fd' }}>{generationProgress.percent}%</span>
+                    </div>
+                    <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${generationProgress.percent}%`, background: '#a78bfa', transition: 'width 0.3s' }} />
+                    </div>
+                    <div style={{ fontSize: '10px', marginTop: '10px', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>
+                        {generationProgress.message || overlayMessages.document_generation_subtitle}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setGenerationOverlayVisible(false)}
+                        style={{
+                            width: '100%',
+                            marginTop: '10px',
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(167, 139, 250, 0.45)',
+                            background: 'transparent',
+                            color: '#c4b5fd',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                        }}
+                    >
+                        {overlayMessages.dismiss_hint}
+                    </button>
                 </div>
             )}
             <JustificationModal

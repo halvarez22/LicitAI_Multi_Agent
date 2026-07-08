@@ -77,10 +77,117 @@ def test_obra_e3e_extract_and_fill():
 def test_obra_e3e_build_from_embedded_template():
     body = build_obra_e3e_utilidad_markdown(
         concurso="Licitación Pública Num. D/080/2025",
-        master_profile={"representante_legal": "Ana López"},
+        master_profile={"representante_legal": "Ana López", "razon_social": "DEMO SA"},
         utilidad_rate=0.08,
         req_snippet=_E3E_TEMPLATE,
         obra_descripcion="OBRA DEMO",
     )
     assert is_official_obra_e3e_mirror_content(body)
     assert "8.00%" in body or "8%" in body
+
+
+def test_session_slug_not_used_as_concurso_or_obra():
+    from app.services.obra_economic_annex_clauses import (
+        looks_like_session_slug,
+        resolve_obra_concurso_label,
+        resolve_obra_objeto,
+    )
+
+    sid = "barda_primaria_lopez_rayon"
+    assert looks_like_session_slug("BARDA PRIMARIA LOPEZ RAYON", sid)
+    label = resolve_obra_concurso_label(
+        session_state={},
+        session_id=sid,
+        corpus="LICITACIÓN PÚBLICA NUM. D/080/2025 CONSTRUCCIÓN DE BARDA",
+    )
+    assert "D/080/2025" in label
+    obra = resolve_obra_objeto(
+        session_state={"name": "barda_primaria_lopez_rayon"},
+        session_id=sid,
+        corpus="ADJUDICAR EL CONTRATO RELATIVO A LA REALIZACIÓN DE LA OBRA: CONSTRUCCIÓN DE BARDA PERIMETRAL",
+    )
+    assert "BARDA PERIMETRAL" in obra.upper()
+    assert "LOPEZ RAYON" not in obra.upper()
+
+
+def test_extract_licitacion_rejects_consignar_placeholder():
+    from app.services.obra_economic_annex_clauses import _extract_licitacion_numero
+
+    num = _extract_licitacion_numero(
+        "[Consignar — número de licitación]",
+        "",
+        session_id="barda_primaria_lopez_rayon",
+    )
+    assert num == "[Consignar]"
+
+
+def test_e3e_fill_strips_session_slug_when_corpus_has_d080():
+    body = fill_obra_e3e_official_format(
+        _E3E_TEMPLATE.replace("_______________", "BARDA PRIMARIA LOPEZ RAYON"),
+        concurso="BARDA PRIMARIA LOPEZ RAYON",
+        corpus="LICITACIÓN PÚBLICA NUM. D/080/2025 " + _E3E_TEMPLATE,
+        obra_descripcion="CONSTRUCCIÓN DE BARDA PERIMETRAL",
+        master_profile={
+            "razon_social": "CONSTRUCTORA DEMO SA",
+            "representante_legal": "Juan Pérez",
+        },
+        utilidad_rate=0.0,
+        session_id="barda_primaria_lopez_rayon",
+    )
+    up = body.upper()
+    assert "D/080/2025" in up
+    assert "BARDA PRIMARIA LOPEZ RAYON" not in up
+    assert "Consignar" in body or "[CONSIGNAR" in up
+
+
+def test_e3e_fill_repairs_prefilled_consignar_placeholders():
+    bad = (
+        "ANEXO E-3 E\n"
+        "LA UTILIDAD PROPUESTA PARA EL CONCURSO No:[Consignar — número de licitación]\n"
+        "RELACIONADO CON LA OBRA:[CONSIGNAR — OBJETO DE LA OBRA EN BASES]  ES DEL 5.00%\n"
+        "LA CUAL EN CUMPLIMIENTO A LOS ESTABLECIDO EN EL ART. 63 FRACCIÓN IV FIRMA"
+    )
+    corpus = (
+        "LICITACIÓN PÚBLICA NUM. D/080/2025 "
+        "ADJUDICAR EL CONTRATO RELATIVO A LA REALIZACIÓN DE LA OBRA: "
+        "CONSTRUCCIÓN DE BARDA PERIMETRAL EN PRIMARIA LÓPEZ RAYÓN"
+    )
+    body = fill_obra_e3e_official_format(
+        bad,
+        concurso="[Consignar — número de licitación]",
+        corpus=corpus,
+        obra_descripcion="",
+        master_profile={
+            "razon_social": "CONSTRUCTORA DEMO SA",
+            "representante_legal": "Juan Pérez",
+        },
+        utilidad_rate=0.0,
+        session_id="barda_primaria_lopez_rayon",
+        session_state={"session_hint": "D/080/2025"},
+    )
+    up = body.upper()
+    assert "D/080/2025" in up
+    assert "BARDA PERIMETRAL" in up
+    assert "5.00%" not in body
+    assert "Consignar" in body
+
+
+def test_e3e_utilidad_requires_user_confirmation():
+    from app.services.official_format_resolver import resolve_e3e_utilidad_rate_for_fill
+
+    assert (
+        resolve_e3e_utilidad_rate_for_fill(
+            {},
+            {"utilidad_rate": 0.05},
+            {"utilidad_rate": 0.05},
+        )
+        == 0.0
+    )
+    assert (
+        resolve_e3e_utilidad_rate_for_fill(
+            {"economic_user_inputs": {"utilidad_rate": 0.08}},
+            {"utilidad_rate": 0.05},
+            {},
+        )
+        == 0.08
+    )

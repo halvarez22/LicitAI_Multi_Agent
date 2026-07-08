@@ -396,7 +396,11 @@ def _mirror_source_has_cross_tender_marker(ref: Any, session_hint: str) -> bool:
     return bool(detect_cross_tender_marker([text], session_hint))
 
 
-def _build_panel_authoritative_reqs(panel_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_panel_authoritative_reqs(
+    panel_payload: Dict[str, Any],
+    *,
+    exclude_obra_economic_envelope: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Cola «generar» alineada 1:1 con el panel UI (sin dedupe contra compliance).
 
@@ -405,6 +409,12 @@ def _build_panel_authoritative_reqs(panel_payload: Dict[str, Any]) -> List[Dict[
     """
     from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
     from app.services.document_deliverable_filter import is_economic_writer_domain
+
+    deferred_keys: Set[str] = set()
+    if exclude_obra_economic_envelope:
+        from app.services.official_format_resolver import economic_envelope_dedupe_keys
+
+        deferred_keys = set(economic_envelope_dedupe_keys())
 
     panel_reqs: List[Dict[str, Any]] = []
     panel_seen: Set[str] = set()
@@ -439,6 +449,8 @@ def _build_panel_authoritative_reqs(panel_payload: Dict[str, Any]) -> List[Dict[
             if is_apu_document(nombre_panel, desc_panel, ""):
                 continue
             dedupe_key = pliego_format_dedupe_key(nombre_panel)
+            if dedupe_key in deferred_keys:
+                continue
             if dedupe_key in panel_seen:
                 continue
             panel_seen.add(dedupe_key)
@@ -458,6 +470,39 @@ def _build_panel_authoritative_reqs(panel_payload: Dict[str, Any]) -> List[Dict[
                 }
             )
     return panel_reqs
+
+
+def _split_obra_economic_deferred_reqs(
+    reqs: List[Dict[str, Any]],
+    *,
+    session_state: Dict[str, Any],
+    session_id: str,
+) -> tuple[List[Dict[str, Any]], int]:
+    """
+    Separa anexos obra|E* cuando ``EconomicWriter`` los materializa (obra_breakdown).
+
+    Returns:
+        (reqs_restantes, cantidad_diferida)
+    """
+    from app.services.economic_document_reapply import load_economic_payload
+    from app.services.official_format_resolver import economic_envelope_dedupe_keys
+    from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+    _, _, resumen = load_economic_payload(session_state, session_id=session_id)
+    if not resumen.get("obra_breakdown"):
+        return reqs, 0
+
+    deferred_keys = set(economic_envelope_dedupe_keys())
+    kept: List[Dict[str, Any]] = []
+    deferred = 0
+    for req in reqs:
+        nombre = str(req.get("nombre") or "")
+        dedupe = str(req.get("panel_dedupe_key") or "") or pliego_format_dedupe_key(nombre)
+        if dedupe in deferred_keys:
+            deferred += 1
+            continue
+        kept.append(req)
+    return kept, deferred
 
 
 def _should_block_by_quality_gate(
@@ -778,8 +823,11 @@ class FormatsAgent(BaseAgent):
                 error=str(conv_exc)[:120],
             )
         _date_info = resolve_document_date(session_state)
-        _fecha_f = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
+        from app.services.document_date_resolver import resolve_generation_header_date
 
+        _gen_info = resolve_generation_header_date()
+        _fecha_doc = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
+        _fecha_hdr = _gen_info.get("fecha_es") or _fecha_doc
         _dom_fiscal = master_profile.get("domicilio_fiscal") or master_profile.get("domicilio") or ""
         _dom_footer = _dom_fiscal if is_usable_profile_field_value(_dom_fiscal) else "S/D"
         from app.services.administrative_letter_clauses import (
@@ -795,9 +843,16 @@ class FormatsAgent(BaseAgent):
         doc_metadata = {
             "logo_path": logo_path,
             "tender_name": session_id.replace("_", " ").upper(),
-            "fecha": _fecha_f,
+            "fecha": _fecha_doc,
+            "fecha_documental": _fecha_doc,
+            "fecha_encabezado": _fecha_hdr,
+            "fecha_generacion": _fecha_hdr,
             "fecha_corta": _date_info.get("fecha_corta", ""),
+            "fecha_documental_source": _date_info.get("source", ""),
+            "fecha_encabezado_source": _gen_info.get("source", "generation_timestamp"),
+            "generated_at_iso": _gen_info.get("generated_at_iso", ""),
             "deadline_dt_iso": _date_info.get("deadline_dt"),
+            "is_after_deadline": _date_info.get("is_after_deadline"),
             "date_source": _date_info.get("source", ""),
             "hora": datetime.now().strftime("%H:%M"),
             "empresa": razon_social,
@@ -833,6 +888,33 @@ class FormatsAgent(BaseAgent):
         economic_block = ""
         if econ_parts:
             economic_block = "\nDATOS ECONÓMICOS CONFIRMADOS (USAR ESTOS VALORES SI EL DOCUMENTO LO REQUIERE):\n" + "\n".join(econ_parts)
+
+        try:
+            from app.services.obra_solvency_annex_clauses import resolve_solvency_figures
+
+            solv_fig = resolve_solvency_figures(
+                master_profile=master_profile,
+                session_state=session_state,
+                corpus=str(session_state.get("bases_corpus_hint") or "")[:8000],
+            )
+            solv_lines = []
+            if solv_fig.capital_contable is not None:
+                solv_lines.append(
+                    f"Capital contable verificado: ${solv_fig.capital_contable:,.2f}"
+                )
+            if solv_fig.capital_comprometido is not None:
+                solv_lines.append(
+                    f"Capital comprometido (T-2 / regla bases): ${solv_fig.capital_comprometido:,.2f}"
+                )
+            if solv_fig.liquidez is not None:
+                solv_lines.append(f"Liquidez verificada: ${solv_fig.liquidez:,.2f}")
+            if solv_lines:
+                block = "\n".join(solv_lines)
+                economic_block = (
+                    (economic_block + "\n") if economic_block else ""
+                ) + "DATOS DE SOLVENCIA VERIFICADOS (USAR SOLO ESTOS, NO INVENTAR):\n" + block
+        except Exception:
+            pass
 
         try:
             from app.services.mini_dictamen_anexos_service import (
@@ -1034,6 +1116,17 @@ class FormatsAgent(BaseAgent):
         # Panel consolidado (misma fuente que UI): anexos «generar» con ancla en bases.
         panel_payload: Dict[str, Any] = {}
         panel_expected = 0
+        obra_breakdown_formats = False
+        deferred_economic_count = 0
+        try:
+            from app.services.economic_document_reapply import load_economic_payload
+
+            _, _, _eco_resumen_panel = load_economic_payload(
+                session_state, session_id=session_id
+            )
+            obra_breakdown_formats = bool(_eco_resumen_panel.get("obra_breakdown"))
+        except Exception:
+            obra_breakdown_formats = False
         try:
             from app.services.document_candidate_list_service import (
                 build_formats_panel_consolidated,
@@ -1044,8 +1137,14 @@ class FormatsAgent(BaseAgent):
             )
             from app.services.formats_coverage_gate import count_panel_admin_generar
 
-            panel_expected = count_panel_admin_generar(panel_payload)
-            panel_authoritative = _build_panel_authoritative_reqs(panel_payload)
+            panel_expected = count_panel_admin_generar(
+                panel_payload,
+                exclude_obra_economic_envelope=obra_breakdown_formats,
+            )
+            panel_authoritative = _build_panel_authoritative_reqs(
+                panel_payload,
+                exclude_obra_economic_envelope=obra_breakdown_formats,
+            )
             if panel_expected >= 3 and panel_authoritative:
                 reqs_to_process = panel_authoritative
                 action_counts["generar"] = len(panel_authoritative)
@@ -1111,30 +1210,24 @@ class FormatsAgent(BaseAgent):
                 continuing=has_anything_to_do,
             )
             if not has_anything_to_do:
-                # Solo bloquear si realmente no hay nada que hacer
+                from app.services.document_quality_ux import (
+                    build_document_quality_agent_pause_message,
+                    build_document_quality_pending_question,
+                )
+
                 missing = [
-                    {
-                        "field": "document_quality_gate",
-                        "label": "Confirmar clasificación documental administrativa",
-                        "question": (
-                            "La lista administrativa/formatos no es lo suficientemente confiable "
-                            "para generar documentos automáticamente. Requiere reclasificación por acción "
-                            "o evidencia más sólida."
-                        ),
-                        "document_hint": f"Motivo gate: {gate.get('reason')}. Métricas: {gate.get('metrics')}",
-                        "type": "document_quality_gate_blocking",
-                        "blocking_items": [],
-                    }
+                    build_document_quality_pending_question(
+                        gate=gate,
+                        session_state=company_data,
+                        stage="formats",
+                    )
                 ]
                 await self._save_pending_questions(session_id, missing)
                 return AgentOutput(
                     status=AgentStatus.WAITING_FOR_DATA,
                     agent_id=self.agent_id,
                     session_id=session_id,
-                    message=(
-                        "Pausa por calidad documental: la clasificación de formatos/administrativos "
-                        "no es suficientemente confiable para generar archivos sin riesgo."
-                    ),
+                    message=build_document_quality_agent_pause_message(stage="formats"),
                     data={"missing": missing, "document_quality_gate": gate},
                     correlation_id=correlation_id,
                 )
@@ -1159,6 +1252,21 @@ class FormatsAgent(BaseAgent):
             exclude_sobre=("economico",),
         )
         reqs_to_process = catalog_reqs + reqs_to_process
+
+        deferred_economic_count = 0
+        if obra_breakdown_formats:
+            reqs_to_process, deferred_economic_count = _split_obra_economic_deferred_reqs(
+                reqs_to_process,
+                session_state=session_state,
+                session_id=session_id,
+            )
+            if deferred_economic_count:
+                logger.info(
+                    "formats_obra_economic_envelope_prefiltered",
+                    session_id=session_id,
+                    deferred=deferred_economic_count,
+                    remaining=len(reqs_to_process),
+                )
 
         mirror_enabled = bool(getattr(settings, "TEMPLATE_MIRROR_ENABLED", True))
         mirror_max = int(getattr(settings, "TEMPLATE_MIRROR_MAX_ADMIN", 40) or 40)
@@ -1418,6 +1526,30 @@ class FormatsAgent(BaseAgent):
                     req_name=raw_name[:80],
                 )
                 continue
+            from app.services.official_format_resolver import economic_envelope_dedupe_keys
+            from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
+
+            panel_dedupe = pliego_format_dedupe_key(raw_name)
+            if panel_dedupe in economic_envelope_dedupe_keys():
+                from app.services.economic_document_reapply import load_economic_payload
+
+                _, _, eco_resumen = load_economic_payload(session_state, session_id=session_id)
+                if eco_resumen.get("obra_breakdown"):
+                    logger.info(
+                        "formats_economic_envelope_deferred_to_economic_writer",
+                        session_id=session_id,
+                        req_id=rid,
+                        dedupe_key=panel_dedupe,
+                        req_name=raw_name[:80],
+                    )
+                    _record_generation_skip(
+                        raw_name,
+                        "deferred_to_economic_writer",
+                        dedupe_key=panel_dedupe,
+                        deferred_to_economic_writer=True,
+                    )
+                    deferred_economic_count += 1
+                    continue
             safe_name = re.sub(r"[^\w\s-]", "", raw_name.replace(" ", "_"))[:60].strip("_")
             if rid and not str(rid).startswith("panel_"):
                 filename = f"{rid}_{safe_name}"
@@ -1506,6 +1638,8 @@ class FormatsAgent(BaseAgent):
             from app.services.obra_economic_annex_clauses import (
                 is_official_obra_e1_mirror_content,
             )
+            from app.services.official_format_resolver import resolve_materialization_meta
+            from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key
 
             req_letter_meta = resolve_letter_session_metadata(
                 session_state,
@@ -1572,9 +1706,38 @@ class FormatsAgent(BaseAgent):
             if clause_body and not template_id:
                 content = clause_body
                 materialization_route = "deterministic_clause"
+                panel_dedupe_key = pliego_format_dedupe_key(raw_name)
                 if is_official_obra_e1_mirror_content(clause_body):
-                    req_doc_metadata["official_bases_mirror"] = True
+                    req_doc_metadata.update(
+                        resolve_materialization_meta(
+                            dedupe_key=panel_dedupe_key or "obra|E1",
+                            content=clause_body,
+                            official_mirror=True,
+                            route="official_bases_mirror",
+                        )
+                    )
                     req_doc_metadata["formal_closing"] = False
+                elif panel_dedupe_key == "obra|T_B_SOLVENCIA":
+                    from app.services.obra_solvency_annex_clauses import (
+                        is_official_obra_tb_solvencia_mirror_content,
+                    )
+
+                    mirror = bool(
+                        req_doc_metadata.get("official_bases_mirror")
+                    ) or is_official_obra_tb_solvencia_mirror_content(clause_body)
+                    req_doc_metadata.update(
+                        resolve_materialization_meta(
+                            dedupe_key=panel_dedupe_key,
+                            content=clause_body,
+                            official_mirror=mirror,
+                            route=req_doc_metadata.get("materialization_route")
+                            or "deterministic_solvency_clause",
+                        )
+                    )
+                    if req_doc_metadata.get("solvency_provenance_ui"):
+                        req_doc_metadata["provenance_ui"] = req_doc_metadata[
+                            "solvency_provenance_ui"
+                        ]
             elif template_id:
                 tpl_data = self._template_data(session_id, master_profile, doc_metadata, user_inputs)
                 content = self.template_engine.render(template_id, tpl_data)
@@ -1773,17 +1936,35 @@ class FormatsAgent(BaseAgent):
                 "source": "formats_writer",
                 "confidence": 0.9,
                 "session_hint": session_hint,
-                "fecha_es": doc_metadata.get("fecha"),
+                "fecha_es": doc_metadata.get("fecha_documental") or doc_metadata.get("fecha"),
+                "fecha_encabezado": doc_metadata.get("fecha_encabezado"),
+                "fecha_documental_source": doc_metadata.get("fecha_documental_source"),
+                "fecha_encabezado_source": doc_metadata.get("fecha_encabezado_source"),
+                "is_after_deadline": doc_metadata.get("is_after_deadline"),
                 "deadline_dt_iso": doc_metadata.get("deadline_dt_iso"),
             },
         )
+        from app.services.official_format_delivery_gate import validate_official_mirror_delivery
+
+        mirror_gate = validate_official_mirror_delivery(
+            stage="formats",
+            generated_documents=generated_files,
+        )
         result_data["document_fill_quality_gate"] = fill_gate
+        result_data["official_mirror_delivery_gate"] = mirror_gate
         result_data["validation_events"] = [
             build_fill_validation_event(it, stage="formats")
             for it in (fill_gate.get("issues") or [])
             if isinstance(it, dict)
         ]
-        if not bool(fill_gate.get("validation_passed", True)):
+        result_data["validation_events"].extend(
+            build_fill_validation_event(it, stage="formats")
+            for it in (mirror_gate.get("issues") or [])
+            if isinstance(it, dict)
+        )
+        if not bool(fill_gate.get("validation_passed", True)) or not bool(
+            mirror_gate.get("validation_passed", True)
+        ):
             from app.services.document_fill_ux_messages import (
                 build_fill_blocking_question,
                 pick_fill_gate_pending_label,
@@ -1792,7 +1973,7 @@ class FormatsAgent(BaseAgent):
             company_name = str(master_profile.get("razon_social") or "").strip()
             human_question = build_fill_blocking_question(
                 "formats",
-                fill_gate.get("issues") or [],
+                (fill_gate.get("issues") or []) + (mirror_gate.get("issues") or []),
                 company_name=company_name,
             )
             missing = [
@@ -1830,6 +2011,16 @@ class FormatsAgent(BaseAgent):
             cov_esperadas = int(cov_summary.get("esperadas_generar") or 0)
             if cov_esperadas >= 3:
                 panel_expected_for_gate = cov_esperadas
+                if obra_breakdown_formats:
+                    from app.services.formats_coverage_gate import (
+                        count_obra_economic_envelope_deferred,
+                    )
+
+                    panel_expected_for_gate = max(
+                        3,
+                        cov_esperadas
+                        - count_obra_economic_envelope_deferred(panel_payload),
+                    )
                 generated_count_for_gate = max(generated_count_for_gate, cov_generadas)
         except Exception as cov_exc:
             logger.warning(
@@ -1844,6 +2035,9 @@ class FormatsAgent(BaseAgent):
             llm_queue_size=initial_llm_count,
             generation_skipped=generation_skipped,
             panel_expected=panel_expected_for_gate,
+            deferred_to_economic_count=(
+                0 if obra_breakdown_formats else deferred_economic_count
+            ),
         )
         if completeness_block:
             missing = [
@@ -1940,6 +2134,16 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     doc = docx.Document()
     section = doc.sections[0]
     
+    from app.services.document_date_resolver import resolve_generation_header_date
+
+    fecha_encabezado = str(
+        (metadata or {}).get("fecha_encabezado")
+        or (metadata or {}).get("fecha_generacion")
+        or ""
+    ).strip()
+    if not fecha_encabezado:
+        fecha_encabezado = resolve_generation_header_date()["fecha_es"]
+
     # Header: Logo y Datos
     header = section.header
     htable = header.add_table(1, 2, Inches(6.5))
@@ -1966,6 +2170,8 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         run = p_info.add_run(f"{metadata.get('tender_name', '').upper()}")
         run.bold = True
         run.font.size = Pt(8)
+        run_date = p_info.add_run(f"\nFecha: {fecha_encabezado}")
+        run_date.font.size = Pt(7)
 
     # Footer
     footer = section.footer
@@ -1990,7 +2196,7 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
     if not official_mirror:
         doc.add_heading(heading.upper(), 1)
 
-    # LUGAR Y FECHA (omitido en espejo del machote E-1 publicado en bases)
+    # Encabezado: SIEMPRE fecha de generación (certeza de materialización en demo/UAT).
     footer_text = metadata.get("footer_text", "") if metadata else ""
     domicilio_ref = str((metadata or {}).get("domicilio") or "").strip()
     if not domicilio_ref and "Domicilio:" in footer_text:
@@ -2000,8 +2206,9 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         ciudad = format_letter_lugar_ciudad(city_from_domicilio(domicilio_ref), domicilio_ref)
     if is_invalid_letter_lugar(ciudad):
         ciudad = "México"
-    if not official_mirror:
-        doc.add_paragraph(f"LUGAR Y FECHA: {ciudad}, a {metadata.get('fecha', '')}").alignment = WD_ALIGN_PARAGRAPH.LEFT
+    doc.add_paragraph(
+        f"LUGAR Y FECHA: {ciudad}, a {fecha_encabezado}"
+    ).alignment = WD_ALIGN_PARAGRAPH.LEFT
     if not obra_pliego_contract:
         doc.add_paragraph("Hoja 1 de 1").alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
@@ -2013,7 +2220,11 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         
         doc.add_paragraph("_" * 50).alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    canon_fecha = str((metadata or {}).get("fecha") or "").strip()
+    canon_fecha = str(
+        (metadata or {}).get("fecha_documental")
+        or (metadata or {}).get("fecha")
+        or ""
+    ).strip()
     if canon_fecha and content:
         content = normalize_body_spanish_dates(content, canon_fecha)
 

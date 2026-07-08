@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import datetime
 from typing import Dict, List, Optional, Pattern, Tuple
 
 from app.agents.analyst import normalize_cronograma_dict
@@ -509,6 +510,184 @@ def _strip_accents(s: str) -> str:
     return "".join(c for c in nk if unicodedata.category(c) != "Mn")
 
 
+_SPANISH_MONTH_TOKEN = r"[a-záéíóúñü]+"
+
+# Rangos frecuentes en bases MX: «06 y 07 de febrero de 2024», «del 04 al 08 de marzo del 2024».
+_RE_SPANISH_DATE_RANGE_CONJ = re.compile(
+    rf"(?i)(\d{{1,2}})\s+y\s+(\d{{1,2}})\s+de\s+({_SPANISH_MONTH_TOKEN})\s+(?:de|del)\s+(?:año\s+)?(20\d{{2}})"
+)
+_RE_SPANISH_DATE_RANGE_AL = re.compile(
+    rf"(?i)(?:del?\s+)?(\d{{1,2}})\s+al\s+(\d{{1,2}})\s+de\s+({_SPANISH_MONTH_TOKEN})\s+(?:de|del)\s+(?:año\s+)?(20\d{{2}})"
+)
+_RE_HORARIO_RANGO = re.compile(
+    r"(?i)(?:en\s+)?horario\s+(?:de\s+)?(\d{1,2})[:h](\d{2})\s+a\s+(\d{1,2})[:h](\d{2})"
+)
+_RE_DE_LAS_A_LAS = re.compile(
+    r"(?i)de\s+las?\s+(\d{1,2})[:h](\d{2})\s+a\s+las?\s+(\d{1,2})[:h](\d{2})"
+)
+_RE_SINGLE_SPANISH_DATE = re.compile(
+    r"(?i)(\d{1,2})\s+de\s+([a-záéíóúñü]+)\s+(?:de|del)\s+(?:año\s+)?(20\d{2})"
+)
+
+
+def _month_name_es(month: int) -> str:
+    names = (
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    )
+    if 1 <= month <= 12:
+        return names[month - 1]
+    return ""
+
+
+def match_spanish_date_range(text: str) -> Optional[Dict[str, int | str]]:
+    """
+    Detecta rango «DD y DD de mes de YYYY» o «DD al DD de mes de YYYY» en narrativa de bases.
+
+    Returns:
+        Dict con d1, d2, month_name, year o None.
+    """
+    blob = str(text or "")
+    if not blob.strip():
+        return None
+    for pattern in (_RE_SPANISH_DATE_RANGE_CONJ, _RE_SPANISH_DATE_RANGE_AL):
+        m = pattern.search(blob)
+        if not m:
+            continue
+        month_name = m.group(3).strip()
+        month_num = _MESES_ES.get(_strip_accents(month_name.lower()))
+        if not month_num:
+            continue
+        d1, d2 = int(m.group(1)), int(m.group(2))
+        if d1 > d2:
+            d1, d2 = d2, d1
+        return {
+            "d1": d1,
+            "d2": d2,
+            "month_name": month_name,
+            "month": month_num,
+            "year": int(m.group(4)),
+        }
+    return None
+
+
+def _extract_horario_display(text: str) -> Optional[str]:
+    """Horario compacto «HH:MM–HH:MM» si hay ventana explícita en el texto."""
+    blob = str(text or "")
+    for pattern in (_RE_HORARIO_RANGO, _RE_DE_LAS_A_LAS):
+        m = pattern.search(blob)
+        if m:
+            return f"{int(m.group(1)):02d}:{m.group(2)}–{int(m.group(3)):02d}:{m.group(4)}"
+    return None
+
+
+def _extract_time_end_from_text(text: str, start_pos: int = 0) -> Tuple[int, int]:
+    """Hora de cierre: fin de horario range o «a las HH:MM»."""
+    blob = str(text or "")
+    tail = blob[start_pos:]
+    for pattern in (_RE_HORARIO_RANGO, _RE_DE_LAS_A_LAS):
+        m = pattern.search(tail)
+        if m:
+            return int(m.group(3)), int(m.group(4))
+    tm = re.search(
+        r"(?i)(?:a\s+las\s+)?(\d{1,2})[:h](\d{2})(?:\s*(?:a\.?m\.?|p\.?m\.?|horas?|hrs?\.?)?)?",
+        tail,
+    )
+    if tm:
+        hh, mm = int(tm.group(1)), int(tm.group(2))
+        if re.search(r"(?i)p\.?\s*m", tail[tm.start() : tm.end() + 20]) and hh < 12:
+            hh += 12
+        return hh, mm
+    return 0, 0
+
+
+def parse_spanish_date_range_end(text: str) -> Optional[datetime]:
+    """
+    Fecha/hora de cierre para ventanas multi-día (último día + hora fin si existe).
+    """
+    rng = match_spanish_date_range(text)
+    if not rng:
+        return None
+    hh, mm = _extract_time_end_from_text(text)
+    try:
+        return datetime(int(rng["year"]), int(rng["month"]), int(rng["d2"]), hh, mm, 0, 0)
+    except ValueError:
+        return None
+
+
+def format_spanish_date_range(rng: Dict[str, int | str]) -> str:
+    """Texto compacto «D y D de mes de YYYY»."""
+    month_num = int(rng["month"])
+    month_label = _month_name_es(month_num) or str(rng["month_name"]).lower()
+    return f"{int(rng['d1'])} y {int(rng['d2'])} de {month_label} de {int(rng['year'])}"
+
+
+def _first_spanish_date_fragment(text: str) -> Optional[str]:
+    """Primer fragmento «DD de mes de YYYY»; respeta rangos «DD y DD de mes de YYYY»."""
+    blob = str(text or "")
+    rng = match_spanish_date_range(blob)
+    if rng:
+        m = _RE_SPANISH_DATE_RANGE_CONJ.search(blob) or _RE_SPANISH_DATE_RANGE_AL.search(blob)
+        return m.group(0).strip() if m else None
+    m = _RE_SINGLE_SPANISH_DATE.search(blob)
+    if not m:
+        return None
+    frag = m.group(0).strip()
+    tail = blob[m.end() : m.end() + 80]
+    tm = re.search(
+        r"(?i)(?:a\s+las\s+)?(\d{1,2})[:h](\d{2})(?:\s*(?:horas?|hrs?\.?)?)?",
+        tail,
+    )
+    if tm:
+        frag = f"{frag} {tm.group(0).strip()}"
+    return frag
+
+
+def _compact_single_spanish_fecha(parsed: datetime) -> str:
+    mes = _month_name_es(parsed.month)
+    base = f"{parsed.day} de {mes} de {parsed.year}"
+    if parsed.hour or parsed.minute:
+        return f"{base}, {parsed.hour:02d}:{parsed.minute:02d}"
+    return base
+
+
+def resolve_spanish_cronogram_fecha(text: str) -> Tuple[str, Optional[datetime]]:
+    """
+    Texto compacto para UI + datetime de referencia desde fragmento de cronograma en español.
+
+    Para rangos multi-día usa el último día y la hora de cierre si está en el texto.
+    """
+    raw = str(text or "").strip() or "No especificado"
+    rng = match_spanish_date_range(raw)
+    if rng:
+        display = format_spanish_date_range(rng)
+        horario = _extract_horario_display(raw)
+        if horario:
+            display = f"{display}, {horario}"
+        return display, parse_spanish_date_range_end(raw)
+
+    parsed = parse_spanish_date_fragment(raw)
+    if parsed is None:
+        frag = _first_spanish_date_fragment(raw)
+        if frag:
+            parsed = parse_spanish_date_fragment(frag)
+    if parsed is not None:
+        return _compact_single_spanish_fecha(parsed), parsed
+    if len(raw) > 72:
+        return "No especificado", None
+    return raw, None
+
+
 def parse_spanish_date_fragment(text: str):
     """
     Intenta parsear «DD de mes de|del YYYY [a las HH:MM]» desde un fragmento de bases.
@@ -516,10 +695,11 @@ def parse_spanish_date_fragment(text: str):
     Returns:
         datetime naive o None.
     """
-    from datetime import datetime
-
     if not text:
         return None
+    range_end = parse_spanish_date_range_end(text)
+    if range_end is not None:
+        return range_end
     m = re.search(
         r"(?i)(\d{1,2})\s+de\s+([a-záéíóúñü]+)\s+(?:de|del)\s+(?:año\s+)?(20\d{2})",
         str(text),

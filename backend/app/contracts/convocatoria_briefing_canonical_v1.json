@@ -1,0 +1,24 @@
+{
+  "schema_version": "convocatoria-briefing-v1.0.0",
+  "description": "HRU: síntesis canónica de qué solicita la convocante (bloques + primer paso). Merge idempotente en session_state.",
+  "block_ids": ["administrative", "technical", "economic"],
+  "track_values": ["administrative", "technical", "economic"],
+  "confidence_values": ["alta", "media", "baja"],
+  "required_fields": [
+    "schema_version",
+    "tender_object_plain",
+    "blocks",
+    "recommended_first_track",
+    "recommended_first_track_reason_plain",
+    "quality_signals"
+  ],
+  "block_fields": [
+    "block_id",
+    "title_plain",
+    "summary_plain",
+    "example_items",
+    "item_count",
+    "envelope_hint",
+    "provenance_ui"
+  ]
+}

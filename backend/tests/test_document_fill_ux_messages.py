@@ -116,3 +116,28 @@ def test_build_fill_validation_event_clientes_va_al_chat():
         stage="technical",
     )
     assert ev["ux"]["primary_action"]["target"] == "chat_pricing"
+
+
+def test_chat_prompt_no_seguir_generando_si_falta_perfil():
+    """Con RFC bloqueante + tarifa diferida, no prometer 'seguir generando'."""
+    issues = [
+        {
+            "document_id": "profile",
+            "field_key": "rfc",
+            "error_type": "required_field_missing",
+            "severity": "block",
+        },
+        {
+            "document_id": "calculo_costos.xlsx",
+            "field_key": "tarifa_mensual",
+            "error_type": "required_field_missing",
+            "expected_rule": "deferred_to_economic_stage",
+            "severity": "warn",
+        },
+    ]
+    brief = build_fill_quality_user_brief("formats", issues, company_name="Mayo y Torres")
+    prompt = brief["chat_prompt"].lower()
+    assert "seguir generando" not in prompt
+    assert "empresas" in prompt or "rfc" in prompt
+    assert "propuesta econ" in prompt or "económica" in prompt or "economica" in prompt
+

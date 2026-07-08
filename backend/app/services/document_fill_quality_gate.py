@@ -10,6 +10,15 @@ from docx import Document
 from openpyxl import load_workbook
 
 from app.config.settings import settings
+from app.services.document_fill_deferral_policy import (
+    admin_economic_deferral_active,
+    matches_deferred_economic_filename,
+    matches_deferred_economic_placeholder,
+    policy_version as deferral_policy_version,
+    should_defer_formats_economic_issue,
+    should_defer_standalone_ellipsis,
+    deferred_expected_rule,
+)
 from app.utils.rfc_normalizer import RFC_SAT_PATTERN, normalize_rfc_sat, rfc_present_in_text
 
 _PLACEHOLDER_PATTERNS: Sequence[str] = (
@@ -20,25 +29,10 @@ _PLACEHOLDER_PATTERNS: Sequence[str] = (
     r"Dato pendiente de confirmar",
 )
 
-_DEFERRED_ECONOMIC_PLACEHOLDER_RE = re.compile(
-    r"(?i)(tarifa\s+mensual|precio\s+unitario|integraci[oó]n\s+del\s+costo|"
-    r"importe\s+mensual|costo\s+mensual|tarifa\s+para\s+horario|tabla\s+de\s+precios|"
-    r"an[aá]lisis\s+de\s+precios|precios\s+unitarios)"
-)
-
-_DEFERRED_ECONOMIC_FILENAME_RE = re.compile(
-    r"(?i)precios[_\s]?unitarios|analisis[_\s]?precios|"
-    r"anexo[_\s]?9|cotizaci[oó]n|resumen.*subtotal"
-)
-
 
 def _is_deferred_economic_placeholder(text: str, *, basename: str = "") -> bool:
-    """
-    Placeholders de precios/tarifas que en etapa ``formats`` aún no tienen fuente
-    (la propuesta económica corre después). No deben bloquear el pipeline entero.
-    """
-    blob = f"{basename} {text or ''}"
-    return bool(_DEFERRED_ECONOMIC_PLACEHOLDER_RE.search(blob))
+    """Placeholder de precios/tarifas diferible a propuesta económica (política JSON)."""
+    return matches_deferred_economic_placeholder(text, basename=basename)
 
 
 def _is_standalone_ellipsis(text: str) -> bool:
@@ -47,17 +41,38 @@ def _is_standalone_ellipsis(text: str) -> bool:
     return bool(compact) and bool(re.fullmatch(r"\.{3,}", compact))
 
 
+def _admin_economic_deferral_active(stage: str) -> bool:
+    return admin_economic_deferral_active(stage)
+
+
+def _defer_formats_economic_issue(
+    *,
+    stage: str,
+    field_key: str = "",
+    basename: str = "",
+    error_type: str = "",
+    expected_rule: str = "",
+) -> bool:
+    return should_defer_formats_economic_issue(
+        stage=stage,
+        field_key=field_key,
+        basename=basename,
+        error_type=error_type,
+        expected_rule=expected_rule,
+    )
+
+
 def _defer_formats_stage_placeholder(
     *,
     stage: str,
     basename: str,
     text: str,
 ) -> bool:
-    if stage != "formats":
+    if not _admin_economic_deferral_active(stage):
         return False
-    if _is_standalone_ellipsis(text):
+    if should_defer_standalone_ellipsis() and _is_standalone_ellipsis(text):
         return True
-    if _DEFERRED_ECONOMIC_FILENAME_RE.search(basename or ""):
+    if matches_deferred_economic_filename(basename):
         return True
     return _is_deferred_economic_placeholder(text, basename=basename)
 
@@ -781,14 +796,24 @@ def validate_generated_documents_fill(
             xlsx_labels = _scan_xlsx_labels(path)
             xlsx_chunks = _scan_xlsx_text(path)
             if str(d.get("fill_status") or "").strip().lower() == "skipped_missing_locator":
+                defer_price = _defer_formats_economic_issue(
+                    stage=stage,
+                    field_key="price_fill",
+                    basename=basename,
+                    error_type="required_field_missing",
+                )
                 issues.append(
                     FillIssue(
                         error_type="required_field_missing",
-                        severity=_issue_severity("block"),
+                        severity=_issue_severity("warn" if defer_price else "block"),
                         document_id=basename,
-                        field_key="price_fill",
+                        field_key="tarifa_mensual" if defer_price else "price_fill",
                         detected_value=str(d.get("valid_locator_count") or 0),
-                        expected_rule="economic_excel_requires_valid_locator_mapping",
+                        expected_rule=(
+                            deferred_expected_rule()
+                            if defer_price
+                            else "economic_excel_requires_valid_locator_mapping"
+                        ),
                         provenance=provenance_context or {"source": "generated_xlsx", "confidence": 1.0},
                     )
                 )
@@ -843,7 +868,7 @@ def validate_generated_documents_fill(
                             field_key="tarifa_mensual" if defer_economic else "content",
                             detected_value=text[:240],
                             expected_rule=(
-                                "deferred_to_economic_stage"
+                                deferred_expected_rule()
                                 if defer_economic
                                 else "no_placeholder_tokens"
                             ),
@@ -911,7 +936,11 @@ def validate_generated_documents_fill(
                 )
                 deadline_iso = str(ctx.get("deadline_dt_iso") or "")
                 fecha_es = str(ctx.get("fecha_es") or "")
-                if not relax_template:
+                skip_deadline_scan = (
+                    str(ctx.get("fecha_documental_source") or "") == "generation_timestamp"
+                    and bool(ctx.get("is_after_deadline"))
+                )
+                if not relax_template and not skip_deadline_scan:
                     date_hit = scan_date_after_deadline(
                         full_text,
                         deadline_dt_iso=deadline_iso or None,
@@ -1110,6 +1139,7 @@ def validate_generated_documents_fill(
     return {
         "validation_passed": blocking == 0,
         "policy_version": DocumentFieldPolicyRegistry.POLICY_VERSION,
+        "deferral_policy_version": deferral_policy_version(),
         "blocking_count": blocking,
         "warning_count": warnings,
         "issues": [i.as_dict() for i in issues],

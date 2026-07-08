@@ -1,0 +1,14 @@
+{
+  "policy_version": "1.0.0",
+  "description": "Política HRU de empaquetado CompraNet — parcial vs estricto (F3.3).",
+  "expected_sobres": [
+    "SobreComplementaria",
+    "SobreTecnica",
+    "SobreEconomica"
+  ],
+  "partial_manifest_label": "Expediente parcial — faltan sobres por generar en otro modo",
+  "coverage_status_values": {
+    "full": "Expediente completo (todos los sobres presentes)",
+    "partial": "Expediente parcial (solo sobres disponibles)"
+  }
+}

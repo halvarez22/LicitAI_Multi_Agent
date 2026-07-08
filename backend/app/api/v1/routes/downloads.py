@@ -169,6 +169,63 @@ async def list_generated_files_path(session_id: str):
     return _list_response(session_path)
 
 
+async def _load_session_state(session_id: str) -> dict:
+    """Lee estado de sesión para resolver alcance (cola generación / pendientes)."""
+    raw = (session_id or "").strip()
+    if not raw:
+        return {}
+    repo = await get_connected_memory()
+    try:
+        state = await repo.get_session(raw)
+        return state if isinstance(state, dict) else {}
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/artifacts")
+async def list_scope_artifacts_query(
+    session_id: str = Query(..., min_length=1),
+    scope: str = Query("full"),
+):
+    """
+    Lista artefactos descargables por alcance HRU (F5.2).
+
+    ``scope``: ``technical`` | ``economic`` | ``full`` (alias normalizados vía policy).
+    """
+    from app.services.delivery_scope_resolver import resolve_scope_artifacts
+
+    session_path = await resolve_outputs_root(session_id)
+    session_state = await _load_session_state(session_id)
+    company_profile = None
+    company_exists = None
+    company_id = str((session_state or {}).get("company_id") or "").strip()
+    if company_id:
+        repo = await get_connected_memory()
+        try:
+            row = await repo.get_company(company_id)
+            if row:
+                company_exists = True
+                company_profile = row.get("master_profile") if isinstance(row.get("master_profile"), dict) else row
+            else:
+                company_exists = False
+        finally:
+            await repo.disconnect()
+    data = resolve_scope_artifacts(
+        session_id=session_id,
+        scope=scope,
+        session_path=session_path,
+        session_state=session_state,
+        company_profile=company_profile,
+        company_exists=company_exists,
+    )
+    return {"success": True, "data": data}
+
+
+@router.get("/artifacts/{session_id:path}")
+async def list_scope_artifacts_path(session_id: str, scope: str = Query("full")):
+    return await list_scope_artifacts_query(session_id=session_id, scope=scope)
+
+
 @router.get("/file")
 async def download_file(path: str, session_id: str):
     """Descarga un archivo; session_id identifica la licitación (resolución de carpeta como en /list)."""
@@ -185,6 +242,47 @@ async def download_file(path: str, session_id: str):
 
     if not os.path.exists(full_path) or not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
+
+    from app.services.delivery_scope_resolver import resolve_scope_artifacts
+    from app.services.expediente_readiness_service import readiness_gates_enabled
+
+    if readiness_gates_enabled():
+        session_state = await _load_session_state(session_id)
+        company_profile = None
+        company_exists = None
+        company_id = str((session_state or {}).get("company_id") or "").strip()
+        if company_id:
+            repo = await get_connected_memory()
+            try:
+                row = await repo.get_company(company_id)
+                if row:
+                    company_exists = True
+                    company_profile = (
+                        row.get("master_profile") if isinstance(row.get("master_profile"), dict) else row
+                    )
+                else:
+                    company_exists = False
+            finally:
+                await repo.disconnect()
+        rel_path = path.replace("\\", "/")
+        allowed_paths: set[str] = set()
+        for scope in ("technical", "economic", "full"):
+            data = resolve_scope_artifacts(
+                session_id=session_id,
+                scope=scope,
+                session_path=root,
+                session_state=session_state,
+                company_profile=company_profile,
+                company_exists=company_exists,
+            )
+            for art in data.get("artifacts") or []:
+                if isinstance(art, dict) and art.get("relative_path"):
+                    allowed_paths.add(str(art["relative_path"]).replace("\\", "/"))
+        if rel_path not in allowed_paths:
+            raise HTTPException(
+                status_code=403,
+                detail="Descarga bloqueada: el artefacto no supera la verificación de integridad del expediente.",
+            )
 
     media_type, _ = mimetypes.guess_type(full_path)
     if not media_type:

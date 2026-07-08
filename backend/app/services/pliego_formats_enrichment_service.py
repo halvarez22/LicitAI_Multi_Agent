@@ -112,9 +112,10 @@ _OBRA_FILENAME_ALIASES: tuple[tuple[str, str], ...] = (
         "obra|E2",
     ),
     (r"an[aá]lisis.*precios|precios\s+unitarios|tabla.*precios", "obra|E3"),
+    (r"utilidad\s+propuesta|anexo\s+e[\s_.-]*3\s*e|cargo\s+por\s+utilidad", "obra|E3E"),
     (r"programa.*obra.*gantt|gantt|programa.*montos\s+mensuales", "obra|E4"),
     (r"anexo.*materiales|cotizaciones.*materiales", "obra|E5"),
-    (r"capital\s+contable|liquidez\s+comprometida|cargo\s+por\s+utilidad|cuadro\s+de\s+finiquito", "obra|T_B_SOLVENCIA"),
+    (r"capital\s+contable|liquidez\s+comprometida|cuadro\s+de\s+finiquito", "obra|T_B_SOLVENCIA"),
 )
 
 _OBRA_TE_ANNEXO_BLOCK_RE = re.compile(
@@ -153,6 +154,10 @@ def obra_te_dedupe_key(label: str) -> Optional[str]:
     m_t = re.search(r"(?i)\b(?:anexo|formato)\s+t[\s]*(\d{1,2})\b", norm)
     if m_t:
         return f"obra|T{int(m_t.group(1))}"
+
+    m_e = re.search(r"(?i)\b(?:anexo|formato)\s+e[\s]*3[\s]*e\b", norm)
+    if m_e:
+        return "obra|E3E"
 
     m_e = re.search(r"(?i)\b(?:anexo|formato)\s+e[\s]*(\d{1,2})\b", norm)
     if m_e:
@@ -197,6 +202,10 @@ def _valid_anexo_inventory_body(num: str, body: str) -> bool:
     """Descarta menciones laterales al anexo (domicilio, modelo técnico) sin plantilla."""
     b = re.sub(r"\s+", " ", str(body or "").strip()).lower()
     if len(b) < 18:
+        return False
+    if re.match(r"^[\)\(\s,;:\-]+", b):
+        return False
+    if re.search(r"^\)\s*,", b):
         return False
     if re.search(r"^de las bases,\s*respecto", b):
         return False
@@ -329,6 +338,52 @@ def extract_obra_te_annexes_from_bases_corpus(corpus: Any) -> List[Dict[str, Any
     return out
 
 
+_E3E_INVENTORY_RE = re.compile(
+    r"(?is)\banexo\s+e[\s_.-]*3\s*e\b\s*(?P<body>.{20,1800}?)(?=\banexo\s+e[\s_.-]*[34]\b|\Z|---\s*PÁGINA)",
+)
+
+
+def extract_obra_e3e_annex_from_bases_corpus(corpus: Any) -> List[Dict[str, Any]]:
+    """
+    Inventario granular del formato E-3 E (utilidad %), separado del paquete APU E-3.
+    """
+    combined = str(getattr(corpus, "combined", "") or "")
+    if not combined.strip():
+        return []
+    m = _E3E_INVENTORY_RE.search(combined)
+    if not m:
+        if "utilidad propuesta" not in combined.lower():
+            return []
+        idx = combined.lower().find("utilidad propuesta")
+        body = combined[max(0, idx - 80) : idx + 400]
+    else:
+        body = m.group("body")
+    body_head = re.sub(r"\s+", " ", str(body or "")).strip()[:360]
+    if len(body_head) < 20:
+        return []
+    label = "Anexo E-3 E: Utilidad propuesta para el concurso"
+    return [
+        {
+            "id": "obra-e3e",
+            "nombre_canonico": label,
+            "nombre": label,
+            "snippet_representativo": _pliego_snippet_for_panel(body_head),
+            "dedupe_key": "obra|E3E",
+            "tipo": "generar",
+            "tipo_accion_final": "generar",
+            "tipo_accion_propuesto": "generar",
+            "confidence": 0.92,
+            "sobre_clasificado": "sobre_3_economico",
+            "from_document_inventory": True,
+            "provenance_ui": {
+                "source": "bases_corpus",
+                "reason": "obra_e3e_format_inventory",
+                "section": "Anexo E-3 E",
+            },
+        }
+    ]
+
+
 def extract_pliego_anexos_from_bases_corpus(corpus: Any) -> List[Dict[str, Any]]:
     """
     Inventario de anexos I–XV (y arábigos) descrito en el corpus de bases.
@@ -403,7 +458,7 @@ def pliego_format_dedupe_key(label: str) -> str:
     if anexo_key:
         return anexo_key
     for pat, key in (
-        (r"declaraci[oó]n.*integridad|integridad.*declaraci[oó]n", "pliego|ANEXO_VII"),
+        (r"declaraci[oó]n.*integridad|integridad.*declaraci[oó]n", "pliego|declaracion_integridad"),
         (r"garant[ií]a.*calidad|calidad.*productos", "pliego|ANEXO_V"),
         (r"carta.*aseguramiento|aseguramiento.*bienes", "pliego|ANEXO_IX"),
         (r"multa.*sancion|sancion.*incumplimiento", "pliego|ANEXO_VIII"),
@@ -442,9 +497,25 @@ def pliego_format_dedupe_key(label: str) -> str:
 def extract_pliego_generables_from_bases_corpus(corpus: Any) -> List[Dict[str, Any]]:
     """Lista ítems generables: inventario de anexos + §5–8 del corpus indexado."""
     from app.services.compliance_consolidation_service import classify_deliverable_sobre
+    from app.services.junta_bases_corpus import BasesCorpus, primary_bases_segments
+
+    if isinstance(corpus, BasesCorpus) and len(corpus.segments) > 1:
+        primary_segs = primary_bases_segments(corpus)
+        if primary_segs and len(primary_segs) < len(corpus.segments):
+            corpus = BasesCorpus(
+                session_id=corpus.session_id,
+                segments=primary_segs,
+                filenames=[fn for fn, _ in primary_segs],
+            )
 
     out: List[Dict[str, Any]] = list(extract_obra_te_annexes_from_bases_corpus(corpus))
     seen: Set[str] = {pliego_format_dedupe_key(r["nombre_canonico"]) for r in out}
+    for row in extract_obra_e3e_annex_from_bases_corpus(corpus):
+        key = str(row.get("dedupe_key") or pliego_format_dedupe_key(row.get("nombre_canonico") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
     for row in extract_pliego_anexos_from_bases_corpus(corpus):
         key = pliego_format_dedupe_key(row["nombre_canonico"])
         if key in seen:

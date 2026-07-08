@@ -54,6 +54,13 @@ def _count_filled_price_inputs(inputs: Dict[str, Any]) -> int:
     return n
 
 
+def count_filled_price_inputs(inputs: Dict[str, Any]) -> int:
+    """API pública: precios unitarios capturados (sin metadatos de sesión)."""
+    if not isinstance(inputs, dict):
+        return 0
+    return _count_filled_price_inputs(inputs)
+
+
 def economic_capture_status(session_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Resumen de cobertura de precios (matriz + ``economic_user_inputs``).
@@ -86,7 +93,14 @@ def economic_capture_status(session_state: Dict[str, Any]) -> Dict[str, Any]:
         filled = _count_filled_price_inputs(inputs)
         total = filled
     missing = max(0, total - filled)
-    tolerance = 2
+    tolerance = 0
+    try:
+        from app.services.expediente_guided_service import load_expediente_guided_policy
+
+        honesty = (load_expediente_guided_policy().get("capture_honesty") or {})
+        tolerance = int(honesty.get("matrix_complete_tolerance", 0))
+    except Exception:
+        tolerance = 0
     capture_complete = pending_eco == 0 and (
         (total > 0 and filled >= max(1, total - tolerance))
         or (inputs_only and filled >= MATRIX_CAPTURE_MIN_ITEMS)
@@ -217,8 +231,20 @@ def build_capture_matrix_meta(
     }
 
 
-def format_capture_summary_message(status: Dict[str, Any]) -> str:
-    """Resumen unificado «capturaste X de Y» (Ítem D.12)."""
+def format_capture_summary_message(status: Dict[str, Any], *, economic_validated: bool = False) -> str:
+    """Resumen unificado «capturaste X de Y» (Ítem D.12 / P0 honesto)."""
+    try:
+        from app.services.expediente_guided_service import (
+            expediente_guided_enabled,
+            format_honest_capture_summary,
+        )
+
+        if expediente_guided_enabled():
+            return format_honest_capture_summary(
+                status, economic_validated=economic_validated
+            )
+    except Exception:
+        pass
     filled = int(status.get("filled") or 0)
     total = int(status.get("total") or 0)
     if total <= 0:

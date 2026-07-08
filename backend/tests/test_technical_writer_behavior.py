@@ -359,6 +359,104 @@ async def test_technical_writer_quality_gate_bloquea_unknown_ratio(monkeypatch):
     assert out.status != AgentStatus.WAITING_FOR_DATA or out.data.get("document_quality_gate", {}).get("reason") != "unknown_ratio_above_threshold"
 
 
+@pytest.mark.asyncio
+async def test_quality_gate_no_bloquea_si_inventario_tecnico_tiene_pendientes(monkeypatch):
+    """Compliance unknown puro no debe bloquear si document_inventory trae ítems PENDING."""
+    agent = _make_agent()
+    monkeypatch.setattr(app_settings, "DOCUMENT_QUALITY_HARD_GATE_ENABLED", True)
+    monkeypatch.setattr(app_settings, "DOCUMENT_QUALITY_GATE_MIN_ITEMS", 3)
+
+    unknown_reqs = [
+        {
+            "id": f"TE-{i}",
+            "nombre": f"Requisito {i}",
+            "descripcion": f"Desc {i}",
+            "tipo_accion": "unknown",
+            "evidence_match": True,
+        }
+        for i in range(1, 16)
+    ]
+    inv = {
+        "session_id": "sess_gate_inv",
+        "schema_version": "1.0.0",
+        "revision": 1,
+        "items": [
+            {
+                "canonical_id": "propuesta_tecnica_issste",
+                "display_name": "Propuesta técnica",
+                "description": "Documento técnico principal",
+                "category": "technical",
+                "tier": "anchored",
+                "status": "pending",
+                "anchors": [{"snippet": "propuesta técnica", "confidence": 1.0}],
+                "bases_revision": "rev1",
+                "generator_hint": "plantilla_o_llm:PROPUESTA_TECNICA",
+            }
+        ],
+    }
+    inp = AgentInput(
+        session_id="sess_gate_inv",
+        company_data={
+            "master_profile": _MASTER_PILOTO_COMPLETO,
+            "compliance_master_list": {"tecnico": unknown_reqs},
+            "document_inventory": inv,
+        },
+        company_id="co-1",
+        mode="generation_only",
+    )
+    agent.context_manager.get_global_context = AsyncMock(
+        return_value={"session_state": {"tasks_completed": []}}
+    )
+    with patch("os.makedirs"), patch("app.agents.technical_writer._save_docx"), \
+         patch("json.dump"), patch("json.load", return_value={}), \
+         patch("os.path.exists", return_value=False), \
+         patch("builtins.open", MagicMock()):
+        out = await agent.process(inp)
+
+    assert out.status != AgentStatus.WAITING_FOR_DATA
+    assert out.data.get("document_quality_gate") is None
+
+
+@pytest.mark.asyncio
+async def test_synthetic_compliance_entra_en_cola_sin_inventario_canonico(monkeypatch):
+    """Ítems inventory_synthetic en compliance deben generarse sin document_inventory."""
+    agent = _make_agent()
+    monkeypatch.setattr(app_settings, "DOCUMENT_QUALITY_HARD_GATE_ENABLED", True)
+    monkeypatch.setattr(app_settings, "DOCUMENT_QUALITY_GATE_MIN_ITEMS", 3)
+
+    synth_reqs = [
+        {
+            "id": "cedula_areas",
+            "nombre": "Cédulas de Descripción de Áreas",
+            "descripcion": "Presentar descripción de áreas.",
+            "tipo": "tecnico",
+            "inventory_synthetic": True,
+            "evidence_match": True,
+            "tipo_accion": "generar",
+        }
+    ]
+    inp = AgentInput(
+        session_id="sess_synth_only",
+        company_data={
+            "master_profile": _MASTER_PILOTO_COMPLETO,
+            "compliance_master_list": {"tecnico": synth_reqs},
+        },
+        company_id="co-1",
+        mode="generation_only",
+    )
+    agent.context_manager.get_global_context = AsyncMock(
+        return_value={"session_state": {"tasks_completed": []}}
+    )
+    with patch("os.makedirs"), patch("app.agents.technical_writer._save_docx"), \
+         patch("json.dump"), patch("json.load", return_value={}), \
+         patch("os.path.exists", return_value=False), \
+         patch("builtins.open", MagicMock()):
+        out = await agent.process(inp)
+
+    assert out.status != AgentStatus.WAITING_FOR_DATA
+    assert out.data.get("document_quality_gate") is None
+
+
 # =============================================================================
 # INTEGRATION TESTS: Gate documental — Requirements 5.1, 5.4, 6.3
 # =============================================================================

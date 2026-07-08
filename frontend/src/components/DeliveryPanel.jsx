@@ -32,6 +32,7 @@ const DeliveryPanel = ({ sessionId, sessionName, results, onExpedienteCleared, r
     const [deliveryInventory, setDeliveryInventory] = useState(null);
     const [miniDictamen, setMiniDictamen] = useState(null);
     const [clarificationTickets, setClarificationTickets] = useState([]);
+    const [convocatoriaBriefing, setConvocatoriaBriefing] = useState(null);
 
     // PUENTE DE DATOS: Si no hay resultados de generación, usamos los de auditoría (causales)
     const rawChecklist = results?.formats?.checklists?.sobre || 
@@ -102,11 +103,34 @@ const DeliveryPanel = ({ sessionId, sessionName, results, onExpedienteCleared, r
         }
     };
 
+    const fetchConvocatoriaBriefing = async () => {
+        if (!sessionId || sessionId === 'null') {
+            setConvocatoriaBriefing(null);
+            return;
+        }
+        try {
+            const res = await axios.get(
+                `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/convocatoria-briefing`,
+            );
+            if (res.data?.success && res.data?.data?.panel_summary) {
+                setConvocatoriaBriefing(res.data.data.panel_summary);
+            } else {
+                setConvocatoriaBriefing(null);
+            }
+        } catch (err) {
+            if (err.response?.status !== 404) {
+                console.error('Error fetching convocatoria briefing', err);
+            }
+            setConvocatoriaBriefing(null);
+        }
+    };
+
     useEffect(() => {
         setLoading(true);
         setMiniLoading(true);
         fetchStructure();
         fetchMiniDictamen();
+        fetchConvocatoriaBriefing();
     }, [sessionId, refreshToken]);
 
     const handleDownload = async (filePath, fileName, e) => {
@@ -137,6 +161,10 @@ const DeliveryPanel = ({ sessionId, sessionName, results, onExpedienteCleared, r
     const deliverableCount = deliveryInventory?.deliverable_files ?? null;
     const uniqueShaCount = deliveryInventory?.unique_sha256 ?? null;
     const physicalCount = deliveryInventory?.total_files_physical ?? null;
+    const packagingPartial = deliveryInventory?.packaging_coverage_status === 'partial';
+    const packagingMissingSobres = Array.isArray(deliveryInventory?.packaging_sobres_missing)
+        ? deliveryInventory.packaging_sobres_missing
+        : [];
 
     const handleClearGenerated = async () => {
         if (!sessionId || sessionId === 'null') return;
@@ -340,10 +368,70 @@ const DeliveryPanel = ({ sessionId, sessionName, results, onExpedienteCleared, r
                         }}
                     >
                         {downloading === 'ZIP' ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                        {downloading === 'ZIP' ? 'EMPAQUETANDO...' : 'DESCARGAR EXPEDIENTE COMPLETO'}
+                        {downloading === 'ZIP' ? 'EMPAQUETANDO...' : packagingPartial ? 'DESCARGAR EXPEDIENTE PARCIAL' : 'DESCARGAR EXPEDIENTE COMPLETO'}
                     </button>
                 </div>
             </div>
+
+            {convocatoriaBriefing && Array.isArray(convocatoriaBriefing.blocks) && convocatoriaBriefing.blocks.length > 0 && (
+                <div style={{
+                    marginBottom: '20px',
+                    padding: '16px 18px',
+                    borderRadius: '14px',
+                    border: '1px solid rgba(56, 189, 248, 0.25)',
+                    background: 'rgba(56, 189, 248, 0.06)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                        <Info size={16} color="#38bdf8" />
+                        <strong style={{ fontSize: '14px', color: '#e2e8f0' }}>
+                            {convocatoriaBriefing.card_title || 'Qué pide la convocante'}
+                        </strong>
+                    </div>
+                    {convocatoriaBriefing.tender_object && (
+                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0' }}>
+                            {convocatoriaBriefing.tender_object}
+                        </p>
+                    )}
+                    <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.55 }}>
+                        {convocatoriaBriefing.blocks.map((block) => (
+                            <li key={block.block_id || block.title} style={{ marginBottom: '6px' }}>
+                                <strong style={{ color: '#cbd5e1' }}>{block.title}</strong>
+                                {block.item_count != null ? ` (${block.item_count})` : ''}
+                                {block.examples?.length > 0 ? ` — p. ej. ${block.examples.slice(0, 2).join(', ')}` : ''}
+                            </li>
+                        ))}
+                    </ul>
+                    {convocatoriaBriefing.note && (
+                        <p style={{ fontSize: '11px', color: '#fbbf24', marginTop: '10px', marginBottom: 0 }}>
+                            {convocatoriaBriefing.note}
+                        </p>
+                    )}
+                </div>
+            )}
+
+            {packagingPartial ? (
+                <div style={{
+                    marginBottom: '14px',
+                    padding: '12px 14px',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(251, 191, 36, 0.35)',
+                    background: 'rgba(251, 191, 36, 0.08)',
+                    fontSize: '12px',
+                    color: '#fde68a',
+                    lineHeight: 1.45,
+                }}>
+                    <strong style={{ display: 'block', marginBottom: '4px', color: '#fef3c7' }}>
+                        Expediente parcial
+                    </strong>
+                    {deliveryInventory?.packaging_partial_note
+                        || 'Solo están empaquetados los sobres ya generados. Completa el resto con otro modo de generación.'}
+                    {packagingMissingSobres.length > 0 ? (
+                        <span style={{ display: 'block', marginTop: '6px', opacity: 0.9 }}>
+                            Sobres faltantes: {packagingMissingSobres.join(', ')}
+                        </span>
+                    ) : null}
+                </div>
+            ) : null}
 
             <div style={{
                 marginBottom: '18px',

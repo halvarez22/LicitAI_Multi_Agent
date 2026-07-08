@@ -254,7 +254,15 @@ export default function CaptureMatrixPanel({ sessionId }) {
                 ) : captureStatus?.capture_complete ? (
                     <span style={{ color: '#86efac' }}>
                         Cotización lista: <strong>{captureStatus.filled}</strong> /{' '}
-                        <strong>{captureStatus.total}</strong> precios. Usa <strong>Generar propuesta</strong>.
+                        <strong>{captureStatus.total}</strong> precios. Escribe{' '}
+                        <strong>generar propuesta económica</strong> en el chat.
+                    </span>
+                ) : captureStatus?.motor_pending_count > 0 &&
+                  captureStatus?.filled >= captureStatus?.total &&
+                  captureStatus?.total > 0 ? (
+                    <span style={{ color: '#fbbf24' }}>
+                        Matriz {captureStatus.filled}/{captureStatus.total} — falta partida motor:{' '}
+                        <strong>{captureStatus.motor_pending_label || 'pendiente'}</strong>
                     </span>
                 ) : rowCount > 0 ? (
                     <>

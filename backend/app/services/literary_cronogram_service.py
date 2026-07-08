@@ -695,7 +695,7 @@ def resolve_hito_literary_bundle(
     """
     Literal, procedencia y fecha compacta para un hito (panel + chat HRU).
     """
-    from app.checklist.hito_scheduler import _resolve_display_fecha_raw
+    from app.checklist.hito_scheduler import resolve_display_fecha_best
 
     raw_display = str(hito.get("fecha_texto_raw") or "").strip()
     pick_hito = dict(hito)
@@ -738,12 +738,17 @@ def resolve_hito_literary_bundle(
         checklist_only = True
         source = primary_doc
 
-    fecha_texto_raw, _ = _resolve_display_fecha_raw(
-        cron_frag or pick_raw or raw_display
+    fecha_texto_raw, fecha_hora = resolve_display_fecha_best(
+        extracted,
+        literal,
+        cron_frag,
+        pick_raw,
+        raw_display,
     )
 
     return {
         "fecha_texto_raw": fecha_texto_raw,
+        "fecha_hora": fecha_hora,
         "bases_literal": literal,
         "provenance_ui": _build_hito_provenance_ui(
             checklist_only=checklist_only,
@@ -804,6 +809,8 @@ def enrich_checklist_hitos_literary(
             )
             if bundle.get("fecha_texto_raw"):
                 enriched["fecha_texto_raw"] = bundle["fecha_texto_raw"]
+            if bundle.get("fecha_hora") is not None:
+                enriched["fecha_hora"] = bundle["fecha_hora"]
             if bundle.get("bases_literal"):
                 enriched["bases_literal"] = bundle["bases_literal"]
             if bundle.get("provenance_ui"):
@@ -811,8 +818,10 @@ def enrich_checklist_hitos_literary(
         elif cron_frag:
             from app.checklist.hito_scheduler import _resolve_display_fecha_raw
 
-            fecha_raw, _ = _resolve_display_fecha_raw(cron_frag)
+            fecha_raw, fecha_hora = _resolve_display_fecha_raw(cron_frag)
             enriched["fecha_texto_raw"] = fecha_raw
+            if fecha_hora is not None:
+                enriched["fecha_hora"] = fecha_hora
         out.append(enriched)
     return out
 

@@ -1,0 +1,31 @@
+{
+  "schema_version": "evidence-anchor-v1.0.0",
+  "description": "HRU: ancla de evidencia de bases para claims del asistente. Fail-closed: synthetic nunca es verified.",
+  "required_fields": [
+    "schema_version",
+    "anchor_quality",
+    "provenance_ui"
+  ],
+  "optional_fields": [
+    "source_name",
+    "page",
+    "row_index",
+    "snippet",
+    "numeral_hint",
+    "annex_hint",
+    "verification",
+    "claim_id"
+  ],
+  "anchor_quality_values": [
+    "verified",
+    "document_only",
+    "insufficient",
+    "synthetic"
+  ],
+  "quality_rules": {
+    "verified": "page>=1 AND snippet_len>=min_snippet AND not synthetic AND (optional corpus verify pass)",
+    "document_only": "source_name present AND (page missing OR snippet weak) AND not synthetic",
+    "insufficient": "no usable locus",
+    "synthetic": "fabricated page/snippet (legacy chat fallback); treat as insufficient for claims"
+  }
+}

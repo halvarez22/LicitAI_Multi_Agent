@@ -1,6 +1,6 @@
 {
-  "policy_version": "official-format-v0.1.0",
-  "description": "HRU: anclas universales para detectar machotes publicados en bases (sin hardcode por convocante). Prioridad de cobertura: sobre económico E-1..E-5. Modo estricto: shell [Consignar] si hay evidencia de machote y no se extrajo espejo; prohibido LLM en obra|T/E.",
+  "policy_version": "official-format-v1.0.0",
+  "description": "HRU: anclas universales para machotes en bases. Prioridad sobre económico E-1..E-5.",
   "decisions": {
     "strict_mode_fallback": "official_miss_shell_with_consignar",
     "coverage_priority": "economic_envelope_e1_e5_first",
@@ -16,12 +16,31 @@
         "PRESENTE"
       ],
       "min_anchors": 2,
-      "slot_sources": {
-        "licitacion_num": "concurso_label",
-        "importe_total_iva": "economic.total",
-        "plazo_ejecucion": "bases.plazo_ejecucion",
-        "obra": "bases.objeto_obra"
-      }
+      "output_filename": "1. ANEXO E-1 Carta Compromiso.docx",
+      "doc_title": "ANEXO E-1 — CARTA-COMPROMISO DE LA PROPOSICIÓN"
+    },
+    "obra|E2": {
+      "label_es": "Catálogo de conceptos y precios unitarios",
+      "anchors": [
+        "CATÁLOGO DE CONCEPTOS",
+        "CATALOGO DE CONCEPTOS",
+        "PRECIOS UNITARIOS PROPUESTOS"
+      ],
+      "min_anchors": 1,
+      "output_filename": "ANEXO_E-2_Catalogo_Conceptos.docx",
+      "doc_title": "ANEXO E-2 — CATÁLOGO DE CONCEPTOS"
+    },
+    "obra|E3": {
+      "label_es": "Análisis de precios unitarios (paquete APU)",
+      "anchors": [
+        "ANÁLISIS DE LOS PRECIOS UNITARIOS",
+        "ANALISIS DE LOS PRECIOS UNITARIOS",
+        "TARJETAS DE ANÁLISIS"
+      ],
+      "min_anchors": 1,
+      "output_filename": "ANALISIS_PRECIOS_UNITARIOS.docx",
+      "doc_title": "ANÁLISIS DE PRECIOS UNITARIOS",
+      "official_template_expected": false
     },
     "obra|E3E": {
       "label_es": "Utilidad propuesta (Anexo E-3 E)",
@@ -31,11 +50,42 @@
         "ART. 63"
       ],
       "min_anchors": 2,
-      "slot_sources": {
-        "licitacion_num": "concurso_label",
-        "obra": "bases.objeto_obra",
-        "utilidad_pct": "economic.utilidad_rate"
-      }
+      "output_filename": "Anexo_E-3E_Utilidad_Propuesta.docx",
+      "doc_title": "ANEXO E-3 E — UTILIDAD PROPUESTA"
+    },
+    "obra|E4": {
+      "label_es": "Programas de obra (Gantt)",
+      "anchors": [
+        "PROGRAMAS DE OBRA",
+        "GANTT",
+        "PROGRAMA DE OBRA FÍSICO"
+      ],
+      "min_anchors": 1,
+      "output_filename": "Anexo_E-4_Programas_Obra_Gantt.docx",
+      "doc_title": "ANEXO E-4 — PROGRAMAS DE OBRA"
+    },
+    "obra|E5": {
+      "label_es": "Cotizaciones de materiales",
+      "anchors": [
+        "COTIZACIONES DE MATERIALES",
+        "COTIZACIONES DE LOS MATERIALES"
+      ],
+      "min_anchors": 1,
+      "output_filename": "Anexo_E-5_Cotizaciones_Materiales.docx",
+      "doc_title": "ANEXO E-5 — COTIZACIONES DE MATERIALES"
+    },
+    "obra|T_B_SOLVENCIA": {
+      "label_es": "Capital contable comprometido y liquidez",
+      "anchors": [
+        "CAPITAL CONTABLE COMPROMETIDO",
+        "CAPITAL CONTABLE",
+        "LIQUIDEZ",
+        "SOLVENCIA ECONOMICA",
+        "SOLVENCIA ECONÓMICA"
+      ],
+      "min_anchors": 2,
+      "output_filename": "CAPITAL_CONTABLE_COMPROMETIDO.docx",
+      "doc_title": "CAPITAL CONTABLE COMPROMETIDO"
     }
   },
   "llm_blocked_dedupe_prefixes": ["obra|E", "obra|T"],

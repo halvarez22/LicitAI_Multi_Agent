@@ -114,3 +114,65 @@ flowchart TD
 - Invalidación: `backend/app/services/session_bases_analysis_invalidation.py`
 - Smoke: `scripts/smoke_session_stability.py`, `scripts/smoke_ui_artifacts.py`
 - Handoff: `docs/INFORME_ESTABILIZACION_HANDOFF.md`
+
+---
+
+## 9. Cambio de empresa (`company_binding`) — HRU integridad R2/R3
+
+**Implementación:** `company_binding_service.py`, `artifact_fingerprint_service.py`, `generation_wipe_policy.py`.
+
+Disparador: `POST /sessions/{id}/bind-company` con `company_id` distinto al anterior, o auto-bind en orquestador cuando perfil sesión ≠ catálogo DB.
+
+### 9.1 Qué se invalida en sesión (PostgreSQL)
+
+| Clave / task | Efecto |
+|--------------|--------|
+| `tasks_completed.economic_proposal` | Snapshot marcado stale / removido según policy |
+| `stage_completed:economic` | No es fuente de «validada» tras cambio |
+| `expediente_guided_v1.economic_validated_at` | Ignorado por readiness gates |
+| `generation_state.jobs.economic_writer` | Reset a `pending` o `blocked` |
+| `artifact_fingerprints` (sesión) | Recalculados tras regeneración |
+
+### 9.2 Qué se borra en disco
+
+Subdirs definidos en `company_binding_policy.json` → por defecto:
+
+- `2.propuesta_economica/` (completo)
+- Sidecar `_LICITAI_FINGERPRINT.json` del scope económico
+
+**No se borran** en cambio de empresa:
+
+- `1.propuesta tecnica/`
+- `3.documentos administrativos/`
+- `_compranet_validated/` (hasta empaquetado/regeneración explícita)
+
+### 9.3 Entrega bloqueada sin wipe físico
+
+Si quedan archivos stale (ej. incidente pre-R3): `delivery_scope_resolver` + readiness gates devuelven `artifact_count=0` y `empty_reason=artifact_fingerprint_mismatch` aunque existan bytes en disco. Oracle **CONTAM01**.
+
+### 9.4 Precedencia
+
+```
+Usuario bind-company > companies.master_profile (DB) > master_profile en sesión > inferencia
+```
+
+### 9.5 Factory reset sesión contaminada (operación)
+
+1. `POST /sessions/{id}/bind-company` — empresa válida del catálogo.
+2. Verificar `GET /sessions/{id}/readiness` → `binding_valid=true`, blockers esperados.
+3. Regenerar económica (`generation_mode=economic`) cuando `economic_writer_allowed=true`.
+4. Confirmar `GET /downloads/artifacts?scope=economic` → `readiness_integrity_blocked=false`.
+
+Sesión piloto limpia recomendada: `vigilancia_issste_mayo_v1` (sin arrastrar artefactos jun-2026).
+
+Ver playbook: `DEPLOY_HARDENING_PLAYBOOK.md` §10.
+
+---
+
+## 10. Referencias integridad expediente
+
+- Readiness: `backend/app/services/expediente_readiness_service.py`
+- Binding: `backend/app/services/company_binding_service.py`
+- Fingerprint: `backend/app/services/artifact_fingerprint_service.py`
+- SPEC: `docs/SPEC_EXPEDIENTE_READINESS_AND_INTEGRITY_HRU.md`
+- Smoke R5: `backend/scripts/smoke_expediente_readiness_integrity.py`

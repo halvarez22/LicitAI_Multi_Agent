@@ -1,0 +1,76 @@
+{
+  "policy_version": "convocatoria-briefing-v1.0.0",
+  "description": "HRU universal: clasificación de bloques de propuesta y prioridad del primer paso conversacional. Sin mapas por convocante.",
+  "schema_version": "convocatoria-briefing-v1.0.0",
+  "blocks": {
+    "administrative": {
+      "title_plain": "Documentos de tu empresa",
+      "summary_plain": "Constancias, opiniones fiscales, actas y credenciales que debes aportar o consignar.",
+      "envelope_hint": "documentación complementaria",
+      "compliance_categories": ["administrativo"],
+      "ccc_buckets": ["requisitos_legales", "otros_requisitos_criticos"],
+      "user_action_types": ["presentar_fisico", "aportar_documento", "consignar_fisico"],
+      "bases_keywords": [
+        "documentación complementaria",
+        "requisitos administrativos",
+        "documentacion complementaria"
+      ]
+    },
+    "technical": {
+      "title_plain": "Propuesta técnica",
+      "summary_plain": "Cómo ejecutarás el servicio u obra: metodología, personal, equipo y experiencia.",
+      "envelope_hint": "sobre técnico",
+      "compliance_categories": ["tecnico", "formatos"],
+      "ccc_buckets": ["sobre_1_tecnico"],
+      "generable_action_types": ["generar", "llenar_formato", "llenar_plantilla", "requiere_datos_licitante"],
+      "bases_keywords": ["propuesta técnica", "propuesta tecnica", "6.2"]
+    },
+    "economic": {
+      "title_plain": "Cotización económica",
+      "summary_plain": "Precios por zona, operario o concepto según los formatos económicos del pliego.",
+      "envelope_hint": "sobre económico",
+      "compliance_categories": ["economico"],
+      "ccc_buckets": ["sobre_2_economico"],
+      "bases_keywords": [
+        "propuesta económica",
+        "propuesta economica",
+        "precio unitario",
+        "6.3"
+      ]
+    }
+  },
+  "first_track_priority": [
+    {
+      "track": "economic",
+      "when": "economic_capture_incomplete"
+    },
+    {
+      "track": "technical",
+      "when": "obra_technical_first"
+    },
+    {
+      "track": "administrative",
+      "when": "only_user_documents_pending"
+    },
+    {
+      "track": "economic",
+      "when": "default_services"
+    },
+    {
+      "track": "technical",
+      "when": "default_fallback"
+    }
+  ],
+  "obra_technical_first": {
+    "tender_categories": ["OBRA", "OBRA_PUBLICA"],
+    "require_no_line_items": true,
+    "require_technical_slots": true
+  },
+  "reason_plain": {
+    "economic": "Las bases piden cerrar la cotización (precios por zona o concepto) antes de armar el resto del expediente.",
+    "technical": "Las bases piden primero los insumos técnicos (metodología, personal o experiencia) para redactar la propuesta.",
+    "administrative": "Primero conviene reunir los documentos de tu empresa que exige la convocatoria."
+  },
+  "max_example_items": 3,
+  "min_items_for_confidence_alta": 2
+}

@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from app.economic_validation.formulas.obra_publica_v1 import compute_obra_publica_totals
 from app.economic_validation.profiles import detect_profile, get_profile
 from app.economic_validation.formulas.salario_real_v1 import compute_fsr
+from app.services.economic_fsr_policy import extract_fsr_params_from_reglas
 
 _MONEY_Q = Decimal("0.01")
 
@@ -71,36 +72,8 @@ class EconomicCalculatorEngine:
         return ind_rate, util_rate
 
     def _extract_fsr_params(self, reglas_economicas: Dict[str, str]) -> Dict[str, Any]:
-        """
-        Extrae parámetros FSR desde texto de reglas.
-        Formato esperado (flexible): "imss=0.245, sar=0.02, ...".
-        """
-        blob = " ".join(str(v or "") for v in (reglas_economicas or {}).values())
-        out: Dict[str, Any] = {}
-        for key in (
-            "imss",
-            "sar",
-            "infonavit",
-            "dias_no_laborados",
-            "dias_laborados",
-            "prima_vacacional",
-            "aguinaldo_dias",
-        ):
-            m = re.search(rf"{key}\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", blob, flags=re.I)
-            if m:
-                out[key] = m.group(1)
-            else:
-                # Fallback de Ley Mexicana para evitar bloqueos en parámetros secundarios
-                law_defaults = {
-                    "sar": "0.02",
-                    "infonavit": "0.05",
-                    "prima_vacacional": "0.25",
-                    "dias_laborados": "365",
-                    "dias_no_laborados": "0"
-                }
-                if key in law_defaults:
-                    out[key] = law_defaults[key]
-        return out
+        """Extrae parámetros FSR desde reglas de bases vía política HRU versionada."""
+        return extract_fsr_params_from_reglas(reglas_economicas or {})
 
     def normalize_items(self, proposal_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Recalcula `subtotal` por línea usando Decimal; no confía en subtotales previos."""

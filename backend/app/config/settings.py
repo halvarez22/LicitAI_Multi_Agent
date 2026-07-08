@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     DOCUMENT_FILL_QUALITY_GATE_MODE: str = "enforce"
     DOCUMENT_FILL_QUALITY_MIN_CONFIDENCE_CRITICAL: float = 0.75
     DOCUMENT_CONTAMINATION_GATE_ENABLED: bool = True
+    CORPORATE_PHYSICAL_CONTAMINATION_GATE_ENABLED: bool = True
+    FORMATS_PANEL_CONTAMINATION_GATE_ENABLED: bool = True
+    JUNTA_CONTAMINATION_GATE_ENABLED: bool = True
     DELIVERY_CONTAMINATION_ENFORCE_AT_PACK: bool = True
     DOCUMENT_DATE_OFFSET_BUSINESS_DAYS: int = 2
     DOCUMENT_FORMAL_CLOSING_ENABLED: bool = True
@@ -83,6 +86,130 @@ class Settings(BaseSettings):
     GENERATION_PRUNE_DUPLICATE_OUTPUTS_AFTER_PACK: bool = False
     # Permite preguntar precios en chat aunque falte página/snippet estricto en el pliego.
     ECONOMIC_RELAX_PRICE_ANCHORS_FOR_CHAT: bool = True
+    # Operación: habilita/deshabilita la política versionada en
+    # app/contracts/document_fill_deferral_policy.json (reglas HRU canónicas).
+    ADMIN_ECONOMIC_DEFERRAL: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ADMIN_ECONOMIC_DEFERRAL",
+            "LICITAI_ADMIN_ECONOMIC_DEFERRAL",
+        ),
+    )
+    # F1: copiloto económico proactivo post-análisis + prioridad chat sobre Excel.
+    ECONOMIC_CHAT_FIRST: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ECONOMIC_CHAT_FIRST",
+            "LICITAI_ECONOMIC_CHAT_FIRST",
+        ),
+    )
+    ECONOMIC_POST_ANALYSIS_HOOK_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ECONOMIC_POST_ANALYSIS_HOOK_ENABLED",
+            "LICITAI_ECONOMIC_POST_ANALYSIS_HOOK_ENABLED",
+        ),
+    )
+    # F8: recalcular y mostrar subtotal/IVA/total en chat tras cada captura de precio.
+    ECONOMIC_CHAT_CALC_ON_CAPTURE: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ECONOMIC_CHAT_CALC_ON_CAPTURE",
+            "LICITAI_ECONOMIC_CHAT_CALC_ON_CAPTURE",
+        ),
+    )
+    # F2: generación desacoplada (técnica / económica / completa). Política en generation_mode_policy.json.
+    DECOUPLED_GENERATION_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "DECOUPLED_GENERATION_ENABLED",
+            "LICITAI_DECOUPLED_GENERATION_ENABLED",
+        ),
+    )
+    # F6 (ADR-001): streams técnico/económico concurrentes en una sesión.
+    DUAL_STREAM_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "DUAL_STREAM_ENABLED",
+            "LICITAI_DUAL_STREAM_ENABLED",
+        ),
+    )
+    # F9: copiloto técnico — canónico antes de redactar con LLM.
+    TECHNICAL_CHAT_FIRST: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "TECHNICAL_CHAT_FIRST",
+            "LICITAI_TECHNICAL_CHAT_FIRST",
+        ),
+    )
+    TECHNICAL_POST_ANALYSIS_HOOK_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "TECHNICAL_POST_ANALYSIS_HOOK_ENABLED",
+            "LICITAI_TECHNICAL_POST_ANALYSIS_HOOK_ENABLED",
+        ),
+    )
+    COPILOT_UNIFIED_STATUS: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "COPILOT_UNIFIED_STATUS",
+            "LICITAI_COPILOT_UNIFIED_STATUS",
+        ),
+    )
+    # F3.3: empaquetado estricto (todos los sobres) vs parcial piloto.
+    PACKAGING_REQUIRE_ALL_SOBRES: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "PACKAGING_REQUIRE_ALL_SOBRES",
+            "LICITAI_PACKAGING_REQUIRE_ALL_SOBRES",
+        ),
+    )
+    # F5: descarga contextual bajo botones de generación. Política en delivery_scope_policy.json.
+    CONTEXTUAL_DOWNLOAD_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CONTEXTUAL_DOWNLOAD_ENABLED",
+            "LICITAI_CONTEXTUAL_DOWNLOAD_ENABLED",
+        ),
+    )
+    # F11: briefing canónico del pliego (tres bloques + primer paso).
+    CONVOCATORIA_BRIEFING_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CONVOCATORIA_BRIEFING_ENABLED",
+            "LICITAI_CONVOCATORIA_BRIEFING_ENABLED",
+        ),
+    )
+    # F11: orquestador único de apertura del chat (sin carreras proactive_*).
+    CHAT_OPENING_ORCHESTRATOR_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHAT_OPENING_ORCHESTRATOR_ENABLED",
+            "LICITAI_CHAT_OPENING_ORCHESTRATOR_ENABLED",
+        ),
+    )
+    # F12.1: anclas de evidencia fail-closed en claims del asistente.
+    EVIDENCE_ANCHOR_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "EVIDENCE_ANCHOR_ENABLED",
+            "LICITAI_EVIDENCE_ANCHOR_ENABLED",
+        ),
+    )
+    EXPEDIENTE_GUIDED_ENABLED: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "EXPEDIENTE_GUIDED_ENABLED",
+            "LICITAI_EXPEDIENTE_GUIDED_ENABLED",
+        ),
+    )
+    READINESS_GATES_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "READINESS_GATES_ENABLED",
+            "LICITAI_READINESS_GATES_ENABLED",
+        ),
+    )
     TECH_WRITER_MAX_GENERABLE_DOCS: int = 12
     FORMATS_MAX_GENERABLE_DOCS: int = 18
     # Mínimo de anexos administrativos materializados vs panel/cola (0–1).
@@ -141,6 +268,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "OFFICIAL_MIRROR_STRICT",
             "LICITAI_OFFICIAL_MIRROR_STRICT",
+        ),
+    )
+    OFFICIAL_MIRROR_DELIVERY_GATE_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "OFFICIAL_MIRROR_DELIVERY_GATE_ENABLED",
+            "LICITAI_OFFICIAL_MIRROR_DELIVERY_GATE_ENABLED",
         ),
     )
 

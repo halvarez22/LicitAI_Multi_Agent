@@ -46,6 +46,7 @@ def test_fill_gate_apu_ellipsis_en_formats_no_bloquea(tmp_path, monkeypatch):
 def test_fill_gate_tarifa_mensual_en_formats_no_bloquea(tmp_path, monkeypatch):
     """Anexo D-III: tarifa se completa en propuesta económica; no frena formatos."""
     monkeypatch.setattr(app_settings, "DOCUMENT_FILL_QUALITY_GATE_MODE", "enforce")
+    monkeypatch.setattr(app_settings, "ADMIN_ECONOMIC_DEFERRAL", True)
     f = tmp_path / "anexo_d_iii.docx"
     _make_docx(f, ["Tarifa mensual para horario: _______________"])
     out = validate_generated_documents_fill(
@@ -506,3 +507,49 @@ def test_cross_tender_still_flags_real_zone_acronym_cinco(tmp_path, monkeypatch)
     assert any(
         i.get("error_type") == "cross_tender_reference" for i in out["issues"]
     )
+
+
+def test_fill_gate_price_fill_xlsx_en_formats_deferido(tmp_path, monkeypatch):
+    """Excel de cálculo sin locators: warning en formats con ADMIN_ECONOMIC_DEFERRAL."""
+    monkeypatch.setattr(app_settings, "DOCUMENT_FILL_QUALITY_GATE_MODE", "enforce")
+    monkeypatch.setattr(app_settings, "ADMIN_ECONOMIC_DEFERRAL", True)
+    f = tmp_path / "calculo_costos.xlsx"
+    _make_xlsx(f, with_values=False)
+    out = validate_generated_documents_fill(
+        stage="formats",
+        generated_documents=[
+            {
+                "ruta": str(f),
+                "fill_status": "skipped_missing_locator",
+                "valid_locator_count": 0,
+            }
+        ],
+        master_profile={
+            "razon_social": "Comercializadora Mayo y Torres",
+            "rfc": "CMT160107S83",
+            "representante_legal": "Ana Torres",
+        },
+    )
+    assert out["validation_passed"] is True
+    assert out["blocking_count"] == 0
+    deferred = [
+        i
+        for i in out["issues"]
+        if i.get("expected_rule") == "deferred_to_economic_stage"
+    ]
+    assert deferred
+
+
+def test_fill_gate_tarifa_mensual_formats_bloquea_sin_deferral(tmp_path, monkeypatch):
+    """Con ADMIN_ECONOMIC_DEFERRAL=false, placeholder de tarifa sí bloquea formats."""
+    monkeypatch.setattr(app_settings, "DOCUMENT_FILL_QUALITY_GATE_MODE", "enforce")
+    monkeypatch.setattr(app_settings, "ADMIN_ECONOMIC_DEFERRAL", False)
+    f = tmp_path / "anexo_d_iii.docx"
+    _make_docx(f, ["Tarifa mensual para horario: _______________"])
+    out = validate_generated_documents_fill(
+        stage="formats",
+        generated_documents=[{"ruta": str(f)}],
+        master_profile={"razon_social": "ACME", "rfc": "ACM010101AAA", "representante_legal": "Ana"},
+    )
+    assert out["validation_passed"] is False
+    assert out["blocking_count"] >= 1

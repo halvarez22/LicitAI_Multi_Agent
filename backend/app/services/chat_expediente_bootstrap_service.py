@@ -184,23 +184,36 @@ def _iter_inventory_items(state: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
             yield item
 
 
-def _company_label_from_state(state: Dict[str, Any]) -> str:
-    mp = state.get("master_profile")
-    if isinstance(mp, dict):
-        name = str(mp.get("razon_social") or mp.get("nombre") or "").strip()
-        if name:
-            return name
-    cid = str(state.get("company_id") or "").strip()
-    return cid
+def _company_label_from_state(
+    state: Dict[str, Any],
+    *,
+    company_label_override: Optional[str] = None,
+    company_profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    override = str(company_label_override or "").strip()
+    if override:
+        return override
+    from app.services.company_context_resolver import resolve_company_label_from_state
+
+    return resolve_company_label_from_state(state, company_profile=company_profile)
 
 
-def collect_expediente_bootstrap_facts(state: Dict[str, Any]) -> ExpedienteBootstrapFacts:
+def collect_expediente_bootstrap_facts(
+    state: Dict[str, Any],
+    *,
+    company_label_override: Optional[str] = None,
+    company_profile: Optional[Dict[str, Any]] = None,
+) -> ExpedienteBootstrapFacts:
     """
     Clasifica ítems del expediente en «recabar tú» vs «generar app» desde estado canónico.
     """
     facts = ExpedienteBootstrapFacts(
         session_name=str(state.get("name") or "esta licitación").strip() or "esta licitación",
-        company_label=_company_label_from_state(state),
+        company_label=_company_label_from_state(
+            state,
+            company_label_override=company_label_override,
+            company_profile=company_profile,
+        ),
     )
     user_seen: Set[str] = set()
     gen_seen: Set[str] = set()
@@ -271,13 +284,22 @@ def build_expediente_detail_line(facts: ExpedienteBootstrapFacts) -> str:
     return detail
 
 
-def build_expediente_plan_bootstrap(state: Dict[str, Any]) -> str:
+def build_expediente_plan_bootstrap(
+    state: Dict[str, Any],
+    *,
+    company_label_override: Optional[str] = None,
+    company_profile: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Mensaje Gate 5 universal post-análisis (cualquier tipo de licitación).
     """
     from app.services.chat_gate5_formatter import format_gate5_message
 
-    facts = collect_expediente_bootstrap_facts(state)
+    facts = collect_expediente_bootstrap_facts(
+        state,
+        company_label_override=company_label_override,
+        company_profile=company_profile,
+    )
     status = f"Plan de expediente listo para **{facts.session_name}**."
     detail = build_expediente_detail_line(facts)
     cta = (

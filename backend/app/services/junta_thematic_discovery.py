@@ -14,10 +14,12 @@ from app.contracts.junta_aclaraciones_questions import (
 )
 from app.services.junta_bases_corpus import (
     BasesCorpus,
+    find_certification_cluster_citation,
     find_cross_jurisdiction_template_hints,
     find_experience_year_conflict,
     find_placeholder_brackets,
     find_unresolved_attachment_reference,
+    text_has_certification_cluster,
 )
 
 
@@ -132,32 +134,68 @@ def discover_thematic_questions(corpus: BasesCorpus) -> List[Dict[str, Any]]:
     if _corpus_mentions_certification_cluster(corpus) and not any(
         q.get("source_ref") == "thematic_certification_scope" for q in out
     ):
-        out.append(
-            {
-                "pregunta": (
-                    "Con respecto a los requisitos de certificación, pruebas de laboratorio acreditado "
-                    "y constancias (NOM, eficiencia energética u otras citadas en bases), "
-                    "¿deben acreditarse por cada modelo o lote ofertado, por partida, "
-                    "o basta una constancia por fabricante para todo el suministro?"
-                ),
-                "motivo": "Cluster de certificaciones técnicas en bases sin alcance explícito por unidad.",
-                "source_ref": "thematic_certification_scope",
-                "tipo": JuntaQuestionTipo.TECNICA,
-                "prioridad": JuntaQuestionPrioridad.ALTA,
-                "provenance_ui": {
-                    "source": "thematic_bases",
-                    "pattern": "certification_cluster",
-                    "citation_quality": "solo_documento",
-                },
-            }
-        )
+        cite = find_certification_cluster_citation(corpus)
+        pregunta = _build_certification_scope_question(cite)
+        prov: Dict[str, Any] = {
+            "source": "thematic_bases",
+            "pattern": "certification_cluster",
+            "citation_quality": "solo_documento",
+        }
+        if cite:
+            if cite.get("pagina"):
+                prov["citation_quality"] = "cita_completa"
+            prov["bases_pagina"] = cite.get("pagina")
+            prov["bases_archivo"] = cite.get("archivo")
+            if cite.get("snippet"):
+                prov["bases_snippet"] = cite.get("snippet")
+        item: Dict[str, Any] = {
+            "pregunta": pregunta,
+            "motivo": "Cluster de certificaciones técnicas en bases sin alcance explícito por unidad.",
+            "source_ref": "thematic_certification_scope",
+            "tipo": JuntaQuestionTipo.TECNICA,
+            "prioridad": JuntaQuestionPrioridad.ALTA,
+            "provenance_ui": prov,
+        }
+        if cite:
+            if cite.get("archivo"):
+                item["archivo_fuente"] = cite["archivo"]
+            if cite.get("pagina"):
+                item["pagina"] = cite["pagina"]
+            if cite.get("snippet"):
+                item["referencia_bases"] = str(cite["snippet"])[:500]
+        out.append(item)
 
     return out
 
 
+def _build_certification_scope_question(cite: Optional[Dict[str, Any]]) -> str:
+    """Redacta pregunta de alcance de certificaciones con cita verificable en bases."""
+    cierre = (
+        "¿deben acreditarse por cada modelo o lote ofertado, por partida, "
+        "o basta una constancia por fabricante para todo el suministro?"
+    )
+    tema = (
+        "requisitos de certificación, pruebas de laboratorio acreditado "
+        "y constancias (NOM, eficiencia energética u otras citadas en bases)"
+    )
+    if not cite:
+        return f"Con respecto a los {tema}, {cierre}"
+
+    pag = str(cite.get("pagina") or "").strip()
+    archivo = str(cite.get("archivo") or "").strip()
+    if pag:
+        doc_ref = f" (documento «{archivo}»)" if archivo else ""
+        return (
+            f"Con respecto a la página {pag} de las bases de la convocatoria{doc_ref}, "
+            f"donde se establecen {tema}, {cierre}"
+        )
+    if archivo:
+        return (
+            f"Con respecto al documento «{archivo}» de las bases de la convocatoria, "
+            f"donde se establecen {tema}, {cierre}"
+        )
+    return f"Con respecto a los {tema}, {cierre}"
+
+
 def _corpus_mentions_certification_cluster(corpus: BasesCorpus) -> bool:
-    blob = corpus.combined_norm
-    has_norm = "nom-" in blob or "nmx-" in blob
-    has_lab = "laboratorio" in blob and "acredit" in blob
-    has_energy = "fide" in blob or "paese" in blob or "ener" in blob
-    return has_norm and (has_lab or has_energy)
+    return text_has_certification_cluster(corpus.combined)

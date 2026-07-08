@@ -1,0 +1,74 @@
+{
+  "policy_version": "expediente-readiness-v1.0.0",
+  "description": "HRU — reglas deterministas de readiness (captura, generación, entrega). Sin hardcode por licitación.",
+  "schema_version": "expediente_readiness_v1",
+  "economic_pending_types": [
+    "economic_price",
+    "economic_price_matrix",
+    "economic_validation_blocking"
+  ],
+  "legacy_fsr_input_keys": [
+    "sar",
+    "imss",
+    "infonavit",
+    "aguinaldo_dias",
+    "dias_laborados",
+    "prima_vacacional",
+    "dias_no_laborados",
+    "chat_override_subtotal_propuesta"
+  ],
+  "fsr_vertical_markers": [
+    "obra",
+    "fsr",
+    "factor_salario_real"
+  ],
+  "analysis_task": "stage_completed:analysis",
+  "generation_jobs": {
+    "technical": {
+      "requires_analysis": true,
+      "blocked_by_quality_gate": true
+    },
+    "formats": {
+      "requires_jobs_done": ["technical"],
+      "blocked_by_quality_gate": true
+    },
+    "economic_writer": {
+      "requires_capture_ready": true,
+      "requires_binding_valid": true,
+      "requires_snapshot_complete": true
+    },
+    "packager": {
+      "requires_jobs_done": ["formats", "economic_writer"]
+    }
+  },
+  "delivery_scopes": {
+    "technical": {
+      "writer_job": "technical",
+      "output_subdirs": ["1.propuesta tecnica", "1.propuesta_tecnica"]
+    },
+    "admin": {
+      "writer_job": "formats",
+      "output_subdirs": ["3.documentos administrativos"]
+    },
+    "economic": {
+      "writer_job": "economic_writer",
+      "output_subdirs": ["2.propuesta_economica", "2.propuesta economica"]
+    }
+  },
+  "fingerprint": {
+    "sidecar_filename": "_LICITAI_FINGERPRINT.json",
+    "hash_truncated_hex_len": 16
+  },
+  "error_type_precedence": [
+    "COMPANY_BINDING_INVALID",
+    "COMPANY_ORPHAN_ID",
+    "ECONOMIC_CROSS_TENDER_INPUTS",
+    "ECONOMIC_PRICE_SOURCE_PENDING",
+    "ECONOMIC_MOTOR_HITL_PENDING",
+    "ECONOMIC_CAPTURE_INCOMPLETE",
+    "ARTIFACT_FINGERPRINT_MISMATCH",
+    "ARTIFACT_RFC_CONTAMINATION",
+    "GENERATION_JOB_BLOCKED",
+    "GENERATION_NOT_RUN"
+  ]
+}

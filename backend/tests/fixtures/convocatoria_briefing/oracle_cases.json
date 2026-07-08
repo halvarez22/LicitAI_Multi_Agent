@@ -1,0 +1,78 @@
+[
+  {
+    "case_id": "SERVICIOS_VIGILANCIA_ECONOMIC_FIRST",
+    "session_state": {
+      "name": "Vigilancia hospitalaria 2024",
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "session_line_items": [
+        {"concepto_raw": "Control de Pases", "extra": {"location_label": "Control de Pases"}}
+      ],
+      "economic_user_inputs": {},
+      "compliance_master_list": {
+        "administrativo": [{"nombre": "Opinión de cumplimiento SAT", "tipo_accion": "presentar_fisico"}],
+        "tecnico": [{"nombre": "Propuesta técnica describiendo especificaciones", "tipo_accion": "generar"}],
+        "economico": [{"nombre": "Integración del precio unitario", "tipo_accion": "generar"}]
+      },
+      "document_candidates_consolidated": {
+        "sobre_1_tecnico": [{"nombre_canonico": "Anexo metodología", "tipo_accion_final": "generar"}],
+        "sobre_2_economico": [{"nombre_canonico": "Resumen cotización", "tipo_accion_final": "generar"}]
+      },
+      "technical_post_analysis_hook_pending": true
+    },
+    "expect_first_track": "economic",
+    "expect_blocks_min": 3,
+    "expect_opening_contains": ["cotización", "convocante"],
+    "forbid_opening_contains": ["price_source", "Propuesta técnica —"]
+  },
+  {
+    "case_id": "OBRA_BARDA_TECHNICAL_OR_ADMIN",
+    "session_state": {
+      "name": "BARDA PRIMARIA LOPEZ RAYON",
+      "triage_context": {"tender_category": "OBRA"},
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "compliance_master_list": {
+        "formatos": [{"nombre": "Anexo T-2 contratos vigentes de obra", "tipo_accion": "generar"}],
+        "tecnico": [{"nombre": "Documentación de experiencia", "tipo_accion_final": "presentar_fisico"}]
+      },
+      "document_candidates_consolidated": {
+        "sobre_1_tecnico": [{"nombre_canonico": "Anexo T-3 Modelo de contrato", "tipo_accion_final": "generar"}]
+      },
+      "technical_post_analysis_hook_pending": true,
+      "economic_user_inputs": {}
+    },
+    "expect_first_track": "technical",
+    "expect_blocks_min": 2,
+    "expect_opening_contains": ["convocante"],
+    "forbid_opening_contains": []
+  },
+  {
+    "case_id": "SERVICIOS_SPARSE_CONFIDENCE",
+    "session_state": {
+      "name": "Servicio genérico",
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "compliance_master_list": {}
+    },
+    "expect_first_track": "economic",
+    "expect_blocks_min": 3,
+    "expect_confidence": "baja",
+    "expect_opening_contains": ["organizando", "convocante"],
+    "forbid_opening_contains": []
+  },
+  {
+    "case_id": "ADMIN_DOCUMENTS_ONLY",
+    "session_state": {
+      "name": "Suministro equipos",
+      "tasks_completed": [{"task": "stage_completed:analysis"}],
+      "compliance_master_list": {
+        "administrativo": [
+          {"nombre": "Acta constitutiva", "tipo_accion_final": "presentar_fisico"},
+          {"nombre": "Opinión SAT", "tipo_accion_final": "presentar_fisico"}
+        ]
+      }
+    },
+    "expect_first_track": "administrative",
+    "expect_blocks_min": 1,
+    "expect_opening_contains": ["convocante", "documentos detectados"],
+    "forbid_opening_contains": []
+  }
+]

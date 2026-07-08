@@ -24,7 +24,8 @@ from app.services.chat_user_intent import (
         ("generar", UserChatIntent.DESAMBIGUAR_GENERAR),
         ("adelante", UserChatIntent.DESAMBIGUAR_GENERAR),
         ("listo", UserChatIntent.DESAMBIGUAR_GENERAR),
-        ("generar propuesta económica", UserChatIntent.COTIZAR),
+        ("generar propuesta económica", UserChatIntent.GENERAR_ECONOMICA),
+        ("generar propuesta técnica", UserChatIntent.GENERAR_TECNICA),
         ("generar documentos", UserChatIntent.GENERAR_EXPEDIENTE),
         ("generar expediente", UserChatIntent.GENERAR_EXPEDIENTE),
         ("cómo vamos", UserChatIntent.VER_ESTADO),
@@ -60,7 +61,7 @@ def test_explicit_gen_command_skips_disambiguation():
         "generar propuesta",
         is_explicit_gen_command=True,
     )
-    assert got.intent == UserChatIntent.COTIZAR
+    assert got.intent == UserChatIntent.GENERAR_ECONOMICA
 
 
 def test_sanitize_removes_internal_codes():

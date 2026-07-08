@@ -1,0 +1,25 @@
+{
+  "policy_version": "document-fill-deferral-v1.0.0",
+  "description": "HRU: en etapa administrativa (formats), hallazgos de precios/tarifas pasan a warning y se completan en propuesta económica. Sin mapas por licitación.",
+  "admin_economic_deferral": {
+    "enabled": true,
+    "stages": ["formats"],
+    "severity_when_deferred": "warn",
+    "expected_rule": "deferred_to_economic_stage",
+    "field_keys": [
+      "tarifa_mensual",
+      "price_fill",
+      "subtotal",
+      "iva",
+      "total",
+      "economic_totals"
+    ],
+    "placeholder_text_patterns": [
+      "(?i)(tarifa\\s+mensual|precio\\s+unitario|integraci[oó]n\\s+del\\s+costo|importe\\s+mensual|costo\\s+mensual|tarifa\\s+para\\s+horario|tabla\\s+de\\s+precios|an[aá]lisis\\s+de\\s+precios|precios\\s+unitarios)"
+    ],
+    "filename_patterns": [
+      "(?i)precios[_\\s]?unitarios|analisis[_\\s]?precios|anexo[_\\s]?9|cotizaci[oó]n|resumen.*subtotal|calculo[_\\s]?costos|costos[_\\s]?directos|integracion[_\\s]?costo"
+    ],
+    "defer_standalone_ellipsis": true
+  }
+}

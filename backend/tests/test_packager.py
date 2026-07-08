@@ -31,6 +31,15 @@ def _profile_from_fixture() -> dict:
     return raw.get("master_profile") or {}
 
 
+@pytest.fixture(autouse=True)
+def _disable_contamination_at_pack_for_unit_tests(monkeypatch):
+    """Los tests de empaquetado usan bytes mínimos, no Office válidos."""
+    monkeypatch.setattr(
+        "app.services.document_contamination_gate.contamination_enforce_at_pack",
+        lambda: False,
+    )
+
+
 def test_packager_ok_con_estructura_sobres(tmp_path: Path) -> None:
     profile = _profile_from_fixture()
     rfc = str(profile.get("rfc") or "RFC_FIXTURE")
@@ -64,6 +73,43 @@ def test_packager_ok_con_estructura_sobres(tmp_path: Path) -> None:
     assert pr.manifest_path and Path(pr.manifest_path).is_file()
     assert len(pr.files) == 1
     assert pr.files[0]["sha256"] and pr.files[0]["bytes"] > 0
+    assert pr.coverage_status == "partial"
+    assert "SobreComplementaria" in (pr.sobres_present or [])
+    assert len(pr.sobres_missing or []) >= 1
+
+
+def test_packager_partial_single_sobre_by_default(tmp_path: Path) -> None:
+    """F3.3: un solo sobre → manifiesto parcial si PACKAGING_REQUIRE_ALL_SOBRES=false."""
+    profile = _profile_from_fixture()
+    rfc = str(profile.get("rfc") or "RFC_FIXTURE")
+    lic = "partial-sobre-test"
+    root = tmp_path / lic
+    sobre = root / "SOBRE_3_ECONOMICO"
+    sobre.mkdir(parents=True)
+    doc = sobre / "01_economico.xlsx"
+    doc.write_bytes(b"xlsx-partial")
+
+    estructura = {
+        "sobre_3": {
+            "titulo": "SOBRE 3",
+            "carpeta": str(sobre),
+            "documentos": [{"orden": 1, "nombre": "Anexo económico", "archivo": "01_economico.xlsx"}],
+            "total_documentos": 1,
+        }
+    }
+    pr = CompraNetPackager().pack(
+        {
+            "output_root": str(root),
+            "rfc": rfc,
+            "licitacion_id": lic,
+            "estructura_sobres": estructura,
+        }
+    )
+    assert pr.success
+    assert pr.coverage_status == "partial"
+    assert "SobreEconomica" in (pr.sobres_present or [])
+    manifest = json.loads(Path(pr.manifest_path).read_text(encoding="utf-8"))
+    assert manifest.get("coverage_status") == "partial"
 
 
 def test_packager_usa_nombre_convocante_si_disponible(

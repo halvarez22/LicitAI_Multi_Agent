@@ -26,7 +26,7 @@ _OCR_PROMPT_NOISE_RE = re.compile(
     r"extrae todo el texto|prohibido resumir"
 )
 
-_PAGE_SPLIT_RE = re.compile(r"---\s*PÁGINA\s+(\d+)\s*---", re.I)
+_PAGE_SPLIT_RE = re.compile(r"---\s*PÁGINA\s+(\d+)(?:\s*\([^)]*\))?\s*---", re.I)
 
 _MUNICIPIO_DE_RE = re.compile(r"(?i)\bmunicipio\s+de\s+([^\n,;]{3,45})")
 _ESTADO_DE_RE = re.compile(r"(?i)\bestado\s+de\s+([^\n,;]{3,30})")
@@ -141,7 +141,7 @@ def _extract_document_text(doc: Dict[str, Any]) -> Tuple[str, str]:
     filename = str(content.get("filename") or doc.get("filename") or doc.get("name") or "")
     text = str(content.get("extracted_text") or content.get("text") or doc.get("text") or "")
     if _OCR_PROMPT_NOISE_RE.search(text[:500]) and len(text) > 2000:
-        chunks = re.split(r"---\s*PÁGINA\s+\d+\s*---", text, flags=re.I)
+        chunks = re.split(r"---\s*PÁGINA\s+\d+(?:\s*\([^)]*\))?\s*---", text, flags=re.I)
         cleaned = [
             c.strip()
             for c in chunks
@@ -197,6 +197,81 @@ def build_bases_corpus(
             filenames.append(filename)
 
     return BasesCorpus(session_id=session_id, segments=segments, filenames=filenames)
+
+
+def resolve_primary_bases_filename(filenames: Sequence[str]) -> Optional[str]:
+    """
+    Prioriza PDF de bases sobre convocatoria/catálogo al anclar requisitos (HRU, sin licitación fija).
+    """
+    names = [str(n).strip() for n in filenames if str(n or "").strip()]
+    if not names:
+        return None
+
+    def _rank(name: str) -> tuple[int, str]:
+        sl = name.lower()
+        if "bases" in sl and "convocatoria" not in sl:
+            return (0, name)
+        if "bases" in sl:
+            return (1, name)
+        if "convocatoria" in sl:
+            return (2, name)
+        if "licitacion" in sl or "licitación" in sl:
+            return (3, name)
+        if sl.endswith(".pdf"):
+            return (4, name)
+        return (9, name)
+
+    return sorted(names, key=_rank)[0]
+
+
+def _filename_matches_primary(candidate: str, primary: str) -> bool:
+    ref = _norm_text(primary)
+    nfn = _norm_text(candidate)
+    if not ref or not nfn:
+        return False
+    if ref in nfn or nfn in ref:
+        return True
+    return primary.replace(".pdf", "").lower() in candidate.lower()
+
+
+def primary_bases_segments(corpus: BasesCorpus) -> List[Tuple[str, str]]:
+    """
+    Segmentos del documento primario de convocatoria (excluye PDFs ajenos indexados en sesión).
+    """
+    if not corpus.segments:
+        return []
+    filenames = corpus.filenames or [fn for fn, _ in corpus.segments]
+    primary = resolve_primary_bases_filename(filenames)
+    if primary:
+        matched = [
+            (fn, text)
+            for fn, text in corpus.segments
+            if _filename_matches_primary(fn, primary)
+        ]
+        if matched:
+            return matched
+    keyword_segments = [
+        (fn, text)
+        for fn, text in corpus.segments
+        if re.search(r"(?i)\b(bases|convocatoria|pliego|licitaci[oó]n)\b", fn)
+    ]
+    if keyword_segments:
+        best = resolve_primary_bases_filename([fn for fn, _ in keyword_segments])
+        if best:
+            matched = [
+                (fn, text)
+                for fn, text in keyword_segments
+                if _filename_matches_primary(fn, best)
+            ]
+            if matched:
+                return matched
+        return keyword_segments
+    return [corpus.segments[0]]
+
+
+def primary_bases_combined(corpus: BasesCorpus) -> str:
+    """Texto del documento primario de bases (no corpus mezclado de anexos ajenos)."""
+    return "\n".join(t for _, t in primary_bases_segments(corpus) if t)
 
 
 def session_has_filename(corpus: BasesCorpus, archivo: str) -> bool:
@@ -330,18 +405,53 @@ def find_experience_year_conflict(corpus: BasesCorpus) -> Optional[Tuple[str, st
     snippets: List[Tuple[str, str]] = []
     for m in re.finditer(r".{0,90}experiencia.{0,90}", combined, re.I | re.S):
         chunk = re.sub(r"\s+", " ", m.group(0))
-        ym = year_pat.search(chunk)
-        if not ym:
+        if not _is_valid_experience_conflict_snippet(chunk):
             continue
-        years = ym.group(1)
-        if any(years == y for _, y in snippets):
-            continue
-        snippets.append((chunk[:180], years))
+        chunk_years: List[str] = []
+        for ym in year_pat.finditer(chunk):
+            years = ym.group(1)
+            if years in chunk_years:
+                continue
+            chunk_years.append(years)
+            if any(years == y for _, y in snippets):
+                continue
+            snippets.append((chunk[:180], years))
+            if len(snippets) >= 2:
+                break
         if len(snippets) >= 2:
             break
     if len(snippets) >= 2 and snippets[0][1] != snippets[1][1]:
         return snippets[0][0], snippets[1][0], f"{snippets[0][1]} vs {snippets[1][1]}"
     return None
+
+
+def _is_valid_experience_conflict_snippet(chunk: str) -> bool:
+    """Descarta ruido OCR o legal ajeno que no describe plazos de experiencia."""
+    text = re.sub(r"\s+", " ", str(chunk or "").strip())
+    low = text.lower()
+    if len(text) < 28:
+        return False
+    if "experiencia" not in low:
+        return False
+    if re.search(r"(?i)constituci[oó]n\s+federal|art[ií]culo\s+16", low):
+        if not re.search(r"\d{1,2}\s*a(?:ñ|n)os", low):
+            return False
+    alpha = re.sub(r"[^a-záéíóúñ]", "", low)
+    if len(alpha) < 22:
+        return False
+    return True
+
+
+def junta_primary_corpus(corpus: BasesCorpus) -> BasesCorpus:
+    """Corpus de junta anclado al documento primario de bases (anti-contaminación cross-PDF)."""
+    segs = primary_bases_segments(corpus)
+    if segs and len(segs) < len(corpus.segments):
+        return BasesCorpus(
+            session_id=corpus.session_id,
+            segments=segs,
+            filenames=[fn for fn, _ in segs],
+        )
+    return corpus
 
 
 def find_unresolved_attachment_reference(corpus: BasesCorpus) -> Optional[str]:
@@ -369,6 +479,115 @@ def find_placeholder_brackets(corpus: BasesCorpus) -> List[str]:
         if len(found) >= 3:
             break
     return found
+
+
+def text_has_certification_cluster(text: str) -> bool:
+    """True si el fragmento menciona NOM/NMX junto con laboratorio acreditado o eficiencia energética."""
+    blob = _norm_text(text)
+    has_norm = "nom-" in blob or "nmx-" in blob
+    has_lab = "laboratorio" in blob and "acredit" in blob
+    has_energy = "fide" in blob or "paese" in blob or "ener" in blob
+    return has_norm and (has_lab or has_energy)
+
+
+def _extract_certification_snippet(page_text: str) -> str:
+    """Primera línea legible con referencia NOM/NMX en la página."""
+    fallback = ""
+    for line in page_text.splitlines():
+        ln = line.strip()
+        if len(ln) < 8:
+            continue
+        low = _norm_text(ln)
+        if "nom-" not in low and "nmx-" not in low:
+            continue
+        if "laboratorio" in low or "acredit" in low:
+            return ln[:200]
+        if not fallback:
+            fallback = ln[:200]
+    return fallback
+
+
+def _resolve_page_from_vector_index(
+    session_id: str,
+    source: str,
+    snippet: str,
+) -> Optional[str]:
+    """Resuelve número de página desde Chroma cuando el texto plano no trae marcadores."""
+    sid = str(session_id or "").strip()
+    src = str(source or "").strip()
+    snip = str(snippet or "").strip()
+    if not sid or not snip:
+        return None
+    nom_m = re.search(r"(?i)nom-\d{3}-[\w-]+|nmx-[\w-]+", snip)
+    needle = nom_m.group(0) if nom_m else snip[:48]
+    needle_norm = _norm_text(needle)
+    if len(needle_norm) < 6:
+        return None
+    try:
+        from app.services.vector_service import VectorDbServiceClient
+
+        vdb = VectorDbServiceClient()
+        for doc, meta in vdb.scan_session_chunks(sid, source_filter=src or None):
+            if needle_norm in _norm_text(str(doc or "")):
+                pg = meta.get("page") if isinstance(meta, dict) else None
+                if pg not in (None, ""):
+                    return str(pg)
+        if src:
+            full = vdb.get_full_document_text(sid, src)
+            idx = _norm_text(full).find(needle_norm)
+            if idx >= 0:
+                before = full[:idx]
+                pages = _PAGE_SPLIT_RE.findall(before)
+                if pages:
+                    return str(pages[-1])
+    except Exception:
+        return None
+    return None
+
+
+def find_certification_cluster_citation(corpus: BasesCorpus) -> Optional[Dict[str, Any]]:
+    """
+    Localiza archivo, página y fragmento donde aparece el cluster de certificaciones en bases.
+
+    Returns dict con ``archivo``, ``pagina`` (str o None) y ``snippet``.
+    """
+    cite: Optional[Dict[str, Any]] = None
+    for filename, text in corpus.segments:
+        parts = _PAGE_SPLIT_RE.split(text)
+        if len(parts) <= 1:
+            if text_has_certification_cluster(text):
+                cite = {
+                    "archivo": filename,
+                    "pagina": None,
+                    "snippet": _extract_certification_snippet(text) or text.strip()[:180],
+                }
+                break
+            continue
+        for i in range(1, len(parts), 2):
+            try:
+                page_num = int(parts[i])
+            except (ValueError, IndexError):
+                continue
+            page_body = parts[i + 1] if i + 1 < len(parts) else ""
+            if not text_has_certification_cluster(page_body):
+                continue
+            cite = {
+                "archivo": filename,
+                "pagina": str(page_num),
+                "snippet": _extract_certification_snippet(page_body) or page_body.strip()[:180],
+            }
+            break
+        if cite:
+            break
+    if cite and not cite.get("pagina") and corpus.session_id:
+        pg = _resolve_page_from_vector_index(
+            corpus.session_id,
+            str(cite.get("archivo") or ""),
+            str(cite.get("snippet") or ""),
+        )
+        if pg:
+            cite["pagina"] = pg
+    return cite
 
 
 def corpus_page_text(corpus: BasesCorpus, page_num: int) -> str:

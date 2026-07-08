@@ -1,0 +1,74 @@
+{
+  "policy_version": "expediente-mission-v1.2.0",
+  "description": "HRU: prioridad de misión conversacional (cotizar → técnica → plan documental). Sin mapas por convocante.",
+  "briefing_driven": true,
+  "mission_track_order": [
+    "service_dual_opening",
+    "economic_capture",
+    "technical_capture",
+    "quality_classification",
+    "ready_generate"
+  ],
+  "economic_first": {
+    "require_work_context_for_weak_signals": true,
+    "strong_session_name_keywords": [
+      "vigilancia",
+      "seguridad",
+      "custodia"
+    ],
+    "session_name_keywords": [
+      "limpieza",
+      "servicio",
+      "mantenimiento",
+      "aseo",
+      "jardineria",
+      "jardinería"
+    ],
+    "service_hint_rules": [
+      {
+        "name_keywords": ["vigilancia", "seguridad", "custodia"],
+        "hint": "vigilancia / seguridad"
+      },
+      {
+        "name_keywords": ["limpieza", "aseo"],
+        "hint": "servicios de limpieza"
+      },
+      {
+        "name_keywords": ["mantenimiento", "jardineria", "jardinería"],
+        "hint": "servicios de mantenimiento"
+      }
+    ],
+    "default_service_hint": "los servicios licitados",
+    "tender_categories": ["SERVICIOS", "SERVICIO", "BIENES"],
+    "compliance_economic_category": "economico"
+  },
+  "work_context_signals": [
+    "stage_completed:analysis",
+    "compliance_master_list",
+    "document_inventory",
+    "technical_post_analysis_hook_pending",
+    "economic_post_analysis_hook_pending",
+    "capture_matrix_blocks",
+    "session_line_items"
+  ],
+  "technical_slot_exclusions": {
+    "label_regex": [
+      "(?i)^propuesta\\s+t[eé]cnica\\b",
+      "(?i)\\bdescribiendo\\s+especificaciones",
+      "(?i)^oferta\\s+t[eé]cnica\\b",
+      "(?i)^documento\\s+t[eé]cnico\\b",
+      "(?i)^memoria\\s+t[eé]cnica\\b",
+      "(?i)^descripci[oó]n\\s+t[eé]cnica\\b"
+    ],
+    "use_baseline_when_only_excluded": true
+  },
+  "technical_label_humanize": {
+    "methodology": "cómo ejecutarás el servicio (metodología)",
+    "workforce": "personal mínimo por turno",
+    "equipment": "equipos y herramientas",
+    "schedule": "cronograma de ejecución",
+    "quality_plan": "plan de calidad",
+    "free_text_annex": "detalle técnico del anexo",
+    "admin_format": "dato del formato administrativo"
+  }
+}

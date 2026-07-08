@@ -10,6 +10,14 @@ class ProcessBasesRequest(BaseModel):
     company_id: Optional[str] = Field(None, description="ID de la empresa participante")
     company_data: Dict[str, Any] = Field(default_factory=dict, description="Metadatos de la empresa")
     resume_generation: bool = Field(False, description="Si es True, continúa desde el último checkpoint de generación.")
+    generation_mode: Optional[str] = Field(
+        None,
+        description="Modo desacoplado F2: technical | economic | full (default full). También aceptable en company_data.",
+    )
+    generation_stream: Optional[str] = Field(
+        None,
+        description="Stream F6 (ADR-001): technical | economic | full. Default derivado de generation_mode.",
+    )
 
 class ChatbotRequest(BaseModel):
     session_id: str

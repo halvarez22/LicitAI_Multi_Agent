@@ -282,9 +282,10 @@ async def build_formats_panel_consolidated(
         filter_consolidated_document_candidates,
         is_corporate_physical_credential_for_panel,
         is_formats_panel_noise,
-        pliego_format_anchor_in_corpus,
+        passes_formats_panel_bases_gate,
     )
-    from app.services.junta_bases_corpus import build_bases_corpus, extract_template_codes
+    from app.services.formats_panel_hru_service import repair_phantom_anexo_label
+    from app.services.junta_bases_corpus import build_bases_corpus, primary_bases_combined
     from app.services.pliego_formats_enrichment_service import (
         extract_pliego_generables_from_bases_corpus,
         pliego_format_dedupe_key,
@@ -315,14 +316,14 @@ async def build_formats_panel_consolidated(
         "otros_requisitos_criticos": [],
     }
     seen: set[str] = set()
-    corpus_text = ""
+    excluded_contamination = 0
 
     try:
         docs = await memory.get_documents(session_id)
     except Exception:
         docs = state.get("_junta_session_documents") or []
     corpus = build_bases_corpus(session_id, docs, session_state=state)
-    corpus_text = str(getattr(corpus, "combined", "") or "")
+    primary_text = primary_bases_combined(corpus)
 
     def _append(
         item: Dict[str, Any],
@@ -330,20 +331,22 @@ async def build_formats_panel_consolidated(
         *,
         require_corpus_anchor: bool = False,
     ) -> None:
+        nonlocal excluded_contamination
         nombre = str(item.get("nombre_canonico") or item.get("nombre") or "")
+        snippet = str(item.get("snippet_representativo") or item.get("snippet") or "")
+        nombre = repair_phantom_anexo_label(nombre, snippet, primary_text)
         snippet = str(item.get("snippet_representativo") or item.get("snippet") or "")
         if is_corporate_physical_credential_for_panel(nombre, "", snippet):
             return
         if is_formats_panel_noise(nombre, "", snippet):
+            excluded_contamination += 1
             return
-        if require_corpus_anchor and corpus_text.strip():
-            if not (
-                item.get("from_document_inventory")
-                or extract_template_codes(nombre)
-                or pliego_format_anchor_in_corpus(nombre, snippet, corpus_text)
-            ):
-                return
-        tipo = _formats_panel_tipo_for_item(item)
+        if not passes_formats_panel_bases_gate(
+            nombre, snippet, corpus, session_hint=session_id
+        ):
+            excluded_contamination += 1
+            return
+        tipo = _formats_panel_tipo_for_item({**item, "nombre": nombre, "nombre_canonico": nombre})
         if tipo is None:
             return
         key = pliego_format_dedupe_key(nombre)
@@ -351,6 +354,8 @@ async def build_formats_panel_consolidated(
             return
         seen.add(key)
         row = dict(item)
+        row["nombre_canonico"] = nombre
+        row["nombre"] = nombre
         row["tipo"] = tipo
         row["tipo_accion_final"] = tipo
         row["tipo_accion_propuesto"] = tipo
@@ -387,10 +392,12 @@ async def build_formats_panel_consolidated(
     )
     from app.services.formats_panel_hru_service import normalize_formats_panel_payload
 
-    filtered = normalize_formats_panel_payload(filtered)
+    filtered = normalize_formats_panel_payload(filtered, primary_text=primary_text)
     meta = filtered.get("_meta") if isinstance(filtered.get("_meta"), dict) else {}
     meta["filtered_pliego_formats_only"] = True
     meta["excluded_corporate_physical"] = True
+    meta["excluded_contamination"] = excluded_contamination
+    meta["contamination_gate_enabled"] = True
     filtered["_meta"] = meta
     return filtered
 
@@ -410,10 +417,10 @@ async def build_corporate_physical_panel_list(
         extract_corporate_physical_from_session_documents,
     )
     from app.services.document_deliverable_filter import (
-        corporate_physical_anchor_in_corpus,
         filter_corporate_physical_consolidated,
         filter_corporate_physical_from_compliance_list,
         is_corporate_physical_credential_for_panel,
+        passes_corporate_physical_bases_gate,
         physical_credential_dedupe_key,
     )
     from app.services.junta_bases_corpus import build_bases_corpus
@@ -424,20 +431,22 @@ async def build_corporate_physical_panel_list(
 
     merged: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    corpus_text = ""
+    corpus: Any = None
+    excluded_contamination = 0
 
     try:
         docs_for_corpus = await memory.get_documents(session_id)
     except Exception:
         docs_for_corpus = state.get("_junta_session_documents") or []
     if docs_for_corpus:
-        corpus_text = build_bases_corpus(session_id, docs_for_corpus, session_state=state).combined or ""
+        corpus = build_bases_corpus(session_id, docs_for_corpus, session_state=state)
 
     def _add_rows(
         rows: List[Dict[str, Any]],
         *,
         require_corpus_anchor: bool = False,
     ) -> None:
+        nonlocal excluded_contamination
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -447,9 +456,13 @@ async def build_corporate_physical_panel_list(
                 name, "", snippet, "presentar_fisico"
             ):
                 continue
-            if require_corpus_anchor and not corporate_physical_anchor_in_corpus(
-                name, snippet, corpus_text
-            ):
+            if require_corpus_anchor and corpus is not None:
+                if not passes_corporate_physical_bases_gate(
+                    name, snippet, corpus, session_hint=session_id
+                ):
+                    excluded_contamination += 1
+                    continue
+            elif require_corpus_anchor and corpus is None:
                 continue
             key = physical_credential_dedupe_key(name)
             if key in seen:
@@ -462,7 +475,7 @@ async def build_corporate_physical_panel_list(
         extract_corporate_physical_from_session_documents(
             session_id, docs, session_state=state
         ),
-        require_corpus_anchor=False,
+        require_corpus_anchor=True,
     )
     if not merged and docs:
         _add_rows(
@@ -471,7 +484,7 @@ async def build_corporate_physical_panel_list(
                 session_state=state,
                 documents=docs,
             ),
-            require_corpus_anchor=False,
+            require_corpus_anchor=True,
         )
 
     cml = state.get("compliance_master_list")
@@ -510,6 +523,8 @@ async def build_corporate_physical_panel_list(
         "_meta": {
             "filtered_corporate_physical_only": True,
             "total": len(merged),
+            "excluded_contamination": excluded_contamination,
+            "contamination_gate_enabled": True,
         },
     }
 

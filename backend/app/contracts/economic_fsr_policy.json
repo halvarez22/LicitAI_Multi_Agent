@@ -1,0 +1,51 @@
+{
+  "policy_version": "economic-fsr-v1.0.0",
+  "description": "HRU universal: parámetros FSR (Factor de Salario Real) sin hardcode por convocante ni vertical. Fuente canónica para motor, chat e ingestión.",
+  "formula_id": "salario_real_v1_fsr",
+  "formula_version": "v1",
+  "required_param_keys": [
+    "imss",
+    "sar",
+    "infonavit",
+    "dias_no_laborados",
+    "dias_laborados",
+    "prima_vacacional",
+    "aguinaldo_dias"
+  ],
+  "param_labels": {
+    "imss": "cuota patronal IMSS (tasa)",
+    "sar": "SAR (tasa)",
+    "infonavit": "Infonavit (tasa)",
+    "dias_no_laborados": "días no laborados al año",
+    "dias_laborados": "días laborados al año",
+    "prima_vacacional": "prima vacacional (días o tasa según bases)",
+    "aguinaldo_dias": "días de aguinaldo"
+  },
+  "chat_capture_patterns": {
+    "imss": "imss|cuota\\s+patronal",
+    "sar": "sar",
+    "infonavit": "infonavit",
+    "dias_no_laborados": "dias?\\s+no\\s+laborados|festivos|inh[aá]biles|descansos?",
+    "dias_laborados": "dias?\\s+laborados|calendario",
+    "prima_vacacional": "prima\\s+vacacional",
+    "aguinaldo_dias": "aguinaldo|dias?\\s+de\\s+aguinaldo"
+  },
+  "ingest_concept_aliases": {
+    "imss": ["imss", "i.m.s.s", "cuota imss", "cuota patronal", "tasa imss"],
+    "sar": ["sar", "s.a.r", "retiro"],
+    "infonavit": ["infonavit"],
+    "dias_no_laborados": ["dias no laborados", "días no laborados", "festivos", "inhábiles"],
+    "dias_laborados": ["dias laborados", "días laborados", "calendario anual"],
+    "prima_vacacional": ["prima vacacional"],
+    "aguinaldo_dias": ["aguinaldo", "dias de aguinaldo", "días de aguinaldo"]
+  },
+  "optional_fallback_defaults": {
+    "sar": "0.02",
+    "infonavit": "0.05",
+    "prima_vacacional": "0.25",
+    "dias_laborados": "365",
+    "dias_no_laborados": "0"
+  },
+  "fallback_defaults_note": "Solo aplica cuando las bases no publican el parámetro y el usuario no lo capturó en chat. imss y aguinaldo_dias nunca se inventan.",
+  "reglas_blob_key_priority": ["otras_reglas_oferta_precio", "reglas_fsr", "factor_salario_real"]
+}

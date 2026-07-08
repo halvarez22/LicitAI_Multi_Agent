@@ -1,0 +1,148 @@
+{
+  "policy_version": "1.1.0",
+  "description": "Perfil HRU recomendado para piloto on-premise (F10). Sin referencias a convocante ni licitación.",
+  "pilot_profile": {
+    "ADMIN_ECONOMIC_DEFERRAL": true,
+    "DECOUPLED_GENERATION_ENABLED": true,
+    "DUAL_STREAM_ENABLED": true,
+    "ECONOMIC_CHAT_FIRST": true,
+    "ECONOMIC_POST_ANALYSIS_HOOK_ENABLED": true,
+    "ECONOMIC_CHAT_CALC_ON_CAPTURE": true,
+    "TECHNICAL_CHAT_FIRST": true,
+    "TECHNICAL_POST_ANALYSIS_HOOK_ENABLED": true,
+    "COPILOT_UNIFIED_STATUS": true,
+    "PACKAGING_REQUIRE_ALL_SOBRES": false,
+    "CONTEXTUAL_DOWNLOAD_ENABLED": true
+  },
+  "strict_production_overrides": {
+    "PACKAGING_REQUIRE_ALL_SOBRES": true,
+    "comment": "Activar tras sign-off legal del cliente si el portal exige ZIP completo"
+  },
+  "contract_dependencies": [
+    "document_fill_deferral_policy.json",
+    "generation_mode_policy.json",
+    "generation_concurrency_policy.json",
+    "economic_capture_policy.json",
+    "economic_canonical_v1.json",
+    "economic_calculation_policy.json",
+    "economic_fsr_policy.json",
+    "economic_fsr_ux_messages.json",
+    "chat_copilot_ux_messages.json",
+    "technical_capture_policy.json",
+    "technical_canonical_v1.json",
+    "document_quality_ux_messages.json",
+    "expediente_mission_policy.json",
+    "expediente_guided_policy.json",
+    "expediente_guided_ux_messages.json",
+    "convocatoria_briefing_policy.json",
+    "convocatoria_briefing_canonical_v1.json",
+    "convocatoria_briefing_ux_messages.json",
+    "evidence_anchor_v1.json",
+    "evidence_anchor_policy.json",
+    "pliego_pedagogico_ux_messages.json",
+    "operational_deduction_policy.json",
+    "operational_deduction_ux_messages.json",
+    "packaging_policy.json",
+    "delivery_scope_policy.json",
+    "expediente_readiness_policy.json",
+    "expediente_readiness_v1.json",
+    "expediente_readiness_ux_messages.json",
+    "company_binding_policy.json",
+    "artifact_integrity_policy.json"
+  ],
+  "smoke_scripts": [
+    "scripts/smoke_economic_chat_capture.py",
+    "scripts/smoke_technical_chat_capture.py",
+    "scripts/smoke_decoupled_generation.py",
+    "scripts/smoke_dual_stream_concurrency.py",
+    "scripts/smoke_isapeg_dual_copilot_e2e.py",
+    "scripts/smoke_pilot_onprem_hru.py",
+    "scripts/smoke_convocatoria_briefing_opening.py",
+    "scripts/smoke_evidence_anchor_f12.py",
+    "scripts/smoke_bases_anchor_excerpt_f12.py",
+    "scripts/smoke_expediente_guided_p0.py",
+    "scripts/smoke_expediente_readiness_integrity.py"
+  ],
+  "signoff_criteria": [
+    {
+      "id": "chat_only_quoting",
+      "label": "Cotización completada solo por chat en licitación de prueba"
+    },
+    {
+      "id": "economic_without_technical",
+      "label": "Propuesta económica generada sin propuesta técnica en la misma sesión"
+    },
+    {
+      "id": "technical_without_prices",
+      "label": "Propuesta técnica generada sin precios cerrados"
+    },
+    {
+      "id": "parallel_dual_stream",
+      "label": "Técnica y económica en colas paralelas sin pisar outputs del otro stream"
+    },
+    {
+      "id": "technical_chat_capture",
+      "label": "Metodología y personal capturados por chat con provenance_ui"
+    },
+    {
+      "id": "economic_totals_in_chat",
+      "label": "Totales económicos visibles tras captura (F8 cálculo en chat)"
+    },
+    {
+      "id": "dual_copilot_status",
+      "label": "Estado unificado técnica+económica consultable en chat"
+    },
+    {
+      "id": "partial_packaging_manifest",
+      "label": "Empaquetado parcial descargable con manifiesto claro"
+    },
+    {
+      "id": "price_provenance_visible",
+      "label": "Trazabilidad visible de precios (chat vs Excel)"
+    },
+    {
+      "id": "no_internal_codes_in_ux",
+      "label": "Cero mensajes con códigos internos (INCOMPLETE_*, MISSING_*)"
+    },
+    {
+      "id": "readiness_single_source",
+      "label": "Readiness canónico bloquea generación/descarga incoherente (CONTAM01)"
+    },
+    {
+      "id": "company_bind_invalidates_economic",
+      "label": "Cambio de empresa invalida artefactos económicos previos"
+    }
+  ],
+  "training_flows": [
+    {
+      "id": "flow_chat_economic",
+      "title": "Cotizar conversando (copiloto económico)",
+      "steps": [
+        "Analizar bases con empresa seleccionada",
+        "Responder precios en chat o pegar TSV",
+        "Verificar matriz, totales y provenance_ui",
+        "Generar económica cuando la cola lo permita"
+      ]
+    },
+    {
+      "id": "flow_technical_copilot",
+      "title": "Completar técnica conversando (copiloto técnico)",
+      "steps": [
+        "Tras análisis, leer slots pendientes (metodología, personal, etc.)",
+        "Capturar con prefijos: metodologia:, personal:",
+        "Consultar estado o dual: «cómo vamos técnica y económica»",
+        "Generar técnica cuando capture_complete"
+      ]
+    },
+    {
+      "id": "flow_parallel_dual",
+      "title": "Streams paralelos técnica + económica (F6)",
+      "steps": [
+        "Completar capturas en chat (flujos 1 y 2)",
+        "Lanzar TÉCNICA y ECONÓMICA en paralelo desde panel Fuentes",
+        "Verificar colas independientes y jobs omitidos por modo",
+        "Descargar expediente parcial; completar empaquetado estricto post sign-off"
+      ]
+    }
+  ]
+}

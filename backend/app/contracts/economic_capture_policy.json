@@ -1,0 +1,52 @@
+{
+  "policy_version": "economic-capture-v1.0.0",
+  "description": "HRU: reglas universales del copiloto económico conversacional.",
+  "conflict_resolution_phrases": {
+    "prefer_excel": [
+      "usa excel",
+      "usa el excel",
+      "prefiero excel",
+      "toma excel",
+      "del excel"
+    ],
+    "prefer_chat": [
+      "usa chat",
+      "usa el chat",
+      "prefiero chat",
+      "lo del chat",
+      "mi mensaje"
+    ]
+  },
+  "defer_capture_phrases": [
+    "despues",
+    "después",
+    "luego",
+    "en economica",
+    "en económica",
+    "en la economica",
+    "en la propuesta economica",
+    "mas tarde",
+    "más tarde",
+    "ahorita no"
+  ],
+  "confirm_affirmative": [
+    "si",
+    "sí",
+    "yes",
+    "correcto",
+    "ok",
+    "vale",
+    "confirmo"
+  ],
+  "economic_status_markers": [
+    "que falta cotizar",
+    "qué falta cotizar",
+    "precios pendientes",
+    "como va la cotizacion",
+    "cómo va la cotización",
+    "estado de la cotizacion",
+    "estado de la cotización",
+    "cuantos precios faltan",
+    "cuántos precios faltan"
+  ]
+}

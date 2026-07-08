@@ -28,7 +28,9 @@ from app.services.evidence_profile_service import _CRITICAL_FIELDS, detect_profi
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = "1.2.0"
+_SCHEMA_VERSION = "1.3.1"
+
+_active_junta_gate: Optional[Dict[str, Any]] = None
 
 # Ítems de control de calidad del análisis; no se copian al portal de la convocante.
 _JUNTA_INTERNAL_SOURCE_REFS = frozenset({"analyst_pending_citation_umbrella"})
@@ -937,6 +939,19 @@ def _append_item(
         return
     if len(p) < 12:
         return
+    gate = _active_junta_gate
+    if gate is not None:
+        from app.services.junta_contamination_gate import passes_junta_question_gate
+
+        if not passes_junta_question_gate(
+            p,
+            corpus=gate.get("corpus"),
+            session_hint=str(gate.get("session_hint") or ""),
+            source_ref=source_ref,
+            motivo=str(motivo or ""),
+        ):
+            gate["excluded"] = int(gate.get("excluded") or 0) + 1
+            return
     dk = _dedupe_key(p)
     if dk in seen:
         return
@@ -1588,6 +1603,9 @@ def _collect_from_thematic_discovery(
             source_ref=str(raw.get("source_ref") or "thematic"),
             tipo=raw.get("tipo") or JuntaQuestionTipo.TECNICA,
             prioridad=raw.get("prioridad") or JuntaQuestionPrioridad.ALTA,
+            referencia_bases=str(raw.get("referencia_bases") or "") or None,
+            archivo_fuente=str(raw.get("archivo_fuente") or "") or None,
+            pagina=str(raw.get("pagina") or "") or None,
             provenance_ui=prov,
         )
 
@@ -1710,13 +1728,28 @@ def build_junta_aclaraciones_questions(
     seen: set = set()
     analysis = _extract_analysis_from_session(session_state)
     corpus = _resolve_bases_corpus(session_id, session_state, documents)
+    from app.config.settings import settings
+    from app.services.junta_bases_corpus import junta_primary_corpus
 
-    _collect_from_thematic_discovery(corpus, items, seen)
-    _collect_from_analyst(analysis, items, seen, corpus=corpus)
-    _collect_from_evidence_conflicts(session_state, analysis, items, seen)
-    _collect_from_mini_dictamen(session_state, items, seen)
-    _collect_from_go_no_go(session_state, items, seen)
-    _collect_analyst_pending_citation_umbrella(analysis, items, seen)
+    primary = junta_primary_corpus(corpus)
+    global _active_junta_gate
+    gate_meta = {
+        "corpus": primary,
+        "session_hint": session_id,
+        "excluded": 0,
+    }
+    _active_junta_gate = gate_meta
+    try:
+        _collect_from_thematic_discovery(primary, items, seen)
+        _collect_from_analyst(analysis, items, seen, corpus=primary)
+        _collect_from_evidence_conflicts(session_state, analysis, items, seen)
+        _collect_from_mini_dictamen(session_state, items, seen)
+        _collect_from_go_no_go(session_state, items, seen)
+        _collect_analyst_pending_citation_umbrella(analysis, items, seen)
+    finally:
+        _active_junta_gate = None
+
+    excluded = int(gate_meta.get("excluded") or 0)
 
     items.sort(
         key=lambda x: (
@@ -1734,6 +1767,10 @@ def build_junta_aclaraciones_questions(
         generated_at=datetime.now(timezone.utc),
         summary=_build_summary(items),
         items=items,
+        excluded_contamination=excluded,
+        contamination_gate_enabled=bool(
+            getattr(settings, "JUNTA_CONTAMINATION_GATE_ENABLED", True)
+        ),
     )
 
 

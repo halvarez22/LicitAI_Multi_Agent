@@ -90,6 +90,7 @@ def _regex_synthetic_items(context: str, existing: Set[str]) -> List[Dict[str, A
                 "match_tier": "inventory_expand",
                 "evidence_match": True,
                 "inventory_synthetic": True,
+                "tipo_accion": "generar",
             }
         )
     return out
@@ -148,6 +149,7 @@ async def _llm_synthetic_items(context: str, correlation_id: str) -> List[Dict[s
                 "match_tier": "inventory_expand",
                 "evidence_match": True,
                 "inventory_synthetic": True,
+                "tipo_accion": "generar",
             }
         )
     return out

@@ -229,12 +229,14 @@ def sanitize_chat_pending_questions(
     session_state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Cola conversacional: solo perfil puntual y precios (sin meta-análisis ni inventario)."""
+    from app.services.document_quality_ux import normalize_expediente_pending_questions
     from app.services.chat_fill_quality_queue_policy import should_exclude_fill_quality_from_chat
     from app.services.mini_dictamen_anexos_service import strip_chat_excluded_pending_questions
     from app.services.obra_chat_queue_policy import sanitize_obra_chat_pending_questions
 
+    normalized = normalize_expediente_pending_questions(list(pending or []), session_state)
     out: List[Dict[str, Any]] = []
-    for q in strip_chat_excluded_pending_questions(pending or []):
+    for q in strip_chat_excluded_pending_questions(normalized):
         if should_exclude_from_chat_queue(q):
             continue
         if should_exclude_fill_quality_from_chat(q, session_state):

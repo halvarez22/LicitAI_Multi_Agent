@@ -13,6 +13,14 @@ _PRE_GEN_TASKS = [
     {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
     {"task": "stage_completed:compliance", "result": {"status": "success", "data": {"data": {}}}},
     {"task": "stage_completed:economic", "result": {"status": "success", "data": {}}},
+    {
+        "task": "economic_proposal",
+        "result": {
+            "status": "complete",
+            "total_base": 100.0,
+            "items": [{"concept_key": "p1", "unit_price": 100.0, "subtotal": 100.0}],
+        },
+    },
 ]
 
 

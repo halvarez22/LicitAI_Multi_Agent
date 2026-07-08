@@ -1,0 +1,43 @@
+[
+  {
+    "case_id": "VERIFIED_PAGE_SNIPPET",
+    "raw": {
+      "source_name": "BASES_VIGILANCIA.pdf",
+      "page": 27,
+      "snippet": "Integración del precio unitario mensual y diario sin IVA por operario"
+    },
+    "expect_quality": "verified",
+    "expect_locus_contains": ["p. 27"],
+    "expect_visible": true
+  },
+  {
+    "case_id": "DOCUMENT_ONLY_NO_PAGE",
+    "raw": {
+      "source_name": "BASES_VIGILANCIA.pdf",
+      "snippet": "Anexo 9A resumen de cotización por zonas y turnos"
+    },
+    "expect_quality": "document_only",
+    "expect_locus_contains": ["pliego"],
+    "expect_visible": true
+  },
+  {
+    "case_id": "INSUFFICIENT_EMPTY",
+    "raw": {},
+    "expect_quality": "insufficient",
+    "expect_locus_contains": [],
+    "expect_visible": false
+  },
+  {
+    "case_id": "SYNTHETIC_CHAT_FALLBACK",
+    "raw": {
+      "source": "bases_licitacion",
+      "page": 1,
+      "snippet": "Cotización en chat — Zona A",
+      "is_synthetic": true
+    },
+    "expect_quality": "synthetic",
+    "expect_locus_contains": [],
+    "expect_visible": false,
+    "expect_ux_quality": "insufficient"
+  }
+]

@@ -163,6 +163,25 @@ def build_chat_intent_battery() -> List[ChatIntentBatteryCase]:
     cases.extend(_expand("help", help_phrases, "AYUDA", bad_code="IDLE"))
 
     cotizar = [
+        "cotizar",
+        "cotizacion economica",
+        "cotización económica",
+        "capturar precios",
+        "captura precio unitario",
+        "matriz de precios",
+        "matriz de precio",
+        "quiero cotizar",
+        "vamos a cotizar",
+        "cerrar cotizacion",
+        "cerrar cotización",
+        "recalcular propuesta economica",
+        "validar propuesta economica",
+        "solo cotizacion",
+        "solo la cotizacion",
+    ]
+    cases.extend(_expand("cotizar", cotizar, "COTIZAR", bad_code="MISSING_PRICES"))
+
+    gen_economica = [
         "generar propuesta economica",
         "generar propuesta económica",
         "genera propuesta economica",
@@ -171,28 +190,76 @@ def build_chat_intent_battery() -> List[ChatIntentBatteryCase]:
         "calcular propuesta economica",
         "armar propuesta economica",
         "cotizar propuesta economica",
-        "cotizar",
-        "cotizacion economica",
-        "cotización económica",
-        "capturar precios",
-        "captura precio unitario",
-        "matriz de precios",
-        "matriz de precio",
         "generar cotizacion",
         "generar cotización",
-        "quiero cotizar",
-        "vamos a cotizar",
-        "cerrar cotizacion",
-        "cerrar cotización",
-        "recalcular propuesta economica",
-        "validar propuesta economica",
         "generar la propuesta economica final",
         "generar propuesta economica por favor",
         "genera la propuesta economica ya",
+        "armar lo economico",
+        "armar lo económico",
+        "generar lo economico",
+        "generar economica",
+        "genera economica",
+        "propuesta economica nomas",
+        "propuesta económica nomás",
+        "quiero la propuesta economica",
+        "necesito generar economica",
         "CMD_TRIGGER_ECONOMIC_PROPOSAL",
         "CMD_TRIGGER_GENERATION",
     ]
-    cases.extend(_expand("cotizar", cotizar, "COTIZAR", bad_code="MISSING_PRICES"))
+    cases.extend(_expand("gen_economica", gen_economica, "GENERAR_ECONOMICA", bad_code="MISSING_PRICES"))
+
+    gen_tecnica = [
+        "generar propuesta tecnica",
+        "generar propuesta técnica",
+        "genera propuesta tecnica",
+        "generar sobre tecnico",
+        "generar sobre técnico",
+        "solo tecnica",
+        "solo la tecnica",
+        "generar tecnica",
+        "genera tecnica",
+        "expediente tecnico",
+        "propuesta tecnica nomas",
+        "generar propuesta tecnica y formatos",
+        "armar propuesta tecnica",
+        "quiero generar la tecnica",
+        "generar anexo tecnico",
+    ]
+    cases.extend(_expand("gen_tecnica", gen_tecnica, "GENERAR_TECNICA", bad_code="INCOMPLETE_FORMATS_DATA"))
+
+    capturar_tecnico = [
+        "falta metodologia",
+        "falta metodología",
+        "falta personal en la propuesta",
+        "capturar tecnico",
+        "capturar técnico",
+        "dato tecnico pendiente",
+        "datos tecnicos pendientes",
+        "metodologia: limpieza por zonas",
+        "personal: 12 guardias turno matutino",
+        "equipo: 3 barredoras",
+        "cronograma: 6 meses ejecucion",
+        "que falta en tecnica",
+        "que falta en técnica",
+        "estado tecnico",
+        "estado técnico",
+    ]
+    cases.extend(_expand("capturar_tecnico", capturar_tecnico, "CAPTURAR_TECNICO", bad_code="IDLE"))
+
+    dual_status = [
+        "como vamos tecnica y economica",
+        "cómo vamos técnica y económica",
+        "que falta en total",
+        "qué falta en total",
+        "estado tecnica y economica",
+        "estado técnica y económica",
+        "como vamos en tecnica y economica",
+        "avance tecnica y economica",
+        "resumen tecnica y economica",
+        "donde vamos tecnica y economica",
+    ]
+    cases.extend(_expand("dual_status", dual_status, "VER_ESTADO_DUAL", bad_code="IDLE"))
 
     expediente = [
         "generar documentos",
@@ -212,9 +279,7 @@ def build_chat_intent_battery() -> List[ChatIntentBatteryCase]:
         "generar documentos finales",
         "generar todo el expediente",
         "generar sobres administrativos",
-        "generar sobre tecnico",
         "generar sobre economico",
-        "generar propuesta tecnica y formatos",
         "quiero generar documentos",
         "listo para generar documentos",
         "generar documentos ya",

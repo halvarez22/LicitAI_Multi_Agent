@@ -51,12 +51,14 @@ def fill_quality_needs_chat_capture(
     if not issues:
         return False
     from app.services.obra_chat_queue_policy import filter_obra_fill_quality_issues
-    from app.services.document_fill_ux_messages import classify_fill_issues
+    from app.services.document_fill_ux_messages import classify_blocking_fill_issues
 
     filtered = filter_obra_fill_quality_issues(list(issues), session_state)
     if not filtered:
         return False
-    needs_profile, needs_clients, needs_economic, _needs_shell = classify_fill_issues(filtered)
+    needs_profile, needs_clients, needs_economic, _needs_shell = classify_blocking_fill_issues(
+        filtered
+    )
     return bool(needs_profile or needs_clients or needs_economic)
 
 

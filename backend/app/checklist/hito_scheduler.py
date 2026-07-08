@@ -8,7 +8,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.agents.analyst import normalize_cronograma_dict
-from app.services.cronograma_bases_extract import parse_spanish_date_fragment
+from app.services.cronograma_bases_extract import (
+    parse_spanish_date_fragment,
+    resolve_spanish_cronogram_fecha,
+)
 
 # Orden de presentación en UI (mismo orden canónico que el analista).
 _HITO_ORDER: Tuple[str, ...] = (
@@ -50,6 +53,7 @@ def parse_fecha_hito(texto: str) -> Optional[datetime]:
     low = t.lower()
     if not t or low in (
         "no especificado",
+        "no proporcionado",
         "fecha no especificada",
         "n/e",
         "—",
@@ -91,55 +95,40 @@ def parse_fecha_hito(texto: str) -> Optional[datetime]:
         return None
 
 
-_MESES_ES_NOM: Tuple[str, ...] = (
-    "enero",
-    "febrero",
-    "marzo",
-    "abril",
-    "mayo",
-    "junio",
-    "julio",
-    "agosto",
-    "septiembre",
-    "octubre",
-    "noviembre",
-    "diciembre",
-)
-
-
-def _compact_fecha_texto(raw: str, parsed: Optional[datetime]) -> str:
-    """Texto corto para UI cuando hay fecha parseable en el fragmento de bases."""
-    if parsed is None:
-        return raw
-    mes = _MESES_ES_NOM[parsed.month - 1]
-    base = f"{parsed.day} de {mes} de {parsed.year}"
-    if parsed.hour or parsed.minute:
-        return f"{base}, {parsed.hour:02d}:{parsed.minute:02d}"
-    return base
-
-
-def _first_spanish_date_fragment(text: str) -> Optional[str]:
-    """Primer fragmento «DD de mes de YYYY» en narrativa larga de bases."""
-    m = re.search(
-        r"\d{1,2}\s+de\s+[a-záéíóúñü]+\s+(?:de|del)\s+(?:año\s+)?20\d{2}"
-        r"(?:\s*(?:,|\s+)?(?:a\s+las\s+)?\d{1,2}[:h]\d{2}(?:\s*(?:horas?|hrs?\.?)?)?)?",
-        str(text or ""),
-        re.IGNORECASE,
-    )
-    return m.group(0).strip() if m else None
-
-
 def _resolve_display_fecha_raw(valor_cronograma: str) -> Tuple[str, Optional[datetime]]:
     """Fecha compacta para panel; evita párrafos truncados en fecha_texto_raw."""
-    raw = (valor_cronograma or "").strip() or "No especificado"
-    parsed = parse_fecha_hito(raw)
-    if parsed is None:
-        frag = _first_spanish_date_fragment(raw)
-        if frag:
-            parsed = parse_fecha_hito(frag)
-    if parsed is not None:
-        return _compact_fecha_texto(raw, parsed), parsed
-    return raw, None
+    return resolve_spanish_cronogram_fecha(valor_cronograma or "")
+
+
+def resolve_display_fecha_best(*candidates: Optional[str]) -> Tuple[str, Optional[datetime]]:
+    """
+    Elige la mejor resolución de fecha entre varios fragmentos (cronograma, bases, literal).
+
+    Prioriza fragmentos con datetime parseable; descarta narrativas largas sin fecha.
+    """
+    best_raw, best_dt = "No especificado", None
+    best_score = -1
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        raw, dt = resolve_spanish_cronogram_fecha(text)
+        if raw in ("No especificado", "No proporcionado"):
+            continue
+        if dt is None and len(raw) > 72:
+            continue
+        score = 0
+        if dt is not None:
+            score += 1000
+        score += min(len(raw), 72)
+        if re.search(r"\d{1,2}\s+y\s+\d{1,2}\s+de\s+", raw):
+            score += 40
+        if "–" in raw or re.search(r"\d{1,2}:\d{2}.+\d{1,2}:\d{2}", raw):
+            score += 20
+        if score > best_score:
+            best_score = score
+            best_raw, best_dt = raw, dt
+    return best_raw, best_dt
 
 
 def _hito_dict_from_canon(hito_id: str, valor_cronograma: str) -> Dict[str, Any]:

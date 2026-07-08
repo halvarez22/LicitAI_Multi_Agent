@@ -33,9 +33,51 @@ def _job_completion_message(final_status: str) -> str:
         return "Pipeline en pausa: pendiente autorización Go/No-Go."
     if final_status == "waiting_for_data":
         return "Pipeline en pausa: faltan datos para continuar."
+    if final_status == "partial":
+        return "Pipeline completado con advertencias."
     if final_status == "error":
         return "Pipeline finalizado con incidencias."
     return "Análisis finalizado con éxito."
+
+
+def _job_completion_progress(final_status: str) -> dict:
+    """
+    Progreso final del job Redis alineado al estado del orquestador (PR2).
+
+    Evita ``pct: 100`` cuando el pipeline quedó en pausa (``waiting_for_data``).
+    """
+    held_statuses = frozenset({"waiting_for_data", "go_no_go_pending"})
+    if final_status in held_statuses:
+        return {
+            "stage": "held",
+            "pct": 72,
+            "message": _job_completion_message(final_status),
+            "orchestrator_held": True,
+            "orchestrator_status": final_status,
+        }
+    if final_status == "error":
+        return {
+            "stage": "done",
+            "pct": 0,
+            "message": _job_completion_message(final_status),
+            "orchestrator_held": False,
+            "orchestrator_status": final_status,
+        }
+    if final_status == "partial":
+        return {
+            "stage": "done",
+            "pct": 100,
+            "message": _job_completion_message(final_status),
+            "orchestrator_held": False,
+            "orchestrator_status": final_status,
+        }
+    return {
+        "stage": "done",
+        "pct": 100,
+        "message": _job_completion_message(final_status),
+        "orchestrator_held": False,
+        "orchestrator_status": final_status,
+    }
 
 def _chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> list[str]:
     chunks = []
@@ -238,6 +280,9 @@ async def _run_orchestrator_job(
         
         mcp_manager = MCPContextManager(memory_repository=memory)
         orchestrator = OrchestratorAgent(context_manager=mcp_manager)
+
+        generation_mode = request.generation_mode or (request.company_data or {}).get("generation_mode")
+        generation_stream = request.generation_stream or (request.company_data or {}).get("generation_stream")
         
         resultado = await orchestrator.process(
             session_id=request.session_id,
@@ -245,6 +290,8 @@ async def _run_orchestrator_job(
                 "company_id": request.company_id,
                 "company_data": request.company_data,
                 "resume_generation": request.resume_generation,
+                "generation_mode": generation_mode,
+                "generation_stream": generation_stream,
                 "job_id": job_id
             }
         )
@@ -350,11 +397,7 @@ async def _run_orchestrator_job(
         update_job_status(
             job_id,
             "COMPLETED",
-            {
-                "stage": "done",
-                "pct": 100,
-                "message": _job_completion_message(final_status),
-            },
+            _job_completion_progress(final_status),
             result=final_data,
         )
         logger.info(f"Job {job_id} completado con éxito")
@@ -381,6 +424,47 @@ async def _run_orchestrator_job(
             },
         )
     finally:
+        try:
+            from app.services.generation_concurrency_controller import (
+                dual_stream_enabled,
+                release_stream_lock,
+                resolve_generation_stream_from_input,
+            )
+            from app.services.generation_mode_policy import resolve_generation_mode_from_input
+            from app.services.generation_queue_controller import sync_flat_jobs_from_streams
+
+            if dual_stream_enabled() and job_id and memory is not None:
+                session_data = await memory.get_session(request.session_id) or {}
+                gen_state = session_data.get("generation_state")
+                if isinstance(gen_state, dict):
+                    gmode = resolve_generation_mode_from_input(
+                        {
+                            "generation_mode": request.generation_mode,
+                            "company_data": request.company_data,
+                        },
+                        session_data,
+                    )
+                    stream_id = resolve_generation_stream_from_input(
+                        {
+                            "generation_stream": request.generation_stream,
+                            "company_data": request.company_data,
+                        },
+                        gmode,
+                    )
+                    if stream_id in ("technical", "economic"):
+                        release_stream_lock(gen_state, stream_id, job_id)
+                        sync_flat_jobs_from_streams(gen_state)
+                        await memory.save_session(
+                            request.session_id,
+                            {"generation_state": gen_state},
+                        )
+        except Exception as rel_exc:
+            logger.warning(
+                "dual_stream_lock_release_failed session=%s job=%s err=%s",
+                request.session_id,
+                job_id,
+                rel_exc,
+            )
         clear_session_job(request.session_id)
         if thread_local_memory:
             if getattr(memory, "engine", None):

@@ -1,0 +1,44 @@
+{
+  "policy_version": "economic-calculation-v1.0.0",
+  "description": "HRU: reglas deterministas para subtotal, IVA y total en copiloto económico (F8). Sin valores por convocante.",
+  "currency_code": "MXN",
+  "currency_symbol": "$",
+  "default_iva_rate": 0.16,
+  "iva_exempt_markers": [
+    "exento de iva",
+    "exentos de iva",
+    "exento iva",
+    "sin iva",
+    "no aplica iva",
+    "iva 0%",
+    "iva 0 %",
+    "iva cero",
+    "no causara iva",
+    "no causará iva"
+  ],
+  "iva_rate_patterns": [
+    {
+      "pattern": "iva\\s*(?:del?\\s*)?(\\d{1,2}(?:\\.\\d+)?)\\s*%",
+      "group": 1
+    }
+  ],
+  "rounding": {
+    "money_decimals": 2,
+    "mode": "half_up"
+  },
+  "sum_scope": "captured_items_only",
+  "include_item_statuses": ["captured"],
+  "provenance_defaults": {
+    "calculation_basis": "Suma de precios capturados en chat o documento normalizado.",
+    "iva_default": "IVA 16 % conforme a la Ley del IVA, salvo exención citada en bases.",
+    "iva_exempt": "Las bases indican tratamiento sin IVA; totales sin recargo fiscal."
+  },
+  "reglas_blob_keys": [
+    "tratamiento_iva",
+    "iva",
+    "impuesto_valor_agregado",
+    "regimen_fiscal",
+    "criterio_importe_minimo_o_plazo_inferior",
+    "criterio_importe_maximo_o_plazo_superior"
+  ]
+}

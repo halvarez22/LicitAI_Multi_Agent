@@ -81,3 +81,5 @@ class JuntaAclaracionesQuestionsBundle(BaseModel):
         default_factory=JuntaAclaracionesQuestionsSummary
     )
     items: List[JuntaAclaracionesQuestionItem] = Field(default_factory=list)
+    excluded_contamination: int = 0
+    contamination_gate_enabled: bool = True

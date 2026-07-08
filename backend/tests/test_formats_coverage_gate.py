@@ -47,6 +47,31 @@ def test_formats_completeness_passes_at_ratio():
     assert block is None
 
 
+def test_formats_completeness_passes_when_obra_economic_deferred():
+    """11 admin + 5 E* diferidos a EconomicWriter: no debe bloquear en 16 panel."""
+    block = evaluate_formats_stage_completeness(
+        generated_count=11,
+        mirror_queue_size=0,
+        llm_queue_size=11,
+        generation_skipped=[],
+        panel_expected=11,
+        deferred_to_economic_count=0,
+    )
+    assert block is None
+
+
+def test_formats_completeness_legacy_deferred_subtracts_expected():
+    block = evaluate_formats_stage_completeness(
+        generated_count=11,
+        mirror_queue_size=0,
+        llm_queue_size=16,
+        generation_skipped=[],
+        panel_expected=16,
+        deferred_to_economic_count=5,
+    )
+    assert block is None
+
+
 def test_formats_completeness_passes_when_disk_coverage_high():
     """15 nuevos en corrida + 31 ya en disco = 46 generadas vs 39 esperadas."""
     block = evaluate_formats_stage_completeness(

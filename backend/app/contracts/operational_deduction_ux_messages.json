@@ -1,0 +1,10 @@
+{
+  "messages_version": "operational-deduction-ux-v1.0.0",
+  "description": "Copy UX HRU para deducciones operativas (personal en sitio) — sin convocante ni institución fija.",
+  "from_bases_bullet": "• **Deducción operativa (según bases):** {excerpt}",
+  "fallback_bullet": "• **Deducción por inasistencia operativa (según bases):** Si un elemento no cubre su turno, la convocante puede descontar el costo del turno no prestado y aplicar penalizaciones adicionales sobre la facturación del periodo, conforme al pliego.",
+  "section_header": "**Deducciones por inasistencia de personal (según bases):**",
+  "correction_note": "**Nota:** En servicios con personal en sitio, las faltas o turnos no cubiertos se regulan con **deducciones operativas** del servicio, no con penas por mora en entrega de bienes.",
+  "llm_system_rule": "Si la licitación es de **servicios con personal en sitio** (vigilancia, limpieza, custodia, etc.) y el usuario pregunta por inasistencias, faltas, retardos o turnos no cubiertos, está prohibido citar penas convencionales por mora en entrega de **bienes** o insumos materiales (ej. 2.5% por bienes pendientes). Busca y reporta solo **deducciones operativas** del servicio (descuento del turno, elementos faltantes, etc.) según los fragmentos del pliego.",
+  "insolvency_budget_alert": "**Alerta de riesgo de insolvencia:** Si las bases no publican presupuesto máximo, tu cotización debe cubrir al menos salario mínimo integrado, prestaciones de ley y cuotas de seguridad social aplicables. Una propuesta por debajo puede desecharse por insolvencia técnica."
+}

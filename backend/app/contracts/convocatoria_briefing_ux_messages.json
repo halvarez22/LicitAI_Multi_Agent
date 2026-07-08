@@ -1,0 +1,48 @@
+{
+  "messages_version": "convocatoria-briefing-ux-v1.0.0",
+  "description": "Copy HRU lenguaje llano para briefing de convocatoria y apertura de chat.",
+  "opening": {
+    "status": "**{session_name}** — esto es lo que pide la convocante",
+    "blocks_compact": "1) **{admin_title}** ({admin_count} requisitos) · 2) **{tech_title}** ({tech_count}) · 3) **{eco_title}** ({eco_count})",
+    "blocks_compact_sparse": "Organizando requisitos del pliego: documentos de empresa, propuesta técnica y cotización.",
+    "first_action_economic": "**Empecemos por la cotización:** indícame {action_label}.",
+    "first_action_economic_price_source": "**Empecemos por la cotización:** comparte {action_label} (puedes pegar tu tabla o escribir un precio por zona).",
+    "first_action_technical": "**Después de la cotización** (o si ya la tienes): cuéntame {action_label}.",
+    "first_action_administrative": "**Primero** revisa en el panel **Documentos detectados** lo que debes adjuntar ({action_label}).",
+    "reason_suffix": "{reason_plain}",
+    "cta_economic": "Escribe un precio en el chat (ej. «Zona A 45,250 mensual») o pega tu tabla desde Excel.",
+    "cta_technical": "Cuando quieras, descríbeme cómo ejecutarás el servicio en una frase clara.",
+    "cta_administrative": "Abre **Documentos detectados** en el panel central y revisa qué falta de tu empresa."
+  },
+  "panel": {
+    "card_title": "Qué pide la convocante",
+    "block_item_count": "{count} requisito(s) detectado(s)",
+    "confidence_baja": "Aún estamos organizando requisitos del pliego; revisa también el PDF de las bases."
+  },
+  "humanize_lexicon": [
+    {
+      "pattern": "(?i)price_source|economic_price_source",
+      "replacement": "de dónde salen tus precios"
+    },
+    {
+      "pattern": "(?i)integraci[oó]n del precio unitario",
+      "replacement": "cuánto cobras por cada operario (mensual o diario)"
+    },
+    {
+      "pattern": "(?i)fuente real de precios",
+      "replacement": "tu tabla de costos o cotización"
+    },
+    {
+      "pattern": "(?i)propuesta t[eé]cnica describiendo especificaciones",
+      "replacement": "descripción del servicio según el pliego"
+    },
+    {
+      "pattern": "(?i)metodolog[ií]a:",
+      "replacement": "cómo ejecutarás el servicio:"
+    },
+    {
+      "pattern": "(?i)personal:",
+      "replacement": "personal que asignarás:"
+    }
+  ]
+}

@@ -93,6 +93,47 @@ def test_parse_spanish_date_del_anio_con_palabra_anio():
     assert dt.hour == 10 and dt.minute == 30
 
 
+def test_parse_spanish_date_range_conjuntion():
+    text = (
+        "Las visitas se llevarán a cabo los días 06 y 07 de febrero de 2024, "
+        "en horario de 09:00 a 15:00 hrs."
+    )
+    dt = parse_spanish_date_fragment(text)
+    assert dt is not None
+    assert dt.year == 2024 and dt.month == 2 and dt.day == 7
+    assert dt.hour == 15 and dt.minute == 0
+
+
+def test_parse_spanish_date_range_al():
+    dt = parse_spanish_date_fragment("del 04 al 08 de marzo del 2024")
+    assert dt is not None
+    assert dt.year == 2024 and dt.month == 3 and dt.day == 8
+
+
+def test_resolve_spanish_cronogram_fecha_range_display():
+    from app.services.cronograma_bases_extract import resolve_spanish_cronogram_fecha
+
+    text = (
+        "Las visitas se llevarán a cabo los días 06 y 07 de febrero de 2024, "
+        "en horario de 09:00 a 15:00 hrs."
+    )
+    display, dt = resolve_spanish_cronogram_fecha(text)
+    assert display.startswith("6 y 7 de febrero de 2024")
+    assert "09:00–15:00" in display
+    assert dt == parse_spanish_date_fragment(text)
+
+
+def test_resolve_spanish_cronogram_fecha_single_unchanged():
+    from app.services.cronograma_bases_extract import resolve_spanish_cronogram_fecha
+
+    display, dt = resolve_spanish_cronogram_fecha(
+        "Se llevará a cabo el día 12 de febrero de 2024, a las 14:00 horas."
+    )
+    assert display == "12 de febrero de 2024, 14:00"
+    assert dt is not None
+    assert dt.day == 12 and dt.hour == 14
+
+
 BARDA_GUANAJUATO_SNIPPET = """
 VISITA AL SITIO NOVENA. - De la visita al sitio. - los participantes podrán realizar conjuntamente
 con el servidor público que designe la convocante una visita al sitio donde se ejecutará la obra,

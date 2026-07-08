@@ -79,6 +79,36 @@ def issue_is_policy_metric_only(issue: Dict[str, Any]) -> bool:
     return str(issue.get("error_type") or "") == "policy_coverage_insufficient"
 
 
+def issue_is_blocking(issue: Dict[str, Any]) -> bool:
+    """True si el hallazgo debe frenar la generación."""
+    return str(issue.get("severity") or "block").lower() == "block"
+
+
+def issue_is_deferred_to_economic(issue: Dict[str, Any]) -> bool:
+    """True si el hallazgo se difiere a la etapa económica."""
+    if str(issue.get("expected_rule") or "") == "deferred_to_economic_stage":
+        return True
+    if not issue_needs_economic_data(issue):
+        return False
+    return not issue_is_blocking(issue)
+
+
+def only_deferred_economic_warnings(issues: Sequence[Dict[str, Any]]) -> bool:
+    """True cuando todos los hallazgos son warnings económicos diferidos."""
+    normalized = [i for i in (issues or []) if isinstance(i, dict)]
+    if not normalized:
+        return False
+    return all(issue_is_deferred_to_economic(i) for i in normalized)
+
+
+def classify_blocking_fill_issues(
+    issues: Sequence[Dict[str, Any]],
+) -> Tuple[bool, bool, bool, bool]:
+    """Como ``classify_fill_issues`` pero solo cuenta hallazgos bloqueantes."""
+    blocking = [i for i in (issues or []) if isinstance(i, dict) and issue_is_blocking(i)]
+    return classify_fill_issues(blocking)
+
+
 def issue_needs_economic_data(issue: Dict[str, Any]) -> bool:
     fk = str(issue.get("field_key") or "").lower()
     snippet = str(issue.get("detected_value") or "").lower()
@@ -122,7 +152,9 @@ def classify_fill_issues(
 
 def pick_fill_gate_pending_label(issues: Sequence[Dict[str, Any]]) -> str:
     """Etiqueta corta para pending_questions según el tipo real de hallazgo."""
-    needs_profile, needs_clients, needs_economic, needs_shell = classify_fill_issues(issues)
+    needs_profile, needs_clients, needs_economic, needs_shell = classify_blocking_fill_issues(
+        issues
+    )
     if needs_economic and not needs_profile:
         return "Completar tarifa o precios"
     if needs_profile:
@@ -212,7 +244,12 @@ def _build_intro(
     *,
     experience_summary: Optional[str] = None,
 ) -> str:
-    needs_profile, needs_clients, needs_economic, needs_shell = classify_fill_issues(issues)
+    needs_profile, needs_clients, needs_economic, needs_shell = classify_blocking_fill_issues(
+        issues
+    )
+    has_deferred_economic = any(
+        issue_is_deferred_to_economic(i) for i in (issues or []) if isinstance(i, dict)
+    )
     if needs_shell and not needs_profile and not needs_clients:
         return (
             f"⏸️ **Pausé la generación** al armar la **{stage_label}** porque uno o más anexos "
@@ -232,6 +269,12 @@ def _build_intro(
         return (
             f"⏸️ **Pausé la generación** en la **{stage_label}** por datos de **cotización o precios**."
         )
+    if needs_profile and has_deferred_economic:
+        return (
+            f"⏸️ **Pausé la generación** al armar la **{stage_label}** porque faltan datos "
+            f"para rellenar los documentos con información real{company_phrase}. "
+            "Los **precios y tarifas** se capturan después en la **propuesta económica**."
+        )
     if not needs_profile and not needs_clients and not needs_economic:
         return (
             f"Algunos documentos de la **{stage_label}** quedaron con **texto de plantilla** "
@@ -250,7 +293,12 @@ def _build_next_steps(
     *,
     experience_summary: Optional[str] = None,
 ) -> str:
-    needs_profile, needs_clients, needs_economic, needs_shell = classify_fill_issues(issues)
+    needs_profile, needs_clients, needs_economic, needs_shell = classify_blocking_fill_issues(
+        issues
+    )
+    has_deferred_economic = any(
+        issue_is_deferred_to_economic(i) for i in (issues or []) if isinstance(i, dict)
+    )
     lines = ["**Qué puedes hacer ahora (elige lo más fácil):**"]
     if needs_shell and not needs_profile:
         lines.append("1. Pulsa **Generar** otra vez (el sistema reintentará la redacción legal).")
@@ -278,6 +326,11 @@ def _build_next_steps(
             f"{step}. Revisa la **cotización / Excel** o escribe los precios que faltan en el chat."
         )
         step += 1
+    elif has_deferred_economic and needs_profile:
+        lines.append(
+            f"{step}. Tras completar **Empresas**, capturaremos precios en la **propuesta económica**."
+        )
+        step += 1
     if step == 1:
         if not needs_profile and not needs_clients and not needs_economic:
             lines.append(
@@ -296,7 +349,9 @@ def _build_chat_prompt(
     *,
     experience_summary: Optional[str] = None,
 ) -> str:
-    needs_profile, needs_clients, needs_economic, _needs_shell = classify_fill_issues(issues)
+    needs_profile, needs_clients, needs_economic, _needs_shell = classify_blocking_fill_issues(
+        issues
+    )
     if needs_clients and not needs_profile:
         if experience_summary:
             return (
@@ -312,6 +367,13 @@ def _build_chat_prompt(
         return (
             "Puedes **seguir generando** (la tarifa se captura en **Propuesta económica**) "
             "o escríbeme aquí la tarifa mensual, por ejemplo: «$13,326.63 MXN horario diurno»."
+        )
+    if needs_profile and any(
+        issue_is_deferred_to_economic(i) for i in (issues or []) if isinstance(i, dict)
+    ):
+        return (
+            "Completa primero **RFC, razón social y representante** en **Empresas** o escríbelos aquí. "
+            "Los precios se capturan después en la **propuesta económica**."
         )
     if needs_profile and not needs_clients:
         return "Escríbeme el RFC, representante legal o domicilio que falte, o complétalo en Empresas."
@@ -418,7 +480,7 @@ def build_fill_quality_user_brief(
     next_steps = _build_next_steps(issues or [], experience_summary=experience_summary)
     chat_prompt = _build_chat_prompt(issues or [], experience_summary=experience_summary)
 
-    needs_profile, needs_clients, needs_economic, needs_shell = classify_fill_issues(
+    needs_profile, needs_clients, needs_economic, needs_shell = classify_blocking_fill_issues(
         issues or []
     )
     if needs_shell and not needs_profile:
@@ -427,6 +489,8 @@ def build_fill_quality_user_brief(
         title = "Falta relación de clientes en la propuesta técnica"
     elif needs_economic and not needs_profile and not needs_clients:
         title = "Tarifa mensual pendiente (propuesta económica)"
+    elif only_deferred_economic_warnings(issues or []):
+        title = "Precios pendientes (propuesta económica)"
     else:
         title = f"Faltan datos para la {stage_label}"
 

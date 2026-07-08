@@ -680,199 +680,381 @@
   },
   {
     "case_id": "cotizar_000",
-    "utterance": "generar propuesta economica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_001",
-    "utterance": "generar propuesta económica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_002",
-    "utterance": "genera propuesta economica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_003",
-    "utterance": "generar propuesta",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_004",
-    "utterance": "genera propuesta",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_005",
-    "utterance": "calcular propuesta economica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_006",
-    "utterance": "armar propuesta economica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_007",
-    "utterance": "cotizar propuesta economica",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_008",
     "utterance": "cotizar",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_009",
+    "case_id": "cotizar_001",
     "utterance": "cotizacion economica",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_010",
+    "case_id": "cotizar_002",
     "utterance": "cotización económica",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_011",
+    "case_id": "cotizar_003",
     "utterance": "capturar precios",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_012",
+    "case_id": "cotizar_004",
     "utterance": "captura precio unitario",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_013",
+    "case_id": "cotizar_005",
     "utterance": "matriz de precios",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_014",
+    "case_id": "cotizar_006",
     "utterance": "matriz de precio",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_015",
-    "utterance": "generar cotizacion",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_016",
-    "utterance": "generar cotización",
-    "expected_intent": "COTIZAR",
-    "context": {},
-    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "cotizar_017",
+    "case_id": "cotizar_007",
     "utterance": "quiero cotizar",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_018",
+    "case_id": "cotizar_008",
     "utterance": "vamos a cotizar",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_019",
+    "case_id": "cotizar_009",
     "utterance": "cerrar cotizacion",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_020",
+    "case_id": "cotizar_010",
     "utterance": "cerrar cotización",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_021",
+    "case_id": "cotizar_011",
     "utterance": "recalcular propuesta economica",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_022",
+    "case_id": "cotizar_012",
     "utterance": "validar propuesta economica",
     "expected_intent": "COTIZAR",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_023",
+    "case_id": "cotizar_013",
+    "utterance": "solo cotizacion",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "cotizar_014",
+    "utterance": "solo la cotizacion",
+    "expected_intent": "COTIZAR",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_000",
+    "utterance": "generar propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_001",
+    "utterance": "generar propuesta económica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_002",
+    "utterance": "genera propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_003",
+    "utterance": "generar propuesta",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_004",
+    "utterance": "genera propuesta",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_005",
+    "utterance": "calcular propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_006",
+    "utterance": "armar propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_007",
+    "utterance": "cotizar propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_008",
+    "utterance": "generar cotizacion",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_009",
+    "utterance": "generar cotización",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_010",
     "utterance": "generar la propuesta economica final",
-    "expected_intent": "COTIZAR",
+    "expected_intent": "GENERAR_ECONOMICA",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_024",
+    "case_id": "gen_economica_011",
     "utterance": "generar propuesta economica por favor",
-    "expected_intent": "COTIZAR",
+    "expected_intent": "GENERAR_ECONOMICA",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_025",
+    "case_id": "gen_economica_012",
     "utterance": "genera la propuesta economica ya",
-    "expected_intent": "COTIZAR",
+    "expected_intent": "GENERAR_ECONOMICA",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_026",
+    "case_id": "gen_economica_013",
+    "utterance": "armar lo economico",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_014",
+    "utterance": "armar lo económico",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_015",
+    "utterance": "generar lo economico",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_016",
+    "utterance": "generar economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_017",
+    "utterance": "genera economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_018",
+    "utterance": "propuesta economica nomas",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_019",
+    "utterance": "propuesta económica nomás",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_020",
+    "utterance": "quiero la propuesta economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_021",
+    "utterance": "necesito generar economica",
+    "expected_intent": "GENERAR_ECONOMICA",
+    "context": {},
+    "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_economica_022",
     "utterance": "CMD_TRIGGER_ECONOMIC_PROPOSAL",
-    "expected_intent": "COTIZAR",
+    "expected_intent": "GENERAR_ECONOMICA",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "cotizar_027",
+    "case_id": "gen_economica_023",
     "utterance": "CMD_TRIGGER_GENERATION",
-    "expected_intent": "COTIZAR",
+    "expected_intent": "GENERAR_ECONOMICA",
     "context": {},
     "sample_bad_response": "Estado: MISSING_PRICES — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_000",
+    "utterance": "generar propuesta tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_001",
+    "utterance": "generar propuesta técnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_002",
+    "utterance": "genera propuesta tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_003",
+    "utterance": "generar sobre tecnico",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_004",
+    "utterance": "generar sobre técnico",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_005",
+    "utterance": "solo tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_006",
+    "utterance": "solo la tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_007",
+    "utterance": "generar tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_008",
+    "utterance": "genera tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_009",
+    "utterance": "expediente tecnico",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_010",
+    "utterance": "propuesta tecnica nomas",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_011",
+    "utterance": "generar propuesta tecnica y formatos",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_012",
+    "utterance": "armar propuesta tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_013",
+    "utterance": "quiero generar la tecnica",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
+  },
+  {
+    "case_id": "gen_tecnica_014",
+    "utterance": "generar anexo tecnico",
+    "expected_intent": "GENERAR_TECNICA",
+    "context": {},
+    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
     "case_id": "expediente_000",
@@ -995,55 +1177,41 @@
   },
   {
     "case_id": "expediente_017",
-    "utterance": "generar sobre tecnico",
-    "expected_intent": "GENERAR_EXPEDIENTE",
-    "context": {},
-    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "expediente_018",
     "utterance": "generar sobre economico",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},
     "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "expediente_019",
-    "utterance": "generar propuesta tecnica y formatos",
-    "expected_intent": "GENERAR_EXPEDIENTE",
-    "context": {},
-    "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
-  },
-  {
-    "case_id": "expediente_020",
+    "case_id": "expediente_018",
     "utterance": "quiero generar documentos",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},
     "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "expediente_021",
+    "case_id": "expediente_019",
     "utterance": "listo para generar documentos",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},
     "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "expediente_022",
+    "case_id": "expediente_020",
     "utterance": "generar documentos ya",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},
     "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "expediente_023",
+    "case_id": "expediente_021",
     "utterance": "generar documentos por favor",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},
     "sample_bad_response": "Estado: INCOMPLETE_FORMATS_DATA — Gate 12.1 bloqueó 401 ítems en _compliance_truth"
   },
   {
-    "case_id": "expediente_024",
+    "case_id": "expediente_022",
     "utterance": "CMD_TRIGGER_DOC_GEN",
     "expected_intent": "GENERAR_EXPEDIENTE",
     "context": {},

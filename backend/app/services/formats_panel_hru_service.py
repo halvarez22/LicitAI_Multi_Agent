@@ -127,13 +127,52 @@ def is_economic_keyword(text: str) -> bool:
     )
 
 
-def normalize_formats_panel_row(row: Dict[str, Any]) -> Dict[str, Any]:
+_PHANTOM_ANEXO_REPAIRS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("declaraci", "integridad"), r"(?i)\banexo\s+m\b[^\n]{0,40}(?:declaraci[oó]n\s+de\s+integridad|integridad)"),
+    (("escrito", "nacionalidad"), r"(?i)\banexo\s+[a-z0-9\-]+\b[^\n]{0,50}nacionalidad"),
+    (("compranet",), r"(?i)\banexo\s+[a-z0-9\-]+\b[^\n]{0,70}compranet"),
+    (("declaraci", "intereses"), r"(?i)\banexo\s+k\b[^\n]{0,50}intereses"),
+    (("antisoborno",), r"(?i)\banexo\s+n\b[^\n]{0,50}antisoborno"),
+    (("constancia", "visita"), r"(?i)\banexo\s+f\b[^\n]{0,50}(?:constancia\s+de\s+visita|visita)"),
+)
+
+
+def repair_phantom_anexo_label(label: str, snippet: str, primary_text: str) -> str:
+    """
+    Corrige etiquetas rotas «Anexo V: ), Declaración…» usando el anexo real en bases primarias.
+
+    HRU: resuelve por contenido semántico, no por mapa fijo de licitación.
+    """
+    from app.services.document_deliverable_filter import is_broken_anexo_inventory_label
+
+    raw = str(label or "").strip()
+    if not raw or not is_broken_anexo_inventory_label(raw, snippet):
+        return raw
+    blob = f"{raw} {snippet}".lower()
+    primary = str(primary_text or "")
+    if not primary.strip():
+        return clean_panel_display_label(raw)
+    for keywords, pattern in _PHANTOM_ANEXO_REPAIRS:
+        if not all(k in blob for k in keywords):
+            continue
+        match = re.search(pattern, primary)
+        if not match:
+            continue
+        found = re.sub(r"\s+", " ", match.group(0)).strip()
+        if len(found) >= 12:
+            return found[:160]
+    return clean_panel_display_label(raw)
+
+
+def normalize_formats_panel_row(row: Dict[str, Any], *, primary_text: str = "") -> Dict[str, Any]:
     """Aplica nombre legible y sobre coherente a una fila del panel."""
     if not isinstance(row, dict):
         return {}
     out = dict(row)
     raw_name = str(out.get("nombre_canonico") or out.get("nombre") or "")
     snippet = str(out.get("snippet_representativo") or out.get("snippet") or "")
+    if primary_text:
+        raw_name = repair_phantom_anexo_label(raw_name, snippet, primary_text)
     display = resolve_panel_display_name(raw_name, snippet)
     bucket = resolve_panel_sobre_bucket(display, snippet)
     out["nombre_canonico"] = display
@@ -143,7 +182,11 @@ def normalize_formats_panel_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def normalize_formats_panel_payload(panel: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_formats_panel_payload(
+    panel: Dict[str, Any],
+    *,
+    primary_text: str = "",
+) -> Dict[str, Any]:
     """
     Reagrupa el panel consolidado con nombres HRU y sobres corregidos.
     """
@@ -164,7 +207,7 @@ def normalize_formats_panel_payload(panel: Dict[str, Any]) -> Dict[str, Any]:
         for raw in panel.get(bk) or []:
             if not isinstance(raw, dict):
                 continue
-            row = normalize_formats_panel_row(raw)
+            row = normalize_formats_panel_row(raw, primary_text=primary_text)
             name = str(row.get("nombre_canonico") or "")
             key = pliego_format_dedupe_key(name) or name.lower()[:80]
             if key in seen:

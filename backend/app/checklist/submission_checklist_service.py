@@ -121,19 +121,12 @@ async def _enrich_hitos_literary_hru(
     timeout_s = float(settings.CRONOGRAMA_ENRICHMENT_TIMEOUT_S or 12.0)
 
     def _run() -> List[Dict[str, Any]]:
-        enriched = enrich_checklist_hitos_literary(
+        return enrich_checklist_hitos_literary(
             hitos,
             session_id,
             session,
             cronograma=cron_norm,
         )
-        for h in enriched:
-            if not isinstance(h, dict):
-                continue
-            fh = parse_fecha_hito(str(h.get("fecha_texto_raw") or ""))
-            if fh is not None:
-                h["fecha_hora"] = fh
-        return enriched
 
     try:
         return await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_s)
@@ -155,6 +148,60 @@ async def _enrich_hitos_literary_hru(
 
 def _model_to_storable(m: SubmissionChecklistModel) -> Dict[str, Any]:
     return m.model_dump(mode="json")
+
+
+def _refresh_hitos_fecha_desde_cronograma(
+    hitos: List[Dict[str, Any]],
+    cronograma: Any,
+    bases_text: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Reaplica texto/fecha compacta desde cronograma+bases sin perder marcas del usuario.
+    """
+    if not hitos or not cronograma:
+        return hitos
+    from app.checklist.hito_scheduler import resolve_display_fecha_best
+    from app.services.cronograma_bases_extract import (
+        extract_hito_from_bases_text,
+        merge_cronograma_with_bases,
+    )
+    from app.services.cronograma_enrichment_service import is_placeholder_cronograma_value
+
+    cronograma_merged = cronograma
+    if str(bases_text or "").strip():
+        try:
+            cronograma_merged = merge_cronograma_with_bases(cronograma, bases_text)
+        except Exception:
+            cronograma_merged = cronograma
+    rebuilt = build_hitos_from_cronograma(cronograma_merged)
+    by_id = {h.get("id"): h for h in rebuilt if isinstance(h, dict) and h.get("id")}
+    out: List[Dict[str, Any]] = []
+    for h in hitos:
+        if not isinstance(h, dict):
+            out.append(h)
+            continue
+        hid = h.get("id")
+        fresh = by_id.get(hid)
+        extracted = (
+            extract_hito_from_bases_text(str(hid), bases_text)
+            if hid and str(bases_text or "").strip()
+            else None
+        )
+        fecha_raw, fecha_hora = resolve_display_fecha_best(
+            extracted,
+            h.get("bases_literal"),
+            (cronograma_merged or {}).get(hid) if isinstance(cronograma_merged, dict) else None,
+            fresh.get("fecha_texto_raw") if fresh else None,
+            h.get("fecha_texto_raw"),
+        )
+        if is_placeholder_cronograma_value(fecha_raw):
+            out.append(h)
+            continue
+        merged = dict(h)
+        merged["fecha_texto_raw"] = fecha_raw
+        merged["fecha_hora"] = fecha_hora
+        out.append(merged)
+    return out
 
 
 async def upsert_checklist_from_cronograma(
@@ -451,13 +498,25 @@ async def get_submission_checklist(
         try:
             hitos_raw = [h for h in block["hitos"] if isinstance(h, dict)]
             cron_for_enrich: Any = None
+            tasks = session.get("tasks_completed") or []
+            for t in reversed(tasks):
+                if t.get("task") != "stage_completed:analysis":
+                    continue
+                cron_for_enrich = _cronograma_from_analysis_result(t.get("result"))
+                break
+            if cron_for_enrich is not None:
+                hitos_raw = _refresh_hitos_fecha_desde_cronograma(
+                    hitos_raw,
+                    cron_for_enrich,
+                    bases_text,
+                )
             if _hitos_need_literary_enrichment(hitos_raw):
-                tasks = session.get("tasks_completed") or []
-                for t in reversed(tasks):
-                    if t.get("task") != "stage_completed:analysis":
-                        continue
-                    cron_for_enrich = _cronograma_from_analysis_result(t.get("result"))
-                    break
+                if cron_for_enrich is None:
+                    for t in reversed(tasks):
+                        if t.get("task") != "stage_completed:analysis":
+                            continue
+                        cron_for_enrich = _cronograma_from_analysis_result(t.get("result"))
+                        break
                 hitos_raw = await _enrich_hitos_literary_hru(
                     memory,
                     session_id,
@@ -465,7 +524,7 @@ async def get_submission_checklist(
                     hitos_raw,
                     cron_for_enrich,
                 )
-                block = {**block, "hitos": hitos_raw}
+            block = {**block, "hitos": hitos_raw}
             m = SubmissionChecklistModel.model_validate(block)
             # Refrescar vencidos al leer
             hitos_d = [h.model_dump() for h in m.hitos]

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "licitai://contracts/expediente_readiness_v1.json",
+  "title": "ExpedienteReadinessV1",
+  "description": "Verdad canónica de readiness — captura, generación y entrega segura.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "policy_version",
+    "session_id",
+    "evaluated_at",
+    "company_binding",
+    "capture",
+    "generation",
+    "delivery"
+  ],
+  "properties": {
+    "schema_version": { "const": "expediente_readiness_v1" },
+    "policy_version": { "type": "string" },
+    "session_id": { "type": "string" },
+    "evaluated_at": { "type": "string", "format": "date-time" },
+    "company_binding": {
+      "type": "object",
+      "required": ["binding_valid"],
+      "properties": {
+        "company_id": { "type": ["string", "null"] },
+        "company_rfc": { "type": ["string", "null"] },
+        "company_label": { "type": ["string", "null"] },
+        "binding_valid": { "type": "boolean" },
+        "orphan_company_id": { "type": "boolean" },
+        "session_profile_stale": { "type": "boolean" }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "required": ["ready"],
+      "properties": {
+        "matrix_filled": { "type": "integer" },
+        "matrix_total": { "type": "integer" },
+        "motor_pending_count": { "type": "integer" },
+        "motor_pending_fields": { "type": "array", "items": { "type": "string" } },
+        "cross_tender_contamination": { "type": "boolean" },
+        "cross_tender_marker": { "type": ["string", "null"] },
+        "ready": { "type": "boolean" }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "required": ["blockers"],
+      "properties": {
+        "technical_writer_allowed": { "type": "boolean" },
+        "formats_allowed": { "type": "boolean" },
+        "economic_writer_allowed": { "type": "boolean" },
+        "packager_allowed": { "type": "boolean" },
+        "blockers": { "type": "array" }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["blockers"],
+      "properties": {
+        "technical_scope_safe": { "type": "boolean" },
+        "admin_scope_safe": { "type": "boolean" },
+        "economic_scope_safe": { "type": "boolean" },
+        "blockers": { "type": "array" }
+      }
+    },
+    "artifact_fingerprints": { "type": "object" },
+    "recommended_action": { "type": ["object", "null"] }
+  },
+  "additionalProperties": true
+}

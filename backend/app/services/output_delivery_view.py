@@ -197,7 +197,28 @@ def _compute_inventory(
         "unique_sha256": len(sha_counts),
         "duplicate_extra_files": sum(c - 1 for c in sha_counts.values() if c > 1),
         "has_compranet_validated": has_compranet_validated(session_path),
+        **_read_packaging_coverage(session_path),
     }
+
+
+def _read_packaging_coverage(session_path: str) -> Dict[str, Any]:
+    """Lee cobertura parcial/completa del manifiesto CompraNet (F3.4)."""
+    manifest_path = os.path.join(session_path, COMPRANET_VALIDATED_DIR, MANIFEST_NAME)
+    if not os.path.isfile(manifest_path):
+        return {}
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            "packaging_coverage_status": data.get("coverage_status"),
+            "packaging_sobres_present": data.get("sobres_present"),
+            "packaging_sobres_missing": data.get("sobres_missing"),
+            "packaging_partial_note": data.get("partial_note"),
+        }
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
 
 
 def build_delivery_structure(session_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

@@ -20,6 +20,13 @@ def test_anexo_e5_materiales():
     assert pliego_format_dedupe_key("Anexo_E-5_Materiales.docx") == "obra|E5"
 
 
+def test_anexo_e3e_utilidad_separate_from_e3_apu():
+    assert pliego_format_dedupe_key("Anexo_E-3E_Utilidad_Propuesta.docx") == "obra|E3E"
+    assert pliego_format_dedupe_key("Anexo_E-3_Analisis_Precios_Unitarios.docx") == "obra|E3"
+    assert obra_te_dedupe_key("ANEXO E-3 E LA UTILIDAD PROPUESTA") == "obra|E3E"
+    assert obra_te_dedupe_key("ANEXO E-3 ANÁLISIS DE PRECIOS UNITARIOS") == "obra|E3"
+
+
 def test_modelo_contrato_maps_t3():
     assert pliego_format_dedupe_key(
         "Modelo_de_Contrato_utilizado_por_la_Dirección_General_de_Obr.docx"

@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "TECH_ONLY",
+    "generation_mode": "technical",
+    "expect_active_jobs": ["datagap", "technical", "formats"],
+    "expect_skipped_jobs": ["economic_writer", "packager", "delivery"],
+    "expect_preserve_on_wipe": ["2.propuesta_economica"]
+  },
+  {
+    "case_id": "ECO_ONLY",
+    "generation_mode": "economic",
+    "expect_active_jobs": ["economic_writer"],
+    "expect_skipped_jobs": ["datagap", "technical", "formats", "packager", "delivery"],
+    "expect_preserve_on_wipe": ["1.propuesta tecnica"]
+  },
+  {
+    "case_id": "FULL",
+    "generation_mode": "full",
+    "expect_active_jobs": ["datagap", "technical", "formats", "economic_writer", "packager", "delivery"],
+    "expect_skipped_jobs": [],
+    "expect_preserve_on_wipe": []
+  }
+]

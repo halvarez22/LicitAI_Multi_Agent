@@ -1,0 +1,91 @@
+{
+  "cases": [
+    {
+      "case_id": "leon_obra_e1_mirror",
+      "vertical": "obra_publica",
+      "dedupe_key": "obra|E1",
+      "corpus_snippet": "ANEXO E-1 (FORMATO) CARTA COMPROMISO DE PROPOSICIÓN ARQ. DIRECTOR PRESENTE. HACEMOS REFERENCIA AL PROCEDIMIENTO DE ADJUDICACIÓN POR LICITACIÓN PÚBLICA NUM. ______________ PARA ADJUDICAR EL CONTRATO RELATIVO A LA REALIZACIÓN DE LA OBRA: _______________________. DE CONFORMIDAD PRESENTAMOS NUESTRA PROPUESTA CON UN VALOR DE $_________________________(PESOS 00/100 M.N.). PLAZO DE EJECUCIÓN DE____________ AL _________ A T E N T A M E N T E NOMBRE Y FIRMA DEL PARTICIPANTE",
+      "master_profile": {
+        "razon_social": "CONSTRUCTORA DEMO SA DE CV",
+        "rfc": "CDM010101XX0",
+        "representante_legal": "JUAN PÉREZ"
+      },
+      "resumen": {
+        "total": 1000000.0,
+        "iva": 160000.0,
+        "subtotal": 840000.0,
+        "obra_breakdown": true
+      },
+      "concurso": "Licitación Pública Num. D/080/2025",
+      "obra_descripcion": "CONSTRUCCIÓN DE BARDA PERIMETRAL",
+      "plazo": "18 DÍAS NATURALES PARA LA CONCLUSIÓN DE LA OBRA",
+      "expect": {
+        "official_bases_mirror": true,
+        "must_contain": [
+          "HACEMOS REFERENCIA AL PROCEDIMIENTO",
+          "D/080/2025",
+          "$1,000,000.00",
+          "18 DÍAS NATURALES"
+        ],
+        "must_not_contain": [
+          "1. Presentamos la presente carta-compromiso",
+          "Nosotros,"
+        ]
+      }
+    },
+    {
+      "case_id": "leon_obra_e3e_mirror",
+      "vertical": "obra_publica",
+      "dedupe_key": "obra|E3E",
+      "corpus_snippet": "ANEXO E-3 E LA UTILIDAD PROPUESTA PARA EL CONCURSO No:______________ RELACIONADO CON LA OBRA:________________________ ES DEL _______% LA CUAL EN CUMPLIMIENTO A LOS ESTABLECIDO EN EL ART. 63 FRACCIÓN IV DE LA LEY DE OBRA PÚBLICA FIRMA",
+      "master_profile": {
+        "razon_social": "CONSTRUCTORA DEMO SA DE CV",
+        "representante_legal": "JUAN PÉREZ"
+      },
+      "resumen": {
+        "obra_breakdown": true,
+        "utilidad_rate": 0.05
+      },
+      "concurso": "D/080/2025",
+      "obra_descripcion": "BARDA PERIMETRAL",
+      "expect": {
+        "official_bases_mirror": true,
+        "must_contain": ["UTILIDAD PROPUESTA", "5.00%", "ART. 63"]
+      }
+    },
+    {
+      "case_id": "obra_publica_case01_miss_shell",
+      "vertical": "obra_publica",
+      "dedupe_key": "obra|E1",
+      "corpus_snippet": "Con fundamento en la Ley de Obras Publicas el licitante debera presentar analisis de precios unitarios y catalogo de conceptos.",
+      "master_profile": {
+        "razon_social": "EMPRESA OBRA SA"
+      },
+      "resumen": {
+        "total": 500000.0,
+        "iva": 80000.0,
+        "obra_breakdown": true
+      },
+      "expect": {
+        "official_bases_mirror": false,
+        "must_not_contain": ["HACEMOS REFERENCIA AL PROCEDIMIENTO"]
+      }
+    },
+    {
+      "case_id": "adquisiciones_no_obra_e1",
+      "vertical": "adquisiciones",
+      "dedupe_key": "obra|E1",
+      "corpus_snippet": "De conformidad con la normatividad aplicable, se aceptaran proposiciones por partidas.",
+      "master_profile": {
+        "razon_social": "PROVEEDOR SA"
+      },
+      "resumen": {
+        "total": 250000.0,
+        "obra_breakdown": false
+      },
+      "expect": {
+        "official_bases_mirror": false
+      }
+    }
+  ]
+}

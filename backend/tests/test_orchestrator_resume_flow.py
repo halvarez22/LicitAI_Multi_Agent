@@ -53,6 +53,14 @@ async def test_full_orchestrator_blocked_and_resume_flow():
                 },
             },
             {"task": "stage_completed:economic", "result": {"status": "success", "data": {}}},
+            {
+                "task": "economic_proposal",
+                "result": {
+                    "status": "complete",
+                    "total_base": 10.0,
+                    "items": [{"concepto": "Servicio", "cantidad": 1, "precio_unitario": 10, "subtotal": 10}],
+                },
+            },
         ],
     }
     initial_company = {
@@ -216,12 +224,10 @@ async def test_generation_final_ok_clears_pending_and_unblocks_economic_writer_w
             {
                 "task": "economic_proposal",
                 "result": {
-                    "status": "success",
-                    "data": {
-                        "items": [{"concepto": "Servicio", "cantidad": 1, "precio_unitario": 10, "subtotal": 10}],
-                        "total_base": 10,
-                        "grand_total": 11.6,
-                    },
+                    "status": "complete",
+                    "total_base": 10.0,
+                    "items": [{"concepto": "Servicio", "cantidad": 1, "precio_unitario": 10, "subtotal": 10}],
+                    "grand_total": 11.6,
                 },
             },
             {"task": "stage_completed:economic", "result": {"status": "success", "data": {}}},

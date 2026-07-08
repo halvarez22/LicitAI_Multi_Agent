@@ -462,6 +462,16 @@ def extract_corporate_physical_from_bases_corpus(corpus: Any) -> List[Dict[str, 
     """
     Localiza requisitos numerados de expediente en el texto indexado de bases (sin hardcode por licitación).
     """
+    from app.services.junta_bases_corpus import BasesCorpus, primary_bases_segments
+
+    if isinstance(corpus, BasesCorpus) and len(corpus.segments) > 1:
+        primary_segs = primary_bases_segments(corpus)
+        if primary_segs and len(primary_segs) < len(corpus.segments):
+            corpus = BasesCorpus(
+                session_id=corpus.session_id,
+                segments=primary_segs,
+                filenames=[fn for fn, _ in primary_segs],
+            )
     combined = str(getattr(corpus, "combined", "") or "")
     if not combined.strip():
         return []

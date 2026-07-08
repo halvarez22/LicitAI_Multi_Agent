@@ -1,6 +1,8 @@
 """Tests de cláusulas administrativas universales y auditoría de contenido."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.services.administrative_letter_clauses import (
     build_administrative_letter_markdown,
     city_from_domicilio,
@@ -71,7 +73,7 @@ def test_anexo_v_no_checklist_meta():
     assert "a continuación, se presentan los documentos" not in body.lower()
 
 
-def test_resolve_document_date_late_generation_uses_deadline_not_today():
+def test_resolve_document_date_late_generation_uses_today_and_flags_late():
     state = {
         "last_analysis": {
             "cronograma": {
@@ -79,10 +81,11 @@ def test_resolve_document_date_late_generation_uses_deadline_not_today():
             }
         }
     }
-    out = resolve_document_date(state)
-    assert "abril" in out["fecha_es"].lower()
-    assert "2026" in out["fecha_es"]
-    assert out["fecha_es"] != resolve_document_date({})["fecha_es"] or True
+    gen_at = datetime(2026, 6, 29, 10, 0, 0)
+    out = resolve_document_date(state, at=gen_at)
+    assert out["fecha_es"] == "29 de junio de 2026"
+    assert out["source"] == "generation_timestamp"
+    assert out["is_after_deadline"] is True
 
 
 def test_contamination_detects_truncation_and_checklist():

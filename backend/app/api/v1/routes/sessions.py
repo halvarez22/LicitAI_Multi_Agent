@@ -39,6 +39,7 @@ from app.services.junta_aclaraciones_questions_service import (
 )
 from app.contracts.junta_aclaraciones_questions import JuntaAclaracionesQuestionsBundle
 import logging
+import os
 from app.core.logging_config import get_logger
 from app.services.vector_service import VectorDbServiceClient
 
@@ -82,6 +83,12 @@ class EconomicZeroTotalBaseAckRequest(BaseModel):
 
     confirm: bool = Field(..., description="Debe ser true para activar el reconocimiento")
     reason: str = Field(..., min_length=3, description="Cita o fundamento (auditoría)")
+
+
+class BindCompanyRequest(BaseModel):
+    """Ligado transaccional de empresa a sesión (HRU R2)."""
+
+    company_id: str = Field(..., min_length=1, description="ID de empresa en catálogo")
 
 
 class ClearGeneratedOutputsRequest(BaseModel):
@@ -1195,6 +1202,14 @@ async def get_capture_matrix_blocks(session_id: str):
                     rebuilt, session.get("economic_user_inputs")
                 )
         cap = economic_capture_status({**session, "capture_matrix_blocks": blocks})
+        from app.services.expediente_guided_service import (
+            economic_capture_honest_status,
+            expediente_guided_enabled,
+            resolve_expediente_guided_state,
+        )
+
+        if expediente_guided_enabled():
+            cap = economic_capture_honest_status({**session, "capture_matrix_blocks": blocks})
         from app.services.economic_capture_matrix_service import (
             build_capture_matrix_meta,
             format_capture_summary_message,
@@ -1218,13 +1233,152 @@ async def get_capture_matrix_blocks(session_id: str):
                 "count": len(blocks),
                 "excel_clipboard_tsv": excel_tsv,
                 "capture_status": cap,
-                "capture_summary": format_capture_summary_message(cap),
+                "capture_summary": format_capture_summary_message(
+                    cap,
+                    economic_validated=bool(
+                        (session.get("expediente_guided_v1") or {}).get("economic_validated_at")
+                    ),
+                ),
                 "capture_matrix_meta": meta,
+                "expediente_guided": resolve_expediente_guided_state(session)
+                if expediente_guided_enabled()
+                else None,
             },
         )
     except Exception as e:
         logger.error("capture_matrix_blocks_failed", session_id=session_id, error=str(e))
         raise HTTPException(status_code=500, detail="Error al leer matriz de captura")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/expediente-guided", response_model=GenericResponse)
+async def get_expediente_guided(session_id: str, analysis_done: bool = Query(False)):
+    """Estado P0 del expediente guiado (pasos, CTA, etiquetas panel)."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        from app.services.expediente_guided_service import (
+            expediente_guided_enabled,
+            resolve_expediente_guided_state,
+        )
+
+        if not expediente_guided_enabled():
+            return GenericResponse(
+                success=True,
+                message="Expediente guiado deshabilitado",
+                data={"enabled": False},
+            )
+        session = dict(session)
+        session["session_id"] = session_id
+        company_profile = None
+        company_exists = None
+        company_id = str(session.get("company_id") or "").strip()
+        if company_id:
+            company_row = await repo.get_company(company_id)
+            if company_row:
+                company_exists = True
+                company_profile = company_row.get("master_profile") or company_row
+            else:
+                company_exists = False
+        output_root = os.path.join("/data/outputs", session_id)
+        if not os.path.isdir(output_root):
+            output_root = None
+        payload = resolve_expediente_guided_state(
+            session,
+            analysis_done_hint=bool(analysis_done),
+            company_profile=company_profile if isinstance(company_profile, dict) else None,
+            company_exists=company_exists,
+            session_output_path=output_root,
+        )
+        return GenericResponse(success=True, message="Expediente guiado", data=payload)
+    except Exception as e:
+        logger.error("expediente_guided_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al leer expediente guiado")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/readiness", response_model=GenericResponse)
+async def get_expediente_readiness(session_id: str):
+    """
+    Verdad canónica de readiness — captura, generación y entrega segura (HRU).
+
+    Fuente única para orquestador, descargas y (futuro) UI.
+    """
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+
+        session = dict(session)
+        session["session_id"] = session_id
+
+        company_profile = None
+        company_exists = None
+        company_id = str(session.get("company_id") or "").strip()
+        if company_id:
+            company_row = await repo.get_company(company_id)
+            if company_row:
+                company_exists = True
+                company_profile = company_row.get("master_profile") or company_row
+            else:
+                company_exists = False
+
+        output_root = os.path.join("/data/outputs", session_id)
+        if not os.path.isdir(output_root):
+            output_root = None
+
+        from app.services.expediente_readiness_service import resolve_expediente_readiness
+
+        payload = resolve_expediente_readiness(
+            session,
+            company_profile=company_profile if isinstance(company_profile, dict) else None,
+            company_exists=company_exists,
+            session_output_path=output_root,
+        )
+        return GenericResponse(success=True, message="Expediente readiness", data=payload)
+    except Exception as e:
+        logger.error("expediente_readiness_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al evaluar readiness del expediente")
+    finally:
+        await repo.disconnect()
+
+
+@router.post("/{session_id}/bind-company", response_model=GenericResponse)
+async def bind_company_route(session_id: str, body: BindCompanyRequest):
+    """
+    Liga empresa del catálogo a la sesión e invalida artefactos incoherentes (HRU R2).
+
+    Al cambiar de empresa: borra outputs económicos en disco, invalida snapshot y resetea jobs.
+    """
+    repo = await get_repository()
+    try:
+        from app.services.company_binding_service import bind_company_to_session
+
+        result = await bind_company_to_session(repo, session_id, body.company_id.strip())
+        msg = (
+            "Empresa ligada correctamente."
+            if not result.get("company_changed")
+            else "Empresa actualizada; se invalidaron artefactos económicos previos."
+        )
+        return GenericResponse(success=True, message=msg, data=result)
+    except ValueError as e:
+        err = str(e)
+        if "SESSION_NOT_FOUND" in err or "no encontrada" in err.lower():
+            raise HTTPException(status_code=404, detail=err)
+        if "COMPANY_NOT_FOUND" in err or "no existe" in err.lower():
+            raise HTTPException(status_code=404, detail=err)
+        raise HTTPException(status_code=400, detail=err)
+    except OSError as e:
+        logger.error("bind_company_disk_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al limpiar artefactos económicos en disco")
+    except Exception as e:
+        logger.error("bind_company_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al ligar empresa a la sesión")
     finally:
         await repo.disconnect()
 
@@ -1253,6 +1407,46 @@ async def get_mini_dictamen_anexos(session_id: str, refresh: bool = False):
     except Exception as e:
         logger.error("mini_dictamen_anexos_failed", session_id=session_id, error=str(e))
         raise HTTPException(status_code=500, detail="Error al recuperar mini dictamen de anexos")
+    finally:
+        await repo.disconnect()
+
+
+@router.get("/{session_id}/convocatoria-briefing", response_model=GenericResponse)
+async def get_convocatoria_briefing(session_id: str, refresh: bool = False):
+    """Briefing HRU F11: qué solicita la convocante (tres bloques + primer paso)."""
+    repo = await get_repository()
+    try:
+        session = await repo.get_session(session_id)
+        if not session:
+            return GenericResponse(success=False, message="Sesión no encontrada", data=None)
+        from app.services.convocatoria_briefing_service import (
+            convocatoria_briefing_enabled,
+            merge_convocatoria_briefing_v1,
+        )
+        from app.services.convocatoria_briefing_ux import render_panel_briefing_summary
+
+        if not convocatoria_briefing_enabled():
+            return GenericResponse(
+                success=True,
+                message="Briefing deshabilitado por configuración",
+                data={"enabled": False},
+            )
+        updates = merge_convocatoria_briefing_v1(session) if refresh or not session.get("convocatoria_briefing_v1") else {}
+        if updates:
+            await repo.save_session(session_id, updates)
+            session = {**session, **updates}
+        briefing = session.get("convocatoria_briefing_v1") or {}
+        return GenericResponse(
+            success=True,
+            message="Briefing de convocatoria recuperado",
+            data={
+                "convocatoria_briefing_v1": briefing,
+                "panel_summary": render_panel_briefing_summary(briefing),
+            },
+        )
+    except Exception as e:
+        logger.error("convocatoria_briefing_failed", session_id=session_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Error al recuperar briefing de convocatoria")
     finally:
         await repo.disconnect()
 

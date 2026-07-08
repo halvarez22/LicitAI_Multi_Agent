@@ -1,0 +1,26 @@
+{
+  "messages_version": "expediente-readiness-ux-v1.0.0",
+  "blockers": {
+    "COMPANY_BINDING_INVALID": "La sesión no tiene una empresa válida ligada. Selecciona una empresa del catálogo antes de generar o descargar.",
+    "COMPANY_ORPHAN_ID": "La empresa guardada en esta sesión ya no existe en el catálogo. Vuelve a seleccionar una empresa activa.",
+    "SESSION_PROFILE_STALE": "El perfil en sesión no coincide con la empresa seleccionada. Se requiere re-ligar la empresa.",
+    "ECONOMIC_CAPTURE_INCOMPLETE": "Faltan precios por capturar en la cotización ({matrix_filled}/{matrix_total}).",
+    "ECONOMIC_PRICE_SOURCE_PENDING": "Falta la fuente real de precios o costos antes de materializar la propuesta económica.",
+    "ECONOMIC_MOTOR_HITL_PENDING": "Hay {motor_pending_count} partida(s) pendientes del motor de captura ({motor_pending_fields}).",
+    "ECONOMIC_CROSS_TENDER_INPUTS": "Los datos de cotización parecen pertenecer a otra licitación ({detected_marker}). Limpia la captura antes de continuar.",
+    "ECONOMIC_SNAPSHOT_MISSING": "Aún no hay propuesta económica calculada. Completa la cotización en el chat.",
+    "ECONOMIC_SNAPSHOT_STALE": "La propuesta económica en sesión no coincide con la captura actual. Recalcula antes de generar.",
+    "FORMATS_DATA_INCOMPLETE": "Faltan datos para formatos administrativos. Revisa los pendientes del chat.",
+    "DOCUMENT_QUALITY_GATE_PENDING": "Hay hallazgos de calidad documental pendientes de resolver.",
+    "ARTIFACT_FINGERPRINT_MISMATCH": "Los archivos económicos en disco no corresponden a la empresa activa. Regenera la propuesta económica.",
+    "ARTIFACT_RFC_CONTAMINATION": "Se detectó RFC distinto al de la empresa activa en archivos materializados ({expected_rfc} vs {on_disk_rfc}).",
+    "GENERATION_JOB_BLOCKED": "La generación está en pausa en la etapa {job_id}.",
+    "GENERATION_NOT_RUN": "Aún no se ha ejecutado la generación para este alcance."
+  },
+  "recommended_actions": {
+    "BIND_COMPANY": "Re-ligar empresa",
+    "CAPTURE_PRICES": "Completar cotización en chat",
+    "REGENERATE_ECONOMIC": "Regenerar propuesta económica",
+    "REGENERATE_FORMATS": "Regenerar formatos administrativos"
+  }
+}

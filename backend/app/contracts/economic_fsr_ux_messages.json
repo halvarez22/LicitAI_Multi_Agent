@@ -1,0 +1,17 @@
+{
+  "messages_version": "economic-fsr-ux-v1.0.0",
+  "description": "Copy UX HRU para bloqueos y captura FSR. Sin ejemplos numéricos fijos ni suposiciones por vertical.",
+  "error_types": {
+    "fsr_required_params_missing": {
+      "lead": "No cierres la app. Para esta licitación necesito completar el **Factor de Salario Real (FSR)** antes de materializar la propuesta económica.",
+      "detail": "Faltan parámetros que deben venir de las **bases**, de tu **cotización** o del **chat**: {missing_labels}.",
+      "cta": "Indica cada valor en el chat con su nombre (ej. «imss 0.245», «aguinaldo 15 días») o confirma que ya están en tu Excel de cotización. Luego escribe **generar propuesta económica**.",
+      "document_hint": "Revisa en las bases el anexo o tabla de factor salario real / oferta de precio. Si ya lo tienes en Excel, adjúntalo con 📎."
+    }
+  },
+  "pending_question": {
+    "field": "validation_rule_fsr_required",
+    "label": "Completar parámetros FSR",
+    "type": "economic_validation_blocking"
+  }
+}

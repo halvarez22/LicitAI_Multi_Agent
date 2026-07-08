@@ -1,0 +1,29 @@
+{
+  "schema_version": "technical-canonical-v1.0.0",
+  "description": "HRU: verdad canónica versionada de datos técnicos capturados en chat. Merge idempotente por concept_key.",
+  "concept_key_source": "technical_slot_mapper.stable_concept_key",
+  "precedence_rank": {
+    "user_direct": 100,
+    "user_chat": 90,
+    "user_chat_confirm": 88,
+    "user_tsv": 80,
+    "upload_satisfied": 75,
+    "document_normalized": 50,
+    "catalog": 40,
+    "inference": 10
+  },
+  "item_fields": [
+    "concept_key",
+    "label",
+    "slot_kind",
+    "value_text",
+    "status",
+    "capture_mode",
+    "required_for_generation",
+    "source_channel",
+    "precedence_rank",
+    "provenance_ui",
+    "updated_at"
+  ],
+  "status_values": ["pending", "captured", "deferred", "upload_satisfied", "conflict"]
+}

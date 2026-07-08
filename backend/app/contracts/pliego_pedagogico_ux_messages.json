@@ -1,0 +1,17 @@
+{
+  "messages_version": "pliego-pedagogico-ux-v1.0.0",
+  "description": "F12.1 seed: copy HRU para claims con ancla de página. F12.3 ampliará pedagogía.",
+  "claim_locus": {
+    "verified": "(Bases · p. {page})",
+    "verified_with_source": "(Bases · {source_name} · p. {page})",
+    "document_only": "(según el pliego — página aún no localizada)",
+    "insufficient": "",
+    "synthetic": ""
+  },
+  "reason_degraded": "Empezamos por la cotización porque es lo más concreto para armar tu propuesta económica; cuando localice la página exacta en las bases, te la señalo.",
+  "first_action_with_page": "**Empecemos por la cotización:** indícame {action_label} {locus}.",
+  "first_action_price_source_with_page": "**Empecemos por la cotización:** comparte {action_label} {locus} (puedes pegar tu tabla o escribir un precio por zona).",
+  "cta_show_paragraph": "Di «muéstrame el párrafo» para ver el texto de las bases en pantalla.",
+  "excerpt_unavailable": "Aún no localicé la página exacta en las bases para este requisito. Pregúntame por una palabra del pliego (ej. «integración del precio unitario») o revisa el PDF.",
+  "panel_page_badge": "p. {page}"
+}

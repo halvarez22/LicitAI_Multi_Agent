@@ -84,7 +84,38 @@ def format_gate5_message(
     return "\n".join(lines[:3]).strip()
 
 
-def build_compact_session_resume(state: Dict[str, Any]) -> str:
+def format_gate5_briefing_opening(
+    *,
+    status: str,
+    cta: str,
+    detail: str = "",
+) -> str:
+    """
+    Gate 5 modo briefing (F11): hasta 4 líneas visibles + CTA.
+
+    Excepción documentada a SUPER ISSUE para apertura con tres bloques.
+    """
+    status_line = sanitize_user_visible_text(str(status or "").strip())
+    detail_line = sanitize_user_visible_text(str(detail or "").strip())
+    cta_line = sanitize_user_visible_text(str(cta or "").strip())
+
+    lines: List[str] = []
+    if status_line:
+        lines.append(status_line)
+    if detail_line:
+        lines.append(detail_line)
+    lines = lines[:3]
+    if cta_line:
+        lines.append(f"**Siguiente paso:** {cta_line}")
+    return "\n".join(lines[:4]).strip()
+
+
+def build_compact_session_resume(
+    state: Dict[str, Any],
+    *,
+    company_label_override: Optional[str] = None,
+    company_profile: Optional[Dict[str, Any]] = None,
+) -> str:
     """Mensaje de reanudación determinista (Gate 5) desde estado de sesión."""
     session_name = str(state.get("name") or "esta licitación")
     decision = state.get("last_orchestrator_decision") if isinstance(state.get("last_orchestrator_decision"), dict) else {}
@@ -101,7 +132,11 @@ def build_compact_session_resume(state: Dict[str, Any]) -> str:
     if _should_use_expediente_plan_bootstrap(state, stop_reason):
         from app.services.chat_expediente_bootstrap_service import build_expediente_plan_bootstrap
 
-        return build_expediente_plan_bootstrap(state)
+        return build_expediente_plan_bootstrap(
+            state,
+            company_label_override=company_label_override,
+            company_profile=company_profile,
+        )
 
     status = humanize_stop_reason(stop_reason)
     if stop_reason in _STALE_GENERATION_STOP_REASONS and _has_analysis_complete(state):

@@ -100,6 +100,63 @@ def has_price_source_tabular_evidence(rows: List[Dict[str, Any]]) -> bool:
     return _has_calculation_breakdown_evidence(rows)
 
 
+async def acknowledge_uploaded_price_source_hitl(
+    memory: MemoryRepository,
+    session_id: str,
+    *,
+    user_query: str,
+) -> Dict[str, Any]:
+    """
+    HITL: el usuario declara que la fuente de precios ya está en un archivo subido.
+
+    Cierra ``economic_price_source`` cuando la cotización en chat ya está completa,
+    aunque el motor tabular no haya cerrado el pendiente automáticamente.
+    """
+    out: Dict[str, Any] = {
+        "acknowledged": False,
+        "cleared_price_source": False,
+        "refreshed_validations": False,
+    }
+    from app.services.expediente_guided_service import economic_capture_honest_status
+
+    session_state = await memory.get_session(session_id) or {}
+    cap = economic_capture_honest_status(session_state)
+    inputs = dict(session_state.get("economic_user_inputs") or {})
+    filled = int(cap.get("filled") or 0)
+    total = int(cap.get("total") or 0)
+    has_prices = filled > 0 or total > 0
+    if not has_prices and not cap.get("capture_complete"):
+        return out
+
+    pending = list(session_state.get("pending_questions") or [])
+    had_source = any(_is_price_source_pending(q) for q in pending)
+    new_pending = [q for q in pending if not _is_price_source_pending(q)]
+    inputs = dict(session_state.get("economic_user_inputs") or {})
+    inputs["economic_price_source_ack_v1"] = {
+        "source": "user_chat_upload_ack",
+        "user_text": str(user_query or "")[:500],
+    }
+    session_state["economic_user_inputs"] = inputs
+    session_state["pending_questions"] = new_pending
+    session_state["current_question_index"] = 0
+    await memory.save_session(session_id, session_state)
+    out["acknowledged"] = True
+    out["cleared_price_source"] = had_source or bool(inputs.get("economic_price_source_ack_v1"))
+
+    sync = await sync_economic_pending_after_tabular_ingest(memory, session_id)
+    out["cleared_price_source"] = bool(
+        out["cleared_price_source"] or sync.get("cleared_price_source")
+    )
+    try:
+        from app.economic_validation.service import refresh_economic_validations_for_session
+
+        await refresh_economic_validations_for_session(memory, session_id)
+        out["refreshed_validations"] = True
+    except Exception:
+        pass
+    return out
+
+
 async def sync_economic_pending_after_tabular_ingest(
     memory: MemoryRepository,
     session_id: str,

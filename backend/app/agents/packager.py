@@ -71,6 +71,9 @@ class PackResult:
     files: List[Dict[str, Any]] = field(default_factory=list)
     total_bytes: int = 0
     contamination_report: Optional[Dict[str, Any]] = None
+    coverage_status: Optional[str] = None
+    sobres_present: List[str] = field(default_factory=list)
+    sobres_missing: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -84,6 +87,9 @@ class PackResult:
             "files": list(self.files),
             "total_bytes": self.total_bytes,
             "contamination_report": self.contamination_report,
+            "coverage_status": self.coverage_status,
+            "sobres_present": list(self.sobres_present),
+            "sobres_missing": list(self.sobres_missing),
         }
 
 
@@ -276,6 +282,31 @@ class CompraNetPackager:
                 validation_passed=False,
             )
 
+        from app.services.packaging_policy import (
+            expected_sobres,
+            partial_manifest_label,
+            require_all_sobres,
+        )
+
+        present_sobres_set = {str(item["label"]) for item in collected if item.get("label")}
+        expected = expected_sobres()
+        missing_sobres = sorted(expected - present_sobres_set)
+        coverage_status = "full" if not missing_sobres else "partial"
+        sobres_present = sorted(present_sobres_set)
+
+        if missing_sobres and require_all_sobres():
+            return PackResult(
+                success=False,
+                errors=[
+                    "Empaquetado estricto: faltan sobres obligatorios: "
+                    + ", ".join(missing_sobres),
+                ],
+                validation_passed=False,
+                coverage_status=coverage_status,
+                sobres_present=sobres_present,
+                sobres_missing=missing_sobres,
+            )
+
         # Copia con nombre de convocante (o fallback canónico) por sobre
         index_rows: List[Dict[str, Any]] = []
         for item in collected:
@@ -335,6 +366,10 @@ class CompraNetPackager:
             "rfc_token": rfc_s,
             "licitacion_token": lic_s,
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "coverage_status": coverage_status,
+            "sobres_present": sobres_present,
+            "sobres_missing": missing_sobres,
+            "partial_note": partial_manifest_label() if coverage_status == "partial" else "",
             "naming_policy": (
                 "convocante_first"
                 if prefer_convocante_filenames()
@@ -405,6 +440,9 @@ class CompraNetPackager:
             files=files_meta,
             total_bytes=total,
             contamination_report=contamination_report,
+            coverage_status=coverage_status,
+            sobres_present=sobres_present,
+            sobres_missing=missing_sobres,
         )
 
 def build_pack_session_data_from_outputs(

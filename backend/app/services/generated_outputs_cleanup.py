@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Tareas de pipeline que se invalidan al borrar Word/ZIP en /data/outputs.
 # NO incluir ``economic_proposal``: es la cotización calculada (chat/economic agent), no un archivo en disco.
@@ -89,11 +89,51 @@ def reset_session_after_output_wipe(session_data: Dict[str, Any]) -> Dict[str, A
     return out
 
 
-async def wipe_session_output_disk_only(session_id: str) -> Dict[str, Any]:
+def wipe_output_directory_selective(
+    session_path: str,
+    *,
+    preserve_subdirs: Optional[List[str]] = None,
+) -> Tuple[int, List[str]]:
+    """
+    Elimina contenido bajo la carpeta de salida preservando subcarpetas indicadas.
+
+    Returns:
+        (cantidad de entradas eliminadas, nombres eliminados)
+    """
+    preserve = {str(name).strip().lower() for name in (preserve_subdirs or []) if str(name).strip()}
+    if not session_path or not os.path.isdir(session_path):
+        return 0, []
+
+    removed: List[str] = []
+    for name in os.listdir(session_path):
+        if name.startswith("."):
+            continue
+        if name.lower() in preserve:
+            continue
+        full = os.path.join(session_path, name)
+        try:
+            if os.path.isdir(full):
+                shutil.rmtree(full)
+            elif os.path.isfile(full) or os.path.islink(full):
+                os.remove(full)
+            else:
+                continue
+            removed.append(name)
+        except OSError:
+            raise
+    return len(removed), removed
+
+
+async def wipe_session_output_disk_only(
+    session_id: str,
+    *,
+    preserve_subdirs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """
     Vacía archivos bajo ``/data/outputs/{sesión}`` sin tocar ``tasks_completed`` ni ``economic_proposal``.
 
     Usar al inicio de una corrida de generación para no mezclar Word/ZIP de intentos fallidos.
+    Con ``preserve_subdirs``, conserva carpetas de otros modos (F2 desacople).
     """
     from app.api.v1.routes.downloads import resolve_outputs_root
 
@@ -101,12 +141,19 @@ async def wipe_session_output_disk_only(session_id: str) -> Dict[str, Any]:
     removed_count = 0
     removed_names: List[str] = []
     if output_path:
-        removed_count, removed_names = wipe_output_directory(output_path)
+        if preserve_subdirs:
+            removed_count, removed_names = wipe_output_directory_selective(
+                output_path,
+                preserve_subdirs=preserve_subdirs,
+            )
+        else:
+            removed_count, removed_names = wipe_output_directory(output_path)
     return {
         "session_id": session_id,
         "output_dir": output_path,
         "removed_count": removed_count,
         "removed_names": removed_names,
+        "preserved_subdirs": list(preserve_subdirs or []),
     }
 
 

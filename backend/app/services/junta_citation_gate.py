@@ -60,8 +60,7 @@ def analyst_question_supported(
     if not p:
         return False
     if is_analyst_few_shot_artifact(p):
-        if not _dual_years_in_corpus_or_analysis(p, corpus, analysis):
-            return False
+        return False
 
     nums = _extract_significant_numbers(p)
     experience_nums = [n for n in nums if int(n) >= 1 and int(n) <= 40]

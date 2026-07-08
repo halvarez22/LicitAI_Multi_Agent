@@ -69,3 +69,16 @@ def test_sanitize_strips_fill_quality_servicios():
     ]
     out = sanitize_chat_pending_questions(pending, state)
     assert out == []
+
+
+def test_deferred_economic_warnings_no_chat_capture():
+    issues = [
+        {
+            "error_type": "required_field_missing",
+            "field_key": "tarifa_mensual",
+            "expected_rule": "deferred_to_economic_stage",
+            "severity": "warn",
+            "document_id": "calculo_costos.xlsx",
+        }
+    ]
+    assert fill_quality_needs_chat_capture(issues, {"triage_context": {"tender_category": "SERVICIOS"}}) is False

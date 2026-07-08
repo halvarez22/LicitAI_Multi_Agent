@@ -1,0 +1,28 @@
+{
+  "messages_version": "1.0.0",
+  "description": "Copy UX centralizado para descarga contextual F5 — sin códigos internos al licitante.",
+  "empty_reasons": {
+    "no_files_on_disk": "Aún no hay documentos en este alcance. Si acabas de generar, pulsa Actualizar o espera unos segundos.",
+    "prices_required": "Completa los precios en el chat o adjunta tu cotización para generar la propuesta económica.",
+    "generation_not_run": "Aún no se ha ejecutado la generación para este alcance. Usa el botón correspondiente arriba.",
+    "job_failed": "La última generación terminó con error. Revisa la cola de generación y los avisos del asistente.",
+    "job_blocked": "La generación está en pausa por datos pendientes. Complétalos en el chat y vuelve a generar.",
+    "document_quality_gate": "Antes de generar, confirma en el chat qué documentos armamos en el sistema y vuelve a generar.",
+    "artifact_fingerprint_mismatch": "Los archivos en disco no corresponden a la empresa o cotización activa. Regenera este alcance antes de descargar.",
+    "company_binding_invalid": "La sesión no tiene una empresa válida ligada. Selecciona una empresa del catálogo y vuelve a generar.",
+    "scope_disabled": "La descarga contextual no está habilitada en este entorno."
+  },
+  "banners": {
+    "post_generation_success": "Listo — descarga tus archivos aquí ↓",
+    "partial_expediente": "Expediente parcial: solo incluye los sobres ya generados.",
+    "advanced_logistics_link": "Ver logística avanzada",
+    "cross_scope_economic_ready": "La cotización económica ya está disponible — bloque ECONÓMICA ↓",
+    "cross_scope_technical_ready": "La propuesta técnica ya está disponible — bloque TÉCNICA ↓"
+  },
+  "modal": {
+    "download_all_zip": "Descargar todo (ZIP)",
+    "download_file": "Descargar",
+    "empty_list": "No hay archivos listos para descargar en este momento.",
+    "refresh_hint": "Actualizar lista"
+  }
+}

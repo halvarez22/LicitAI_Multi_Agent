@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import re
 from pathlib import Path
 from datetime import datetime, timezone
@@ -583,29 +584,28 @@ def _generation_progress_for_step(step: str) -> Tuple[int, int, str, str]:
 
 
 def _prepare_generation_queue(
-    session_state: Dict[str, Any], resume_generation: bool, mode: str
+    session_state: Dict[str, Any],
+    resume_generation: bool,
+    mode: str,
+    generation_mode: str = "full",
+    generation_stream: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Estado de cola de generación. Solo aplica a ``generation`` / ``generation_only``.
     Sin ``resume_generation``: reinicia siempre. Con resume: conserva cola activa.
+    F6: soporta ``generation_stream`` y ``job_id`` para colas por stream.
     """
-    if mode not in ("generation_only", "generation"):
-        return None
-    existing = session_state.get("generation_state")
-    if not resume_generation:
-        g = {"status": "running", "jobs": _default_generation_jobs()}
-        session_state["generation_state"] = g
-        return g
-    if (
-        existing
-        and isinstance(existing.get("jobs"), list)
-        and len(existing["jobs"]) > 0
-        and existing.get("status") != "completed"
-    ):
-        return existing
-    g = {"status": "running", "jobs": _default_generation_jobs()}
-    session_state["generation_state"] = g
-    return g
+    from app.services.generation_queue_controller import prepare_generation_queue_with_mode
+
+    return prepare_generation_queue_with_mode(
+        session_state,
+        resume_generation=resume_generation,
+        orchestrator_mode=mode,
+        generation_mode=generation_mode,
+        generation_stream=generation_stream,
+        job_id=job_id,
+    )
 
 
 def _gen_job_status(gen_state: Optional[Dict[str, Any]], job_id: str) -> Optional[str]:
@@ -648,26 +648,6 @@ def _economic_proposal_snapshot(session_state: Dict[str, Any]) -> Optional[Dict[
     return None
 
 
-def _economic_writer_already_materialized(
-    session_id: str, session_state: Dict[str, Any]
-) -> bool:
-    """True si la cotización ya está calculada y hay archivos económicos en disco."""
-    snapshot = _economic_proposal_snapshot(session_state) or {}
-    total_base = float(snapshot.get("total_base") or 0.0)
-    snap_status = str(snapshot.get("status") or "")
-    user_inputs = session_state.get("economic_user_inputs") or {}
-    allow_zero = bool(user_inputs.get("allow_zero_total_base_ack"))
-    snapshot_ready = snap_status == "complete" and (
-        total_base >= 0.01 or allow_zero
-    ) and (_economic_snapshot_has_line_items(snapshot) or allow_zero)
-    if not snapshot_ready:
-        return False
-    econ_dir = Path("/data/outputs") / session_id / "2.propuesta_economica"
-    if not econ_dir.is_dir():
-        return False
-    return any(p.is_file() for p in econ_dir.iterdir())
-
-
 def _can_continue_generation_past_economic_failure(
     step: str, gen_state: Optional[Dict[str, Any]]
 ) -> bool:
@@ -678,6 +658,82 @@ def _can_continue_generation_past_economic_failure(
         _gen_job_status(gen_state, "technical") == "done"
         and _gen_job_status(gen_state, "formats") == "done"
     )
+
+
+async def _enforce_readiness_generation_gate(
+    *,
+    step: str,
+    session_id: str,
+    session_state: Dict[str, Any],
+    memory: Any,
+    company_id: Optional[str],
+    correlation_id: str,
+    gen_state: Optional[Dict[str, Any]],
+    execution_results: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Bloquea writers cuando readiness indica que no procede."""
+    from app.services.expediente_readiness_service import (
+        generation_step_allowed,
+        primary_blocker_for_step,
+        readiness_gates_enabled,
+        resolve_expediente_readiness,
+        stop_reason_for_blocker,
+    )
+
+    if not readiness_gates_enabled():
+        return None
+    if step not in ("technical", "formats", "economic_writer", "packager", "delivery"):
+        return None
+
+    company_profile = None
+    company_exists = None
+    if company_id:
+        row = await memory.get_company(str(company_id))
+        if row:
+            company_exists = True
+            company_profile = row.get("master_profile") if isinstance(row.get("master_profile"), dict) else row
+        else:
+            company_exists = False
+
+    output_root = os.path.join("/data/outputs", session_id)
+    readiness = resolve_expediente_readiness(
+        {**session_state, "session_id": session_id},
+        company_profile=company_profile,
+        company_exists=company_exists,
+        session_output_path=output_root if os.path.isdir(output_root) else None,
+    )
+    if generation_step_allowed(readiness, step):
+        return None
+
+    blocker = primary_blocker_for_step(readiness, step)
+    stop_reason = stop_reason_for_blocker(blocker)
+    message = str(
+        (blocker or {}).get("message")
+        or "La generación no puede continuar hasta resolver los pendientes."
+    )
+    if gen_state:
+        _set_gen_job_status(gen_state, step, "blocked")
+    decision = OrchestratorState(
+        stop_reason=stop_reason,
+        aggregate_health="partial",
+        next_steps=[],
+        correlation_id=correlation_id,
+    ).model_dump()
+    updates: Dict[str, Any] = {"last_orchestrator_decision": decision}
+    if gen_state:
+        updates["generation_state"] = gen_state
+    await _safe_save_session(memory, session_id, updates)
+    return {
+        "status": "waiting_for_data",
+        "session_id": session_id,
+        "chatbot_message": message,
+        "results": {
+            k: (v if isinstance(v, dict) else v.model_dump())
+            for k, v in execution_results.items()
+        },
+        "orchestrator_decision": decision,
+        "data": {"readiness_blocker": blocker, "readiness": readiness},
+    }
 
 
 def _agent_output_user_message(res: Any) -> str:
@@ -762,6 +818,66 @@ def _apply_filtered_compliance_master_list(
             }
         }
     )
+
+
+async def _inject_document_inventory_for_generation(
+    *,
+    memory: Any,
+    session_id: str,
+    session_state: Dict[str, Any],
+    input_data: Dict[str, Any],
+    agent_input: AgentInput,
+    correlation_id: str,
+) -> Tuple[Dict[str, Any], AgentInput, Dict[str, Any]]:
+    """
+    Inyecta ``document_inventory`` en ``company_data`` antes de los writers.
+
+    Cascada HRU: ``input_data`` → ``session_state`` → servicio canónico.
+    Sin mapas por licitación; aplica a cualquier modalidad (servicios, obra, bienes).
+    """
+    dump: Optional[Dict[str, Any]] = None
+    for src in (
+        input_data.get("document_inventory"),
+        session_state.get("document_inventory"),
+    ):
+        if isinstance(src, dict) and isinstance(src.get("items"), list) and src.get("items"):
+            dump = src
+            break
+
+    if dump is None and settings.DOCUMENT_INVENTORY_SERVICE_ENABLED:
+        try:
+            from app.services.document_inventory_service import DocumentInventoryService
+
+            inv = await DocumentInventoryService.build_for_session(
+                session_id,
+                use_llm=bool(settings.DOCUMENT_INVENTORY_SERVICE_USE_LLM),
+                correlation_id=correlation_id,
+            )
+            dump = inv.model_dump(mode="json")
+            input_data["document_inventory"] = dump
+            session_state["document_inventory"] = dump
+        except Exception as exc:
+            logger.warning(
+                "document_inventory_pre_generation_build_failed",
+                session_id=session_id,
+                error=str(exc)[:200],
+            )
+
+    if isinstance(dump, dict) and dump.get("items"):
+        agent_input = agent_input.model_copy(
+            update={
+                "company_data": {
+                    **(agent_input.company_data or {}),
+                    "document_inventory": dump,
+                }
+            }
+        )
+        logger.info(
+            "document_inventory_injected_for_generation",
+            session_id=session_id,
+            items=len(dump.get("items") or []),
+        )
+    return input_data, agent_input, session_state
 
 
 async def _safe_save_session(
@@ -1316,6 +1432,48 @@ class OrchestratorAgent(BaseAgent):
                         error=str(_enrich_err),
                     )
 
+            if mode in ("generation_only", "generation") and agent_input.company_id:
+                try:
+                    from app.services.company_binding_service import ensure_company_bound_for_generation
+
+                    _bind_res = await ensure_company_bound_for_generation(
+                        self.context_manager.memory,
+                        session_id,
+                        str(agent_input.company_id),
+                        session_state,
+                    )
+                    if _bind_res:
+                        session_state = await self.context_manager.memory.get_session(session_id) or session_state
+                        logger.info(
+                            "orchestrator_company_binding_applied",
+                            session_id=session_id,
+                            company_id=str(agent_input.company_id),
+                            company_changed=bool(_bind_res.get("company_changed")),
+                        )
+                except ValueError as _bind_err:
+                    if "COMPANY_NOT_FOUND" in str(_bind_err):
+                        decision = OrchestratorState(
+                            stop_reason="COMPANY_ORPHAN_ID",
+                            aggregate_health="failed",
+                            next_steps=[],
+                            correlation_id=correlation_id,
+                        ).model_dump()
+                        await _safe_save_session(
+                            self.context_manager.memory,
+                            session_id,
+                            {"last_orchestrator_decision": decision},
+                        )
+                        return {
+                            "status": "error",
+                            "session_id": session_id,
+                            "message": (
+                                "La empresa seleccionada no existe en el catálogo. "
+                                "Selecciona una empresa válida antes de generar."
+                            ),
+                            "orchestrator_decision": decision,
+                        }
+                    raise
+
             # --- TRIAGE NORMATIVO (PIPELINE PASO 1) ---
             triage_context = session_state.get("triage_context")
             if triage_context:
@@ -1412,6 +1570,61 @@ class OrchestratorAgent(BaseAgent):
                         task_name="stage_completed:analysis",
                         result=res if isinstance(res, dict) else res.model_dump()
                     )
+                    try:
+                        from app.services.economic_post_analysis_hook import run_economic_post_analysis_hook
+
+                        _sess_eco = await self.context_manager.memory.get_session(session_id) or {}
+                        _eco_hook = await run_economic_post_analysis_hook(
+                            self.context_manager.memory,
+                            session_id,
+                            _sess_eco,
+                        )
+                        if _eco_hook:
+                            execution_results["economic_post_analysis_hook"] = _eco_hook
+                    except Exception as _eco_hook_exc:
+                        logger.warning(
+                            "economic_post_analysis_hook_failed",
+                            session_id=session_id,
+                            error=str(_eco_hook_exc)[:200],
+                        )
+                    try:
+                        from app.services.technical_post_analysis_hook import (
+                            run_technical_post_analysis_hook,
+                        )
+
+                        _sess_tech = await self.context_manager.memory.get_session(session_id) or {}
+                        _tech_hook = await run_technical_post_analysis_hook(
+                            self.context_manager.memory,
+                            session_id,
+                            _sess_tech,
+                        )
+                        if _tech_hook:
+                            execution_results["technical_post_analysis_hook"] = _tech_hook
+                    except Exception as _tech_hook_exc:
+                        logger.warning(
+                            "technical_post_analysis_hook_failed",
+                            session_id=session_id,
+                            error=str(_tech_hook_exc)[:200],
+                        )
+                    try:
+                        from app.services.convocatoria_briefing_service import (
+                            run_convocatoria_briefing_post_analysis_hook,
+                        )
+
+                        _sess_brief = await self.context_manager.memory.get_session(session_id) or {}
+                        _brief_hook = await run_convocatoria_briefing_post_analysis_hook(
+                            self.context_manager.memory,
+                            session_id,
+                            _sess_brief,
+                        )
+                        if _brief_hook:
+                            execution_results["convocatoria_briefing_hook"] = _brief_hook
+                    except Exception as _brief_hook_exc:
+                        logger.warning(
+                            "convocatoria_briefing_hook_failed",
+                            session_id=session_id,
+                            error=str(_brief_hook_exc)[:200],
+                        )
                     try:
                         from app.checklist.submission_checklist_service import (
                             upsert_checklist_from_cronograma,
@@ -2208,66 +2421,136 @@ class OrchestratorAgent(BaseAgent):
 
             # Generation
             if mode in ["full", "generation", "generation_only"]:
+                from app.services.generation_concurrency_controller import (
+                    dual_stream_enabled,
+                    resolve_generation_stream_from_input,
+                    try_acquire_stream_lock,
+                )
+                from app.services.generation_mode_policy import (
+                    economic_snapshot_required_before,
+                    resolve_generation_mode_from_input,
+                )
+                from app.services.generation_wipe_policy import combined_wipe_preserve_subdirs
+
+                generation_mode = resolve_generation_mode_from_input(input_data, session_state)
+                generation_stream = resolve_generation_stream_from_input(input_data, generation_mode)
+                dual_stream_job_id = str(input_data.get("job_id") or "").strip() or None
                 input_data, agent_input = _apply_filtered_compliance_master_list(
                     input_data, agent_input
                 )
                 from app.agents.data_gap import DataGapAgent
                 gen_state = _prepare_generation_queue(
-                    session_state, agent_input.resume_generation, mode
+                    session_state,
+                    agent_input.resume_generation,
+                    mode,
+                    generation_mode,
+                    generation_stream=generation_stream,
+                    job_id=dual_stream_job_id,
                 )
+                if (
+                    dual_stream_enabled()
+                    and generation_mode in ("technical", "economic")
+                    and dual_stream_job_id
+                    and gen_state
+                ):
+                    lock_result = try_acquire_stream_lock(
+                        gen_state,
+                        generation_stream if generation_stream in ("technical", "economic") else (
+                            "technical" if generation_mode == "technical" else "economic"
+                        ),
+                        dual_stream_job_id,
+                    )
+                    if not lock_result.acquired:
+                        decision = OrchestratorState(
+                            stop_reason="GENERATION_STREAM_BUSY",
+                            aggregate_health="partial",
+                            next_steps=next_steps,
+                            correlation_id=correlation_id,
+                        ).model_dump()
+                        await _safe_save_session(
+                            self.context_manager.memory,
+                            session_id,
+                            {
+                                "generation_state": gen_state,
+                                "last_orchestrator_decision": decision,
+                            },
+                        )
+                        return _response_with_generation_state(
+                            {
+                                "status": "already_running",
+                                "session_id": session_id,
+                                "chatbot_message": (
+                                    "Ya hay una generación en curso para este mismo alcance. "
+                                    "Espera a que termine o usa el otro modo (técnica / económica) en paralelo."
+                                ),
+                                "results": execution_results,
+                                "orchestrator_decision": decision,
+                                "generation_stream": generation_stream,
+                            },
+                            session_state,
+                            mode,
+                        )
+                    await _safe_save_session(
+                        self.context_manager.memory,
+                        session_id,
+                        {"generation_state": gen_state},
+                    )
                 if self._should_execute_stage("datagap", pipeline_config, stages_skipped):
-                    skip_dg = bool(gen_state and _gen_job_status(gen_state, "datagap") == "done")
-                    if skip_dg:
-                        execution_results["datagap"] = {"status": "resumed"}
+                    if gen_state and _gen_job_status(gen_state, "datagap") == "skipped":
+                        execution_results["datagap"] = {"status": "skipped"}
                     else:
-                        _notify_job_progress(
-                            agent_input.job_id,
-                            "generation.datagap",
-                            91,
-                            "Validando datos mínimos para generación…",
-                        )
-                        res = await DataGapAgent(self.context_manager).process(agent_input)
-                        execution_results["datagap"] = res
-                        stages_executed.append("datagap")
-                        if _result_status_value(res) == AgentStatus.WAITING_FOR_DATA.value:
-                            decision = OrchestratorState(
-                                stop_reason="INCOMPLETE_DATA",
-                                aggregate_health="partial",
-                                next_steps=next_steps,
-                                correlation_id=correlation_id,
-                            ).model_dump()
-                            if gen_state:
-                                _set_gen_job_status(gen_state, "datagap", "blocked")
-                            _updates_6: Dict[str, Any] = {"last_orchestrator_decision": decision}
-                            if gen_state:
-                                _updates_6["generation_state"] = gen_state
-                            await _safe_save_session(self.context_manager.memory, session_id, _updates_6)
-                            
-                            # --- POST-PROCESO PROACTIVO ---
-                            await self._proactive_injection_checkpoint(session_id)
-                            
-                            return _response_with_generation_state(
-                                {
-                                    "status": "waiting_for_data",
-                                    "session_id": session_id,
-                                    "chatbot_message": _result_message(res) or "",
-                                    "results": {
-                                        k: (v if isinstance(v, dict) else v.model_dump())
-                                        for k, v in execution_results.items()
-                                    },
-                                    "orchestrator_decision": decision,
-                                },
-                                session_state,
-                                mode,
+                        skip_dg = bool(gen_state and _gen_job_status(gen_state, "datagap") == "done")
+                        if skip_dg:
+                            execution_results["datagap"] = {"status": "resumed"}
+                        else:
+                            _notify_job_progress(
+                                agent_input.job_id,
+                                "generation.datagap",
+                                91,
+                                "Validando datos mínimos para generación…",
                             )
-                        _notify_job_progress(
-                            agent_input.job_id,
-                            "generation.datagap",
-                            92,
-                            "Validación inicial completa; iniciando generación documental…",
-                        )
-                        if gen_state:
-                            _set_gen_job_status(gen_state, "datagap", "done")
+                            res = await DataGapAgent(self.context_manager).process(agent_input)
+                            execution_results["datagap"] = res
+                            stages_executed.append("datagap")
+                            if _result_status_value(res) == AgentStatus.WAITING_FOR_DATA.value:
+                                decision = OrchestratorState(
+                                    stop_reason="INCOMPLETE_DATA",
+                                    aggregate_health="partial",
+                                    next_steps=next_steps,
+                                    correlation_id=correlation_id,
+                                ).model_dump()
+                                if gen_state:
+                                    _set_gen_job_status(gen_state, "datagap", "blocked")
+                                _updates_6: Dict[str, Any] = {"last_orchestrator_decision": decision}
+                                if gen_state:
+                                    _updates_6["generation_state"] = gen_state
+                                await _safe_save_session(self.context_manager.memory, session_id, _updates_6)
+                                
+                                # --- POST-PROCESO PROACTIVO ---
+                                await self._proactive_injection_checkpoint(session_id)
+                                
+                                return _response_with_generation_state(
+                                    {
+                                        "status": "waiting_for_data",
+                                        "session_id": session_id,
+                                        "chatbot_message": _result_message(res) or "",
+                                        "results": {
+                                            k: (v if isinstance(v, dict) else v.model_dump())
+                                            for k, v in execution_results.items()
+                                        },
+                                        "orchestrator_decision": decision,
+                                    },
+                                    session_state,
+                                    mode,
+                                )
+                            _notify_job_progress(
+                                agent_input.job_id,
+                                "generation.datagap",
+                                92,
+                                "Validación inicial completa; iniciando generación documental…",
+                            )
+                            if gen_state:
+                                _set_gen_job_status(gen_state, "datagap", "done")
 
                 if settings.DOCUMENT_INVENTORY_MERGE_ENABLED:
                     try:
@@ -2311,52 +2594,16 @@ class OrchestratorAgent(BaseAgent):
                             error=str(_inv_exc),
                         )
 
-                # DocumentInventoryService movido a fase temprana (línea ~950) para alimentar al IntakePlanner
-
-                # ── TAREA 4: Verificar snapshot económico antes de invocar EconomicWriterAgent ──
-                # Si el snapshot tiene total_base ~0 (fue generado antes de que el usuario
-                # capturara precios en el chat), intentamos re-sincronizarlo. Si no es posible,
-                # detenemos el pipeline con un mensaje claro al usuario.
-                _fresh_session_for_econ = await self.context_manager.memory.get_session(session_id) or {}
-                _econ_ready, _econ_error = await _ensure_economic_snapshot_ready(
-                    self.context_manager,
-                    session_id,
-                    agent_input,
-                    _fresh_session_for_econ,
+                input_data, agent_input, session_state = await _inject_document_inventory_for_generation(
+                    memory=self.context_manager.memory,
+                    session_id=session_id,
+                    session_state=session_state,
+                    input_data=input_data,
+                    agent_input=agent_input,
+                    correlation_id=correlation_id,
                 )
-                if _econ_ready and gen_state:
-                    _unblock_generation_jobs_for_economic_retry(gen_state)
 
-                if not _econ_ready and _econ_error:
-                    _stop_reason = str(_econ_error.get("stop_reason") or "ECONOMIC_PRICES_INCOMPLETE")
-                    _econ_decision = OrchestratorState(
-                        stop_reason=_stop_reason,
-                        aggregate_health="partial",
-                        next_steps=next_steps,
-                        correlation_id=correlation_id,
-                    ).model_dump()
-                    if gen_state:
-                        _set_gen_job_status(gen_state, "economic_writer", "blocked")
-                    _updates_econ: Dict[str, Any] = {"last_orchestrator_decision": _econ_decision}
-                    if gen_state:
-                        _updates_econ["generation_state"] = gen_state
-                    await _safe_save_session(self.context_manager.memory, session_id, _updates_econ)
-                    await self._proactive_injection_checkpoint(session_id)
-                    return _response_with_generation_state(
-                        {
-                            "status": _econ_error.get("status", "waiting_for_data"),
-                            "session_id": session_id,
-                            "chatbot_message": _econ_error.get("message", ""),
-                            "results": {
-                                k: (v if isinstance(v, dict) else v.model_dump())
-                                for k, v in execution_results.items()
-                            },
-                            "orchestrator_decision": _econ_decision,
-                            "data": _econ_error.get("data"),
-                        },
-                        session_state,
-                        mode,
-                    )
+                # DocumentInventoryService movido a fase temprana (línea ~950) para alimentar al IntakePlanner
 
                 # ── TAREA 4: Inyectar triage_context en agent_input para agentes de generación ──
                 # El triage_context se persiste en session_state durante la fase de análisis.
@@ -2378,17 +2625,61 @@ class OrchestratorAgent(BaseAgent):
 
                 # Evitar mezclar archivos de corridas fallidas con la salida nueva (conteo/ZIP).
                 if getattr(settings, "GENERATION_WIPE_OUTPUTS_BEFORE_WRITERS", True):
+                    _should_wipe_disk = True
                     if gen_state and _gen_job_status(gen_state, "technical") != "done":
+                        try:
+                            from app.api.v1.routes.downloads import resolve_outputs_root
+                            from app.services.generation_wipe_policy import (
+                                evaluate_pre_generation_wipe,
+                            )
+
+                            _out_root = await resolve_outputs_root(session_id)
+                            _wipe_decision = evaluate_pre_generation_wipe(
+                                generation_mode=generation_mode,
+                                gen_state=gen_state,
+                                session_output_path=_out_root,
+                                company_data=agent_input.company_data or {},
+                                session_state=session_state,
+                            )
+                            _should_wipe_disk = bool(_wipe_decision.get("should_wipe"))
+                            if not _should_wipe_disk:
+                                logger.info(
+                                    "orchestrator_generation_wipe_skipped",
+                                    session_id=session_id,
+                                    reason=_wipe_decision.get("reason"),
+                                    preserved_job_id=_wipe_decision.get("preserved_job_id"),
+                                    artifact_count_hint=_wipe_decision.get(
+                                        "artifact_count_hint"
+                                    ),
+                                )
+                        except Exception as _wipe_eval_exc:
+                            logger.warning(
+                                "orchestrator_generation_wipe_eval_failed",
+                                session_id=session_id,
+                                error=str(_wipe_eval_exc)[:120],
+                            )
+                    if _should_wipe_disk and gen_state and _gen_job_status(
+                        gen_state, "technical"
+                    ) != "done":
                         try:
                             from app.services.generated_outputs_cleanup import (
                                 wipe_session_output_disk_only,
                             )
 
-                            wipe_res = await wipe_session_output_disk_only(session_id)
+                            _preserve = combined_wipe_preserve_subdirs(
+                                generation_mode,
+                                gen_state,
+                            )
+                            wipe_res = await wipe_session_output_disk_only(
+                                session_id,
+                                preserve_subdirs=_preserve or None,
+                            )
                             logger.info(
                                 "orchestrator_generation_disk_wiped",
                                 session_id=session_id,
                                 removed=wipe_res.get("removed_count"),
+                                preserved=wipe_res.get("preserved_subdirs"),
+                                generation_mode=generation_mode,
                             )
                         except Exception as _wipe_exc:
                             logger.warning(
@@ -2404,14 +2695,6 @@ class OrchestratorAgent(BaseAgent):
                         **_gfm,
                     )
 
-                if gen_state and _economic_writer_already_materialized(session_id, session_state):
-                    if _gen_job_status(gen_state, "economic_writer") in (
-                        "blocked",
-                        "error",
-                        "pending",
-                    ):
-                        _set_gen_job_status(gen_state, "economic_writer", "done")
-
                 for step, a_cls in [
                     ("technical", "TechnicalWriterAgent"),
                     ("formats", "FormatsAgent"),
@@ -2421,6 +2704,26 @@ class OrchestratorAgent(BaseAgent):
                 ]:
                     if self._should_execute_stage(step, pipeline_config, stages_skipped):
                         try:
+                            if (
+                                dual_stream_enabled()
+                                and step in ("packager", "delivery")
+                                and gen_state
+                            ):
+                                from app.services.generation_concurrency_controller import (
+                                    streams_blocking_shared,
+                                )
+
+                                _blocking_streams = streams_blocking_shared(gen_state)
+                                if _blocking_streams:
+                                    execution_results[step] = {
+                                        "status": "deferred",
+                                        "reason": "streams_active",
+                                        "blocking_streams": _blocking_streams,
+                                    }
+                                    continue
+                            if gen_state and _gen_job_status(gen_state, step) == "skipped":
+                                execution_results[step] = {"status": "skipped"}
+                                continue
                             skip_step = bool(
                                 gen_state and _gen_job_status(gen_state, step) == "done"
                             )
@@ -2442,19 +2745,78 @@ class OrchestratorAgent(BaseAgent):
                                     )
                                     skip_step = False
                                     _set_gen_job_status(gen_state, step, "pending")
-                            if (
-                                not skip_step
-                                and step == "economic_writer"
-                                and gen_state
-                                and _gen_job_status(gen_state, step) in ("blocked", "error")
-                                and _economic_writer_already_materialized(session_id, session_state)
-                            ):
-                                _set_gen_job_status(gen_state, step, "done")
-                                execution_results[step] = {"status": "resumed", "data": {"documentos": []}}
-                                skip_step = True
                             if skip_step:
                                 execution_results[step] = {"status": "resumed"}
                                 continue
+                            _gate_resp = await _enforce_readiness_generation_gate(
+                                step=step,
+                                session_id=session_id,
+                                session_state=session_state,
+                                memory=self.context_manager.memory,
+                                company_id=str(agent_input.company_id) if agent_input.company_id else None,
+                                correlation_id=correlation_id,
+                                gen_state=gen_state,
+                                execution_results=execution_results,
+                            )
+                            if _gate_resp:
+                                await self._proactive_injection_checkpoint(session_id)
+                                return _response_with_generation_state(
+                                    _gate_resp,
+                                    session_state,
+                                    mode,
+                                )
+                            if (
+                                step == "economic_writer"
+                                and "economic_writer"
+                                in economic_snapshot_required_before(generation_mode)
+                            ):
+                                _fresh_session_for_econ = (
+                                    await self.context_manager.memory.get_session(session_id) or {}
+                                )
+                                _econ_ready, _econ_error = await _ensure_economic_snapshot_ready(
+                                    self.context_manager,
+                                    session_id,
+                                    agent_input,
+                                    _fresh_session_for_econ,
+                                )
+                                if _econ_ready and gen_state:
+                                    _unblock_generation_jobs_for_economic_retry(gen_state)
+                                if not _econ_ready and _econ_error:
+                                    _stop_reason = str(
+                                        _econ_error.get("stop_reason") or "ECONOMIC_PRICES_INCOMPLETE"
+                                    )
+                                    _econ_decision = OrchestratorState(
+                                        stop_reason=_stop_reason,
+                                        aggregate_health="partial",
+                                        next_steps=next_steps,
+                                        correlation_id=correlation_id,
+                                    ).model_dump()
+                                    if gen_state:
+                                        _set_gen_job_status(gen_state, "economic_writer", "blocked")
+                                    _updates_econ: Dict[str, Any] = {
+                                        "last_orchestrator_decision": _econ_decision
+                                    }
+                                    if gen_state:
+                                        _updates_econ["generation_state"] = gen_state
+                                    await _safe_save_session(
+                                        self.context_manager.memory, session_id, _updates_econ
+                                    )
+                                    await self._proactive_injection_checkpoint(session_id)
+                                    return _response_with_generation_state(
+                                        {
+                                            "status": _econ_error.get("status", "waiting_for_data"),
+                                            "session_id": session_id,
+                                            "chatbot_message": _econ_error.get("message", ""),
+                                            "results": {
+                                                k: (v if isinstance(v, dict) else v.model_dump())
+                                                for k, v in execution_results.items()
+                                            },
+                                            "orchestrator_decision": _econ_decision,
+                                            "data": _econ_error.get("data"),
+                                        },
+                                        session_state,
+                                        mode,
+                                    )
                             if step == "technical":
                                 from app.agents.technical_writer import TechnicalWriterAgent as C
                             elif step == "formats":
@@ -2873,9 +3235,6 @@ class OrchestratorAgent(BaseAgent):
                         )
 
                 econ_documents = _extract_documentos(execution_results.get("economic_writer"))
-                if gen_state and _gen_job_status(gen_state, "economic_writer") == "blocked":
-                    if econ_documents or _economic_writer_already_materialized(session_id, session_state):
-                        _set_gen_job_status(gen_state, "economic_writer", "done")
                 if gen_state:
                     gen_state["status"] = "completed"
                     await _safe_save_session(

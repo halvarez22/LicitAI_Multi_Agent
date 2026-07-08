@@ -418,85 +418,122 @@ class EconomicWriterAgent(BaseAgent):
             if os.path.isfile(excel_path):
                 stamp_corporate_excel_file(excel_path, econ_doc_meta)
 
-            word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
-            self._generate_anexo_ae(
-                word_path,
-                mapeo_items,
-                resumen,
-                master_profile,
-                billing_spec=billing_spec,
-                doc_metadata=econ_doc_meta,
-            )
+            generated_documents: List[Dict[str, Any]] = []
+            if resumen.get("obra_breakdown"):
+                from app.services.official_format_resolver import (
+                    materialize_obra_economic_envelope,
+                )
 
-            carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
-            self._generate_carta_compromiso(
-                carta_path, resumen, master_profile, doc_metadata=econ_doc_meta
-            )
+                tabla_name = os.path.basename(excel_path) if os.path.isfile(excel_path) else ""
+                obra_docs = materialize_obra_economic_envelope(
+                    session_id=session_id,
+                    session_state=session_state,
+                    master_profile=master_profile,
+                    output_dir=output_base_dir,
+                    economic_data=economic_data,
+                    mapeo_items=mapeo_items,
+                    resumen=resumen,
+                    tabla_precios_basename=tabla_name,
+                )
+                generated_documents.extend(obra_docs)
+                generated_documents.insert(
+                    0,
+                    attach_traceability(
+                        {
+                            "nombre": "Tabla de Precios Unitarios",
+                            "ruta": excel_path,
+                            "tipo": "tabla_precios",
+                            "template_id": "tabla_precios",
+                        },
+                        source_doc_id=str(excel_lineage.get("source_doc_id") or "") or None,
+                        source_filename=str(excel_lineage.get("source_filename") or "") or None,
+                        source_path=str(excel_lineage.get("source_path") or "") or None,
+                        source_hash=safe_file_sha256(str(excel_lineage.get("source_path") or "")),
+                        template_id="tabla_precios",
+                        materialization_route=str(excel_lineage.get("materialization_route") or "deterministic"),
+                        output_hash=safe_file_sha256(excel_path),
+                    ),
+                )
+            else:
+                word_path = os.path.join(output_base_dir, "ANEXO_AE_PROPUESTA_ECONOMICA.docx")
+                self._generate_anexo_ae(
+                    word_path,
+                    mapeo_items,
+                    resumen,
+                    master_profile,
+                    billing_spec=billing_spec,
+                    doc_metadata=econ_doc_meta,
+                )
 
-            apu_path = os.path.join(output_base_dir, "ANALISIS_PRECIOS_UNITARIOS.docx")
-            self._generate_apu_document(
-                apu_path,
-                resumen=resumen,
-                master_profile=master_profile,
-                mapeo_items=mapeo_items,
-                session_id=session_id,
-                session_state=session_state,
-            )
+                carta_path = os.path.join(output_base_dir, "CARTA_COMPROMISO_PRECIOS.docx")
+                self._generate_carta_compromiso(
+                    carta_path, resumen, master_profile, doc_metadata=econ_doc_meta
+                )
 
-            generated_documents = [
-                attach_traceability(
-                    {
-                        "nombre": "Tabla de Precios Unitarios",
-                        "ruta": excel_path,
-                        "tipo": "tabla_precios",
-                        "template_id": "tabla_precios",
-                    },
-                    source_doc_id=str(excel_lineage.get("source_doc_id") or "") or None,
-                    source_filename=str(excel_lineage.get("source_filename") or "") or None,
-                    source_path=str(excel_lineage.get("source_path") or "") or None,
-                    source_hash=safe_file_sha256(str(excel_lineage.get("source_path") or "")),
-                    template_id="tabla_precios",
-                    materialization_route=str(excel_lineage.get("materialization_route") or "deterministic"),
-                    output_hash=safe_file_sha256(excel_path),
-                ),
-                attach_traceability(
-                    {
-                        "nombre": "Anexo AE - Propuesta Económica",
-                        "ruta": word_path,
-                        "tipo": "anexo_economico",
-                        "template_id": "anexo_economico",
-                    },
-                    template_id="anexo_economico",
-                    materialization_route="deterministic",
-                    output_hash=safe_file_sha256(word_path),
-                ),
-                attach_traceability(
-                    {
-                        "nombre": "Carta Compromiso de Precios",
-                        "ruta": carta_path,
-                        "tipo": "carta_compromiso",
-                        "template_id": "carta_compromiso",
-                    },
-                    template_id="carta_compromiso",
-                    materialization_route="deterministic",
-                    output_hash=safe_file_sha256(carta_path),
-                ),
-                attach_traceability(
-                    {
-                        "nombre": "Análisis de Precios Unitarios",
-                        "ruta": apu_path,
-                        "tipo": "analisis_precios_unitarios",
-                        "template_id": "apu",
-                    },
-                    template_id="apu",
-                    materialization_route="deterministic_apu",
-                    output_hash=safe_file_sha256(apu_path),
-                    provenance_ui={
-                        "source": "deterministic_economic",
-                        "confidence": 0.98,
-                    },
-                ),
-            ]
+                apu_path = os.path.join(output_base_dir, "ANALISIS_PRECIOS_UNITARIOS.docx")
+                self._generate_apu_document(
+                    apu_path,
+                    resumen=resumen,
+                    master_profile=master_profile,
+                    mapeo_items=mapeo_items,
+                    session_id=session_id,
+                    session_state=session_state,
+                )
+
+                generated_documents = [
+                    attach_traceability(
+                        {
+                            "nombre": "Tabla de Precios Unitarios",
+                            "ruta": excel_path,
+                            "tipo": "tabla_precios",
+                            "template_id": "tabla_precios",
+                        },
+                        source_doc_id=str(excel_lineage.get("source_doc_id") or "") or None,
+                        source_filename=str(excel_lineage.get("source_filename") or "") or None,
+                        source_path=str(excel_lineage.get("source_path") or "") or None,
+                        source_hash=safe_file_sha256(str(excel_lineage.get("source_path") or "")),
+                        template_id="tabla_precios",
+                        materialization_route=str(excel_lineage.get("materialization_route") or "deterministic"),
+                        output_hash=safe_file_sha256(excel_path),
+                    ),
+                    attach_traceability(
+                        {
+                            "nombre": "Anexo AE - Propuesta Económica",
+                            "ruta": word_path,
+                            "tipo": "anexo_economico",
+                            "template_id": "anexo_economico",
+                        },
+                        template_id="anexo_economico",
+                        materialization_route="deterministic",
+                        output_hash=safe_file_sha256(word_path),
+                    ),
+                    attach_traceability(
+                        {
+                            "nombre": "Carta Compromiso de Precios",
+                            "ruta": carta_path,
+                            "tipo": "carta_compromiso",
+                            "template_id": "carta_compromiso",
+                        },
+                        template_id="carta_compromiso",
+                        materialization_route="deterministic",
+                        output_hash=safe_file_sha256(carta_path),
+                    ),
+                    attach_traceability(
+                        {
+                            "nombre": "Análisis de Precios Unitarios",
+                            "ruta": apu_path,
+                            "tipo": "analisis_precios_unitarios",
+                            "template_id": "apu",
+                        },
+                        template_id="apu",
+                        materialization_route="deterministic_apu",
+                        output_hash=safe_file_sha256(apu_path),
+                        provenance_ui={
+                            "source": "deterministic_economic",
+                            "confidence": 0.98,
+                        },
+                    ),
+                ]
         else:
             generated_documents = list(mirrored_documents)
             if not any("carta" in str(d.get("nombre", "")).lower() for d in generated_documents):
@@ -517,6 +554,8 @@ class EconomicWriterAgent(BaseAgent):
                 )
 
         print(f"[{self.name}] ✅ Propuesta económica generada con éxito.", flush=True)
+        from app.services.official_format_delivery_gate import validate_official_mirror_delivery
+
         fill_gate = validate_generated_documents_fill(
             stage="economic",
             generated_documents=generated_documents,
@@ -534,18 +573,29 @@ class EconomicWriterAgent(BaseAgent):
                 },
             },
         )
+        mirror_gate = validate_official_mirror_delivery(
+            stage="economic",
+            generated_documents=generated_documents,
+        )
+        fill_passed = bool(fill_gate.get("validation_passed", True))
+        mirror_passed = bool(mirror_gate.get("validation_passed", True))
         validation_events = [
             build_fill_validation_event(it, stage="economic")
             for it in (fill_gate.get("issues") or [])
             if isinstance(it, dict)
         ]
-        if not bool(fill_gate.get("validation_passed", True)):
+        validation_events.extend(
+            build_fill_validation_event(it, stage="economic")
+            for it in (mirror_gate.get("issues") or [])
+            if isinstance(it, dict)
+        )
+        if not fill_passed or not mirror_passed:
             from app.services.document_fill_ux_messages import build_fill_blocking_question
 
             company_name = str(master_profile.get("razon_social") or "").strip()
             human_question = build_fill_blocking_question(
                 "economic",
-                fill_gate.get("issues") or [],
+                (fill_gate.get("issues") or []) + (mirror_gate.get("issues") or []),
                 company_name=company_name,
             )
             return AgentOutput(
@@ -557,6 +607,7 @@ class EconomicWriterAgent(BaseAgent):
                     "documentos": generated_documents,
                     "resumen_economico": resumen,
                     "document_fill_quality_gate": fill_gate,
+                    "official_mirror_delivery_gate": mirror_gate,
                     "validation_events": validation_events,
                     "materialization_metrics": build_materialization_metrics(
                         stage="economic",
@@ -577,6 +628,21 @@ class EconomicWriterAgent(BaseAgent):
                 correlation_id=correlation_id,
             )
 
+        try:
+            from app.services.artifact_fingerprint_service import materialize_economic_fingerprint
+
+            fresh_state = await self.context_manager.memory.get_session(session_id) or {}
+            session_root = os.path.dirname(output_base_dir)
+            await materialize_economic_fingerprint(
+                self.context_manager.memory,
+                session_id,
+                fresh_state,
+                session_output_path=session_root,
+                generation_job_id=getattr(agent_input, "job_id", None),
+            )
+        except Exception:
+            pass
+
         return AgentOutput(
             status=AgentStatus.SUCCESS,
             agent_id=self.agent_id,
@@ -586,6 +652,7 @@ class EconomicWriterAgent(BaseAgent):
                 "documentos": generated_documents,
                 "resumen_economico": resumen,
                 "document_fill_quality_gate": fill_gate,
+                "official_mirror_delivery_gate": mirror_gate,
                 "validation_events": validation_events,
                 "materialization_metrics": build_materialization_metrics(
                     stage="economic",
@@ -595,8 +662,6 @@ class EconomicWriterAgent(BaseAgent):
             },
             correlation_id=correlation_id
         )
-
-
 
     async def _mirror_economic_templates(
         self,

@@ -13,10 +13,135 @@ from app.services.administrative_letter_clauses import (
     _slot,
     extract_obra_annex_inventory_requirement,
 )
+from app.services.official_format_text import (
+    is_boilerplate_obra_capture,
+    normalize_official_template_text,
+)
+
+
+def looks_like_session_slug(text: str, session_id: str = "") -> bool:
+    """
+    True si el texto parece slug interno de sesión (no número de licitación real).
+
+    Evita usar ``barda_primaria_lopez_rayon`` como concurso u objeto de obra.
+    """
+    t = re.sub(r"\s+", " ", str(text or "").strip().upper())
+    sid = str(session_id or "").strip().lower()
+    if not t or not sid:
+        return False
+    if t == sid.replace("_", " ").upper():
+        return True
+    if t.replace(" ", "_").lower() == sid:
+        return True
+    if re.search(r"[A-Z]/\d+/\d+", text):
+        return False
+    tokens = [tok for tok in sid.split("_") if len(tok) > 2]
+    if len(tokens) >= 2 and all(tok.upper() in t for tok in tokens):
+        return True
+    return False
+
+
+def is_hru_consignar_placeholder(text: str) -> bool:
+    """True si el valor es un marcador [Consignar] HRU (no dato de negocio)."""
+    t = str(text or "").strip()
+    if not t:
+        return True
+    return bool(re.match(r"^\[?\s*consignar\b", t, re.IGNORECASE))
 
 
 def _money(value: float) -> str:
     return f"${float(value or 0):,.2f}"
+
+
+def resolve_obra_concurso_label(
+    *,
+    session_state: Optional[Dict[str, Any]] = None,
+    session_id: str = "",
+    corpus: str = "",
+) -> str:
+    """Número/nombre de licitación desde sesión, carta o corpus — nunca slug de sesión."""
+    from app.services.administrative_letter_clauses import resolve_letter_session_metadata
+    from app.services.convocante_resolver import extract_convocante_from_text
+
+    state = session_state or {}
+    letter = resolve_letter_session_metadata(state)
+    candidates: List[Any] = [
+        state.get("concurso_label"),
+        state.get("licitacion_id"),
+        state.get("tender_name"),
+        state.get("concurso"),
+        state.get("session_hint"),
+        letter.get("concurso_label"),
+    ]
+    for container_key in ("last_analysis", "analysis_snapshot"):
+        block = state.get(container_key)
+        if isinstance(block, dict):
+            candidates.extend(
+                [
+                    block.get("concurso_label"),
+                    block.get("licitacion_id"),
+                    block.get("tender_name"),
+                ]
+            )
+    for raw in candidates:
+        c = str(raw or "").strip()
+        if (
+            c
+            and not looks_like_session_slug(c, session_id)
+            and not is_hru_consignar_placeholder(c)
+        ):
+            m_code = re.search(r"(?i)\b([A-Z]/\d+/\d+)\b", c)
+            if m_code:
+                return f"Licitación Pública Num. {m_code.group(1).upper()}"
+            return c
+
+    blob = str(corpus or "")
+    extracted = extract_convocante_from_text(blob)
+    proc = str(extracted.get("concurso_label") or "").strip()
+    if proc and not looks_like_session_slug(proc, session_id):
+        return proc
+
+    m = re.search(r"(?i)\b([A-Z]/\d+/\d+)\b", blob)
+    if m:
+        return f"Licitación Pública Num. {m.group(1).upper()}"
+
+    m2 = re.search(
+        r"(?i)licitaci[oó]n\s+p[uú]blica[^\n,]{0,100}",
+        blob,
+    )
+    if m2:
+        line = re.sub(r"\s+", " ", m2.group(0)).strip()[:120]
+        if not looks_like_session_slug(line, session_id) and not is_hru_consignar_placeholder(line):
+            return line
+
+    return "[Consignar — número de licitación]"
+
+
+def resolve_obra_objeto(
+    *,
+    session_state: Optional[Dict[str, Any]] = None,
+    session_id: str = "",
+    corpus: str = "",
+    explicit: str = "",
+) -> str:
+    """Objeto de la obra desde sesión o bases — nunca slug interno de sesión."""
+    state = session_state or {}
+    for raw in (
+        explicit,
+        state.get("objeto_obra"),
+        state.get("obra_descripcion"),
+        state.get("name"),
+    ):
+        val = str(raw or "").strip()
+        if (
+            val
+            and not looks_like_session_slug(val, session_id)
+            and not is_hru_consignar_placeholder(val)
+        ):
+            if not is_boilerplate_obra_capture(val):
+                return val.upper() if len(val) < 200 else val
+    obra = extract_obra_descripcion_from_corpus(str(corpus or ""), "")
+    return obra or "[Consignar — objeto de la obra en bases]"
 
 
 def _e3_subannex_checklist(snippet: str) -> List[str]:
@@ -62,11 +187,12 @@ def extract_obra_plazo_ejecucion(corpus: str) -> str:
     return ""
 
 
-def _resolve_concurso_label(concurso: str, corpus: str, fallback: str) -> str:
-    """Etiqueta de procedimiento desde metadata o corpus (sin hardcode por licitación)."""
+def _resolve_concurso_label(concurso: str, corpus: str, fallback: str, session_id: str = "") -> str:
+    """Etiqueta de procedimiento desde metadata o corpus (sin slug de sesión)."""
     label = str(concurso or "").strip()
-    if label:
-        return label
+    if label and not looks_like_session_slug(label, session_id):
+        if re.search(r"[A-Z]/\d+/\d+", label) or "licitaci" in label.lower():
+            return label
     m = re.search(
         r"(?i)licitaci[oó]n\s+p[uú]blica\s+(?:nacional\s+)?(?:num\.?\s*)?([A-Z]/\d+/\d+)",
         str(corpus or ""),
@@ -75,8 +201,13 @@ def _resolve_concurso_label(concurso: str, corpus: str, fallback: str) -> str:
         return f"Licitación Pública Num. {m.group(1).replace(' ', '')}"
     m2 = re.search(r"(?i)licitaci[oó]n\s+p[uú]blica[^\n,]{0,90}", str(corpus or ""))
     if m2:
-        return re.sub(r"\s+", " ", m2.group(0)).strip()[:120]
-    return fallback
+        line = re.sub(r"\s+", " ", m2.group(0)).strip()[:120]
+        if not looks_like_session_slug(line, session_id) and not is_hru_consignar_placeholder(line):
+            return line
+    fb = str(fallback or "").strip()
+    if fb and not looks_like_session_slug(fb, session_id) and not is_hru_consignar_placeholder(fb):
+        return fb
+    return "[Consignar — número de licitación]"
 
 
 _ECONOMIC_REQ_CONTAMINATION_RE = re.compile(
@@ -290,15 +421,16 @@ def extract_obra_e1_official_format(corpus: str) -> Optional[str]:
         return None
     if "propuesta" not in low and "proposici" not in low:
         return None
-    return chunk
+    return normalize_official_template_text(chunk)
 
 
 def extract_obra_descripcion_from_corpus(corpus: str, fallback: str = "") -> str:
     """Objeto de la obra publicado en bases (sin inventar denominación)."""
     text = str(corpus or "")
     patterns = (
+        r"(?is)adjudicar el contrato relativo a la realizaci[oó]n de la obra[:\s_]+(.+?)(?:\.|_{4,}|\n)",
         r"(?is)realizaci[oó]n de la obra[:\s_]+(.+?)(?:\.|_{4,}|\n)",
-        r"(?is)adjudicar el contrato relativo a la realizaci[oó]n de la obra[:\s_]+(.+?)(?:\.|_{4,})",
+        r"(?is)relacionado\s+con\s+la\s+obra[:\s_]+(.+?)(?:\s+es\s+del|\n)",
         r"(?is)obra p[uú]blica[^.\n]{0,60}(?:denominada|consistente en)[:\s]+(.+?)(?:\.|_{4,})",
         r"(?is)construcci[oó]n de[^.\n]{10,160}",
     )
@@ -307,13 +439,16 @@ def extract_obra_descripcion_from_corpus(corpus: str, fallback: str = "") -> str
         if not m:
             continue
         desc = re.sub(r"\s+", " ", m.group(1) if m.lastindex else m.group(0)).strip(" _.")
-        if len(desc) >= 10:
-            return desc.upper()
+        if len(desc) < 10 or is_boilerplate_obra_capture(desc):
+            continue
+        return desc.upper()
     fb = str(fallback or "").strip()
-    return fb.upper() if fb else ""
+    if fb and not is_boilerplate_obra_capture(fb):
+        return fb.upper()
+    return ""
 
 
-def _extract_licitacion_numero(concurso: str, corpus: str) -> str:
+def _extract_licitacion_numero(concurso: str, corpus: str, session_id: str = "") -> str:
     blob = f"{concurso} {corpus}"
     for pat in (
         r"(?i)licitaci[oó]n\s+p[uú]blica\s+(?:num\.?\s*)?([A-Z]/\d+/\d+)",
@@ -324,7 +459,17 @@ def _extract_licitacion_numero(concurso: str, corpus: str) -> str:
         if m:
             return m.group(1).replace(" ", "").upper()
     label = str(concurso or "").strip()
-    return label[:80] if label else "[Consignar]"
+    if (
+        label
+        and not looks_like_session_slug(label, session_id)
+        and not is_hru_consignar_placeholder(label)
+    ):
+        direct = re.search(r"(?i)\b([A-Z]/\d+/\d+)\b", label)
+        if direct:
+            return direct.group(1).upper()
+        if "licitaci" in label.lower() and re.search(r"[A-Z]/\d+/\d+", label):
+            return label[:80]
+    return "[Consignar]"
 
 
 def fill_obra_e1_official_format(
@@ -336,13 +481,19 @@ def fill_obra_e1_official_format(
     master_profile: Dict[str, Any],
     resumen: Dict[str, Any],
     plazo_ejecucion: str,
+    session_id: str = "",
 ) -> str:
     """Rellena el machote E-1 de bases con datos del oferente y motor económico."""
-    out = str(template or "")
-    num = _extract_licitacion_numero(concurso, corpus)
+    out = normalize_official_template_text(str(template or ""))
+    num = _extract_licitacion_numero(concurso, corpus, session_id=session_id)
+    if not num or num == "[Consignar]":
+        direct = re.search(r"(?i)\b([A-Z]/\d+/\d+)\b", f"{concurso} {corpus}")
+        if direct:
+            num = direct.group(1).upper()
     obra = str(obra_descripcion or "").strip() or extract_obra_descripcion_from_corpus(
         corpus, ""
     )
+    obra_ok = obra and not is_hru_consignar_placeholder(obra)
     razon = _slot(master_profile.get("razon_social"), "[Consignar — razón social]")
     rfc = _slot(master_profile.get("rfc"), "[Consignar — RFC]")
     rep = _slot(
@@ -353,33 +504,42 @@ def fill_obra_e1_official_format(
     plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
     plazo_fill = plazo.upper() if plazo else "[CONSIGNAR — PLAZO EN BASES]"
 
-    out = re.sub(
-        r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}",
-        rf"\g<1>{num}",
-        out,
-    )
-    out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
-    out = re.sub(r"(?i)\bnum\.?\s*_{3,}", f"NUM. {num}", out, count=1)
-
-    if obra:
+    num_ok = bool(num) and num != "[Consignar]" and not is_hru_consignar_placeholder(num)
+    if num_ok:
         out = re.sub(
-            r"(?is)(realizaci[oó]n de la obra[:\s]*)_{3,}",
-            rf"\g<1>{obra}",
+            r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}",
+            rf"\g<1>{num}",
             out,
-            count=1,
         )
-        if re.search(r"_{10,}", out):
-            out = re.sub(r"_{10,}", obra, out, count=1)
+        out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
+
+    if obra_ok:
+        for pat in (
+            r"(?is)(realizaci[oó]n de la obra[:\s]*)_{3,}",
+            r"(?is)(de la obra[:\s]*)_{3,}",
+            r"(?is)(relativo a la obra[:\s]*)_{3,}",
+        ):
+            if re.search(pat, out):
+                out = re.sub(pat, rf"\g<1>{obra}", out, count=1)
+                break
 
     if total > 0:
         money = f"${total:,.2f}"
         out = re.sub(r"\$\s*_{3,}", money, out)
-        out = re.sub(
-            r"\(PESOS\s+00/100",
-            f"(PESOS {money}",
-            out,
-            count=1,
-        )
+        if re.search(r"(?i)\(PESOS\s+00/100", out):
+            out = re.sub(
+                r"(?i)\(PESOS\s+00/100\s*M\.N\.\)",
+                f"({money} M.N.)",
+                out,
+                count=1,
+            )
+        elif re.search(r"(?i)\(PESOS\s+00/100", out):
+            out = re.sub(
+                r"(?i)\(PESOS\s+00/100",
+                f"({money}",
+                out,
+                count=1,
+            )
     else:
         out = re.sub(
             r"\$\s*_{3,}",
@@ -388,14 +548,20 @@ def fill_obra_e1_official_format(
         )
 
     out = re.sub(
-        r"(?i)plazo de ejecuci[oó]n de\s*_{3,}\s*al\s*_{3,}",
+        r"(?i)plazo de ejecuci[oó]n de\s*_{2,}\s*al\s*_{2,}",
         f"PLAZO DE EJECUCIÓN DE {plazo_fill}",
         out,
     )
     out = re.sub(
-        r"(?i)plazo de ejecuci[oó]n de_{3,} al _{3,}",
+        r"(?i)plazo de ejecuci[oó]n de_{2,} al _{2,}",
         f"PLAZO DE EJECUCIÓN DE {plazo_fill}",
         out,
+    )
+    out = re.sub(
+        r"(?i)(?:en un )?plazo de ejecuci[oó]n de\s*_{2,}(?:\s*al\s*_{2,})?",
+        f"PLAZO DE EJECUCIÓN DE {plazo_fill}",
+        out,
+        count=1,
     )
 
     signature = (
@@ -420,6 +586,183 @@ _E3E_FORMAT_START_RE = re.compile(
 _E3E_UTILIDAD_RE = re.compile(
     r"(?is)la\s+utilidad\s+propuesta\s+para\s+el\s+concurso"
 )
+
+
+def fetch_obra_licitacion_corpus_from_index(session_id: str) -> str:
+    """Chunks de bases con número de licitación y objeto de obra (consulta genérica)."""
+    if not str(session_id or "").strip():
+        return ""
+    from app.services.vector_service import VectorDbServiceClient
+
+    vdb = VectorDbServiceClient()
+    parts: List[str] = []
+    seen: set[str] = set()
+
+    def _add(text: str) -> None:
+        t = str(text or "").strip()
+        if not t or t in seen:
+            return
+        low = t.lower()
+        if not (
+            re.search(r"[a-z]/\d+/\d+", low)
+            or "realizaci" in low
+            or "construcci" in low
+            or "licitaci" in low
+        ):
+            return
+        seen.add(t)
+        parts.append(t)
+
+    for q in (
+        "LICITACIÓN PÚBLICA NUMERO D/080/2025 convocatoria",
+        "adjudicar el contrato relativo a la realización de la obra",
+        "construcción barda perimetral primaria",
+        "presentación de proposiciones licitación pública obra",
+    ):
+        try:
+            res = vdb.query_texts(session_id, q, n_results=14)
+            for doc in res.get("documents") or []:
+                _add(str(doc or ""))
+        except Exception:
+            continue
+    return "\n\n".join(parts)[:120000]
+
+
+def _expanded_obra_corpus(
+    corpus: str,
+    session_state: Optional[Dict[str, Any]] = None,
+    *,
+    session_id: str = "",
+) -> str:
+    """Une corpus de machote, hints de sesión y snippets de panel."""
+    state = session_state or {}
+    chunks: List[str] = []
+    for part in (
+        str(corpus or ""),
+        str(state.get("bases_corpus_hint") or ""),
+        str(state.get("session_hint") or ""),
+        str(state.get("_obra_e1_snippet") or ""),
+        str(state.get("_obra_e3e_snippet") or ""),
+        str(state.get("_obra_e3_snippet") or ""),
+    ):
+        p = str(part or "").strip()
+        if p and p not in chunks:
+            chunks.append(p)
+    if session_id:
+        for blob in (
+            fetch_obra_licitacion_corpus_from_index(session_id),
+            fetch_obra_e1_format_corpus_from_index(session_id),
+            fetch_obra_e3e_format_corpus_from_index(session_id),
+        ):
+            b = str(blob or "").strip()
+            if b and b not in chunks:
+                chunks.append(b)
+    return "\n\n".join(chunks)[:160000]
+
+
+def _resolve_e3e_fill_slots(
+    *,
+    concurso: str,
+    corpus: str,
+    obra_descripcion: str,
+    master_profile: Dict[str, Any],
+    utilidad_rate: float,
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+) -> tuple[str, str, str]:
+    """Resuelve número de licitación, objeto de obra y % utilidad para E-3 E."""
+    state = session_state or {}
+    blob = _expanded_obra_corpus(corpus, state, session_id=session_id)
+
+    num = _extract_licitacion_numero(concurso, blob, session_id=session_id)
+    if not num or num == "[Consignar]" or is_hru_consignar_placeholder(num):
+        num = _extract_licitacion_numero("", blob, session_id=session_id)
+    if not num or num == "[Consignar]" or is_hru_consignar_placeholder(num):
+        label = resolve_obra_concurso_label(
+            session_state=state,
+            session_id=session_id,
+            corpus=blob,
+        )
+        num = _extract_licitacion_numero(label, blob, session_id=session_id)
+        if is_hru_consignar_placeholder(num) or num == "[Consignar]":
+            m = re.search(r"(?i)\b([A-Z]/\d+/\d+)\b", label)
+            num = m.group(1).upper() if m else ""
+
+    obra = resolve_obra_objeto(
+        session_state=state,
+        session_id=session_id,
+        corpus=blob,
+        explicit=str(obra_descripcion or ""),
+    )
+    if is_hru_consignar_placeholder(obra):
+        obra = extract_obra_descripcion_from_corpus(blob, "") or ""
+
+    rate = float(utilidad_rate or 0)
+    if rate > 1:
+        pct_fill = f"{rate:.2f}%"
+    elif 0 < rate < 1:
+        pct_fill = f"{rate * 100:.2f}%"
+    else:
+        pct_fill = "[Consignar — % utilidad del motor económico]"
+
+    return num, obra, pct_fill
+
+
+def _apply_e3e_final_slot_values(
+    out: str,
+    *,
+    num: str,
+    obra: str,
+    pct_fill: str,
+) -> str:
+    """Sustituye placeholders residuales y normaliza la línea ES DEL … %."""
+    text = str(out or "")
+    num_ok = bool(num) and num != "[Consignar]" and not is_hru_consignar_placeholder(num)
+    obra_ok = bool(obra) and not is_hru_consignar_placeholder(obra)
+
+    if num_ok:
+        text = re.sub(
+            r"(?i)\[Consignar[^\]]*n[uú]mero de licitaci[oó]n[^\]]*\]",
+            num,
+            text,
+        )
+        text = re.sub(
+            r"(?i)concurso\s+no:\s*\[Consignar[^\]]+\]",
+            f"CONCURSO No: {num}",
+            text,
+        )
+    if obra_ok:
+        text = re.sub(
+            r"(?i)\[Consignar[^\]]*objeto[^\]]*obra[^\]]*\]",
+            obra,
+            text,
+        )
+        # Quitar línea suelta duplicada de objeto si ya quedó en el párrafo principal.
+        kept: List[str] = []
+        obra_in_main = bool(
+            re.search(
+                r"(?i)relacionado\s+con\s+la\s+obra[:\s]*"
+                + re.escape(obra[:40]),
+                text,
+            )
+        )
+        for line in text.splitlines():
+            if (
+                obra_in_main
+                and is_hru_consignar_placeholder(line.strip())
+                and "obra" in line.lower()
+            ):
+                continue
+            kept.append(line)
+        text = "\n".join(kept)
+
+    text = re.sub(
+        r"(?i)es\s+del\s+(?:\[consignar[^\]]+\]|_[\s_]{2,}%?|[\d.,]+\s*%)",
+        f"ES DEL {pct_fill}",
+        text,
+        count=1,
+    )
+    return text.strip()
 
 
 def fetch_obra_e3e_format_corpus_from_index(session_id: str) -> str:
@@ -516,7 +859,7 @@ def extract_obra_e3e_official_format(corpus: str) -> Optional[str]:
         return None
     if "utilidad" not in chunk.lower() or "%" not in chunk:
         return None
-    return chunk
+    return normalize_official_template_text(chunk)
 
 
 def fill_obra_e3e_official_format(
@@ -527,24 +870,55 @@ def fill_obra_e3e_official_format(
     obra_descripcion: str,
     master_profile: Dict[str, Any],
     utilidad_rate: float,
+    session_id: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Rellena machote E-3 E con % utilidad verificado del motor económico."""
-    out = str(template or "")
-    num = _extract_licitacion_numero(concurso, corpus)
-    obra = str(obra_descripcion or "").strip() or extract_obra_descripcion_from_corpus(
-        corpus, ""
+    out = normalize_official_template_text(str(template or ""))
+    blob = _expanded_obra_corpus(corpus, session_state, session_id=session_id)
+    num, obra, pct_fill = _resolve_e3e_fill_slots(
+        concurso=concurso,
+        corpus=blob,
+        obra_descripcion=obra_descripcion,
+        master_profile=master_profile,
+        utilidad_rate=utilidad_rate,
+        session_id=session_id,
+        session_state=session_state,
+    )
+    obra_ok = obra and not is_hru_consignar_placeholder(obra)
+    razon = _slot(
+        master_profile.get("razon_social"),
+        "[Consignar — razón social]",
     )
     rep = _slot(
         master_profile.get("representante_legal") or master_profile.get("representante"),
         "[Consignar — representante legal]",
     )
-    rate = float(utilidad_rate or 0)
-    pct = f"{rate * 100:.2f}%" if 0 < rate < 1 else (f"{rate:.2f}%" if rate > 0 else "")
-    pct_fill = pct if pct else "[Consignar — % utilidad del motor económico]"
 
-    out = re.sub(r"(?i)concurso\s+no[:\s]*_{3,}", f"CONCURSO NO: {num}", out)
-    out = re.sub(r"(?i)no[:\s]*_{3,}", f"NO: {num}", out, count=1)
-    if obra:
+    if session_id:
+        slug = session_id.replace("_", " ").upper()
+        if slug and slug in out.upper():
+            if num and num != "[Consignar]" and not is_hru_consignar_placeholder(num):
+                out = re.sub(re.escape(slug), num, out, flags=re.I)
+            if obra_ok:
+                out = re.sub(re.escape(slug), obra, out, flags=re.I)
+
+    num_ok = bool(num) and num != "[Consignar]" and not is_hru_consignar_placeholder(num)
+    if num_ok:
+        out = re.sub(
+            r"(?i)(concurso\s+no[:\s]*)(?:_{2,}|[^\n]{0,120}?)(?=\s*relacionado|\n)",
+            rf"\1{num} ",
+            out,
+            count=1,
+        )
+        out = re.sub(r"(?i)concurso\s+no[:\s]*_{3,}", f"CONCURSO NO: {num}", out)
+    if obra_ok:
+        out = re.sub(
+            r"(?i)(relacionado\s+con\s+la\s+obra[:\s]*)(?:_{2,}|[^\n]{0,200}?)(?=\s*es\s+del|\n)",
+            rf"\1{obra} ",
+            out,
+            count=1,
+        )
         out = re.sub(
             r"(?i)relacionado\s+con\s+la\s+obra[:\s]*_{3,}",
             f"RELACIONADO CON LA OBRA: {obra}",
@@ -553,19 +927,10 @@ def fill_obra_e3e_official_format(
         )
         if re.search(r"_{8,}", out):
             out = re.sub(r"_{8,}", obra, out, count=1)
-    out = re.sub(
-        r"(?i)es\s+del\s+_{3,}\s*%",
-        f"ES DEL {pct_fill}",
-        out,
-        count=1,
-    )
-    out = re.sub(r"(?i)es\s+del\s+_{3,}", f"ES DEL {pct_fill}", out, count=1)
-    out = re.sub(
-        r"(?i)\bfirma\b\.?",
-        f"\n\n{rep.upper()}\nFIRMA",
-        out,
-        count=1,
-    )
+
+    out = _apply_e3e_final_slot_values(out, num=num, obra=obra, pct_fill=pct_fill)
+    signature = f"\n\n{razon.upper()}\n{rep.upper()}\nFIRMA"
+    out = re.sub(r"(?i)\bfirma\b\.?", signature, out, count=1)
     return out.strip()
 
 
@@ -588,19 +953,30 @@ def build_obra_e3e_utilidad_markdown(
         bases_corpus_hint=bases_corpus_hint,
         req_snippet=req_snippet,
     )
-    official = extract_obra_e3e_official_format(corpus)
-    obra = (
-        str(obra_descripcion or "").strip()
-        or extract_obra_descripcion_from_corpus(corpus, session_name)
+    concurso_label = resolve_obra_concurso_label(
+        session_state=session_state,
+        session_id=session_id,
+        corpus=corpus,
     )
+    if looks_like_session_slug(concurso, session_id):
+        concurso = concurso_label
+    obra = resolve_obra_objeto(
+        session_state=session_state,
+        session_id=session_id,
+        corpus=corpus,
+        explicit=str(obra_descripcion or ""),
+    )
+    official = extract_obra_e3e_official_format(corpus)
     if official:
         return fill_obra_e3e_official_format(
             official,
-            concurso=concurso,
+            concurso=concurso_label,
             corpus=corpus,
             obra_descripcion=obra,
             master_profile=master_profile,
             utilidad_rate=utilidad_rate,
+            session_id=session_id,
+            session_state=session_state,
         )
     from app.services.official_format_resolver import (
         build_official_miss_shell,
@@ -612,7 +988,7 @@ def build_obra_e3e_utilidad_markdown(
         "E-3 E",
         "Declaración de utilidad propuesta conforme al Art. 63 LOPSRM.",
     )
-    concurso_label = _resolve_concurso_label(concurso, corpus, concurso)
+    concurso_label = _resolve_concurso_label(concurso, corpus, concurso, session_id=session_id)
     return build_official_miss_shell(
         "obra|E3E",
         concurso=concurso_label,
@@ -647,21 +1023,36 @@ def build_obra_e1_carta_compromiso_markdown(
         req_snippet=req_snippet,
         req_desc=req_desc,
     )
-    plazo = str(plazo_ejecucion or "").strip() or extract_obra_plazo_ejecucion(corpus)
+    concurso_label = resolve_obra_concurso_label(
+        session_state=session_state,
+        session_id=session_id,
+        corpus=corpus,
+    )
+    if looks_like_session_slug(concurso, session_id):
+        concurso = concurso_label
+    state = session_state or {}
+    plazo = (
+        str(plazo_ejecucion or "").strip()
+        or str(state.get("_obra_plazo_hint") or "").strip()
+        or extract_obra_plazo_ejecucion(corpus)
+    )
     official = extract_obra_e1_official_format(corpus)
     if official:
-        obra = (
-            str(obra_descripcion or "").strip()
-            or extract_obra_descripcion_from_corpus(corpus, session_name)
+        obra = resolve_obra_objeto(
+            session_state=state,
+            session_id=session_id,
+            corpus=corpus,
+            explicit=str(obra_descripcion or ""),
         )
         return fill_obra_e1_official_format(
             official,
-            concurso=concurso,
+            concurso=concurso_label,
             corpus=corpus,
             obra_descripcion=obra,
             master_profile=master_profile,
             resumen=resumen,
             plazo_ejecucion=plazo,
+            session_id=session_id,
         )
 
     from app.services.official_format_resolver import (
@@ -725,6 +1116,225 @@ def build_obra_e1_carta_compromiso_markdown(
     return "\n".join(parts)
 
 
+_E2_FORMAT_START_RE = re.compile(r"(?is)anexo\s+e[\s_.-]*2\b")
+_E4_FORMAT_START_RE = re.compile(r"(?is)anexo\s+e[\s_.-]*4\b")
+_E5_FORMAT_START_RE = re.compile(r"(?is)anexo\s+e[\s_.-]*5\b")
+
+
+def _obra_e2_catalog_table_block(
+    mapeo_items: List[Dict[str, Any]],
+    resumen: Dict[str, Any],
+) -> str:
+    """Tabla de catálogo E-2 desde motor económico."""
+    cols = ("PARTIDA", "CONCEPTO", "UNIDAD", "CANT.", "P.U.", "IMPORTE")
+    rows: List[List[str]] = []
+    for item in mapeo_items:
+        pu = float(item.get("precio_unitario") or 0)
+        imp = float(item.get("importe") or 0)
+        if pu <= 0 and imp > 0:
+            cant = float(item.get("cantidad") or 1)
+            pu = imp / cant if cant else 0
+        rows.append(
+            [
+                str(item.get("partida") or ""),
+                str(item.get("descripcion") or item.get("concepto") or "")[:200],
+                str(item.get("unidad") or "[Consignar]"),
+                str(item.get("cantidad") or ""),
+                _money(pu) if pu > 0 else "[Consignar]",
+                _money(imp) if imp > 0 else "[Consignar]",
+            ]
+        )
+    if not rows:
+        rows = [["[Consignar]"] * len(cols)]
+    parts = ["\n**Catálogo de conceptos y precios unitarios:**\n", _markdown_table(list(cols), rows)]
+    if resumen.get("obra_breakdown"):
+        parts.extend(
+            [
+                f"\n**Costos directos:** {_money(float(resumen.get('costos_directos') or 0))}",
+                f"**Costos indirectos:** {_money(float(resumen.get('costos_indirectos') or 0))}",
+                f"**Utilidad:** {_money(float(resumen.get('utilidad') or 0))}",
+                f"**Subtotal antes de IVA:** {_money(float(resumen.get('subtotal') or 0))}",
+                f"**I.V.A.:** {_money(float(resumen.get('iva') or 0))}",
+                f"**Total de la proposición:** {_money(float(resumen.get('total') or 0))}\n",
+            ]
+        )
+    else:
+        parts.append(
+            f"\n**Subtotal:** {_money(float(resumen.get('subtotal') or 0))} | "
+            f"**I.V.A.:** {_money(float(resumen.get('iva') or 0))} | "
+            f"**Total:** {_money(float(resumen.get('total') or 0))}\n"
+        )
+    return "\n".join(parts)
+
+
+def extract_obra_e2_official_format(corpus: str) -> Optional[str]:
+    """Extrae machote Anexo E-2 embebido en bases."""
+    text = str(corpus or "")
+    if len(text) < 80:
+        return None
+    start = -1
+    m = _E2_FORMAT_START_RE.search(text)
+    if m:
+        start = m.start()
+    else:
+        alt = re.search(r"(?is)cat[aá]logo de conceptos", text)
+        if alt:
+            start = alt.start()
+    if start < 0:
+        return None
+    tail = text[start:]
+    end_m = re.search(
+        r"(?is)(total de la proposici[oó]n|protesto lo necesario|nombre\s+y\s+firma)",
+        tail,
+    )
+    chunk = tail[: end_m.end() if end_m else 3200]
+    if len(chunk) < 80:
+        return None
+    low = chunk.lower()
+    if "concepto" not in low and "catálogo" not in low and "catalogo" not in low:
+        return None
+    return normalize_official_template_text(chunk)
+
+
+def is_official_obra_e2_mirror_content(content: str) -> bool:
+    """True si el cuerpo es machote E-2 de bases (no builder determinístico)."""
+    text = str(content or "")
+    up = text.upper()
+    if "**ANEXO E-2 — CATÁLOGO DE CONCEPTOS" in up:
+        return False
+    return (
+        ("ANEXO E-2" in up or "CATÁLOGO DE CONCEPTOS" in up or "CATALOGO DE CONCEPTOS" in up)
+        and ("PRECIOS UNITARIOS" in up or "UNIDADES DE MEDICIÓN" in up or "UNIDADES DE MEDICION" in up)
+    )
+
+
+def fill_obra_e2_official_format(
+    template: str,
+    *,
+    concurso: str,
+    corpus: str,
+    mapeo_items: List[Dict[str, Any]],
+    resumen: Dict[str, Any],
+) -> str:
+    """Rellena machote E-2 con catálogo del motor económico."""
+    out = normalize_official_template_text(str(template or ""))
+    num = _extract_licitacion_numero(concurso, corpus)
+    out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
+    out = re.sub(r"(?i)\bnum\.?\s*_{3,}", f"NUM. {num}", out, count=1)
+    table = _obra_e2_catalog_table_block(mapeo_items, resumen)
+    return f"{out.strip()}\n{table}".strip()
+
+
+def extract_obra_e4_official_format(corpus: str) -> Optional[str]:
+    """Extrae machote Anexo E-4 (programas Gantt) embebido en bases."""
+    text = str(corpus or "")
+    if len(text) < 60:
+        return None
+    start = -1
+    m = _E4_FORMAT_START_RE.search(text)
+    if m:
+        start = m.start()
+    else:
+        alt = re.search(r"(?is)programas?\s+de\s+obra", text)
+        if alt and "gantt" in text.lower():
+            start = alt.start()
+    if start < 0:
+        return None
+    tail = text[start:]
+    end_m = re.search(r"(?is)(protesto lo necesario|nombre\s+y\s+firma)", tail)
+    chunk = tail[: end_m.end() if end_m else 2400]
+    if len(chunk) < 60 or "gantt" not in chunk.lower():
+        return None
+    return normalize_official_template_text(chunk)
+
+
+def is_official_obra_e4_mirror_content(content: str) -> bool:
+    """True si el cuerpo es machote E-4 de bases."""
+    up = str(content or "").upper()
+    if "**ANEXO E-4 — PROGRAMAS DE OBRA" in up:
+        return False
+    return "ANEXO E-4" in up and "GANTT" in up
+
+
+def fill_obra_e4_official_format(
+    template: str,
+    *,
+    concurso: str,
+    corpus: str,
+    has_gantt_attachments: bool = False,
+) -> str:
+    """Rellena machote E-4; Gantt físico queda en HITL."""
+    out = normalize_official_template_text(str(template or ""))
+    num = _extract_licitacion_numero(concurso, corpus)
+    out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
+    if has_gantt_attachments:
+        out += (
+            "\n\n**Bajo protesta de decir verdad**, anexo los programas de obra en formato Gantt "
+            "exigidos en bases."
+        )
+    else:
+        out += (
+            "\n\n**[Consignar]** — Adjunte ambos programas Gantt (físico y de montos mensuales) "
+            "conforme al plazo de ejecución y calendario de bases."
+        )
+    return out.strip()
+
+
+def extract_obra_e5_official_format(corpus: str) -> Optional[str]:
+    """Extrae machote Anexo E-5 (cotizaciones) embebido en bases."""
+    text = str(corpus or "")
+    if len(text) < 60:
+        return None
+    start = -1
+    m = _E5_FORMAT_START_RE.search(text)
+    if m:
+        start = m.start()
+    else:
+        alt = re.search(r"(?is)cotizaciones?\s+de\s+(?:los\s+)?materiales", text)
+        if alt:
+            start = alt.start()
+    if start < 0:
+        return None
+    tail = text[start:]
+    end_m = re.search(r"(?is)(protesto lo necesario|nombre\s+y\s+firma)", tail)
+    chunk = tail[: end_m.end() if end_m else 2200]
+    if len(chunk) < 60 or "material" not in chunk.lower():
+        return None
+    return normalize_official_template_text(chunk)
+
+
+def is_official_obra_e5_mirror_content(content: str) -> bool:
+    """True si el cuerpo es machote E-5 de bases."""
+    up = str(content or "").upper()
+    if "**ANEXO E-5 — COTIZACIONES DE MATERIALES" in up:
+        return False
+    return "ANEXO E-5" in up or "COTIZACIONES DE MATERIALES" in up or "COTIZACIONES DE LOS MATERIALES" in up
+
+
+def fill_obra_e5_official_format(
+    template: str,
+    *,
+    concurso: str,
+    corpus: str,
+    has_cotizaciones_attachments: bool = False,
+) -> str:
+    """Rellena machote E-5; cotizaciones físicas quedan en HITL."""
+    out = normalize_official_template_text(str(template or ""))
+    num = _extract_licitacion_numero(concurso, corpus)
+    out = re.sub(r"(?i)(licitaci[oó]n\s+p[uú]blica\s+num\.?\s*)_{3,}", rf"\g<1>{num}", out)
+    if has_cotizaciones_attachments:
+        out += (
+            "\n\n**Bajo protesta de decir verdad**, anexo las cotizaciones de materiales "
+            "exigidas en bases."
+        )
+    else:
+        out += (
+            "\n\n**[Consignar]** — Adjunte cotizaciones originales en hoja membretada de "
+            "proveedores. El sistema no inventa precios sin evidencia documental."
+        )
+    return out.strip()
+
+
 def build_obra_e2_catalog_markdown(
     *,
     concurso: str,
@@ -744,6 +1354,15 @@ def build_obra_e2_catalog_markdown(
         "Catálogo de conceptos, unidades de medición, cantidades de trabajo, "
         "precios unitarios propuestos y el total de la proposición.",
     )
+    official = extract_obra_e2_official_format(req_snippet)
+    if official:
+        return fill_obra_e2_official_format(
+            official,
+            concurso=concurso,
+            corpus=req_snippet,
+            mapeo_items=mapeo_items,
+            resumen=resumen,
+        )
     cols = ("PARTIDA", "CONCEPTO", "UNIDAD", "CANT.", "P.U.", "IMPORTE")
     rows: List[List[str]] = []
     for item in mapeo_items:
@@ -882,6 +1501,14 @@ def build_obra_e4_programa_markdown(
     has_gantt_attachments: bool = False,
 ) -> str:
     """Anexo E-4: programas Gantt (HITL físico)."""
+    official = extract_obra_e4_official_format(req_snippet)
+    if official:
+        return fill_obra_e4_official_format(
+            official,
+            concurso=concurso,
+            corpus=req_snippet,
+            has_gantt_attachments=has_gantt_attachments,
+        )
     req_line = extract_obra_annex_inventory_requirement(req_snippet, "E-4")
     if not req_line:
         req_line = "Programas de obra en barras de Gantt (físico y de montos mensuales)."
@@ -930,6 +1557,14 @@ def build_obra_e5_cotizaciones_markdown(
     No afirma adjuntar cotizaciones sin evidencia documental en sesión.
     """
     corpus = str(req_snippet or "")
+    official = extract_obra_e5_official_format(corpus)
+    if official:
+        return fill_obra_e5_official_format(
+            official,
+            concurso=concurso,
+            corpus=corpus,
+            has_cotizaciones_attachments=has_cotizaciones_attachments,
+        )
     req_line = _clean_economic_req_line(
         corpus,
         "E-5",

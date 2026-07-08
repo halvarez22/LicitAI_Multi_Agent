@@ -1,0 +1,69 @@
+{
+  "messages_version": "document-quality-ux-v1.0.0",
+  "description": "Copy UX HRU para gates de calidad documental y progreso del expediente. Sin jerga forense al usuario final.",
+  "document_quality_gate": {
+    "pending_label": "Confirmar qué documentos armamos",
+    "agent_pause_technical": "Pausé la propuesta técnica un momento: necesito aclarar qué anexos redactamos aquí antes de generar archivos.",
+    "agent_pause_formats": "Pausé los formatos administrativos: necesito aclarar qué anexos redactamos aquí antes de generar archivos.",
+    "reasons": {
+      "no_actionable_generate_items": {
+        "status": "Revisé las bases de **{session_name}** y no identifiqué con claridad qué documentos debemos **redactar en el sistema**.",
+        "detail": "Confirma si debemos generar la **propuesta técnica** (metodología, personal, cronograma, etc.) y los **formatos del pliego**, o si solo debes **cotizar** y adjuntar documentos tuyos.",
+        "cta": "Responde en una frase qué debemos armar nosotros (ej. «generen técnica y formatos; yo cotizo precios») o escribe **metodología:** / precios según corresponda."
+      },
+      "unknown_ratio_above_threshold": {
+        "status": "Hay **{ambiguous_count}** anexo(s) del pliego sin clasificar para **{session_name}**.",
+        "detail": "Para no omitir nada obligatorio, indícame si cada uno lo **llenamos nosotros**, lo **aportas tú** o es solo **informativo**.",
+        "cta": "Menciona el nombre del anexo y cómo proceder (ej. «el formato 3 lo llenan ustedes»)."
+      },
+      "evidence_match_ratio_below_threshold": {
+        "status": "No pude ubicar con seguridad en las bases algunos requisitos de **{session_name}**.",
+        "detail": "Necesito que confirmes los anexos principales que debemos **generar** antes de redactar.",
+        "cta": "Indica qué documentos del pliego debemos armar (técnica, administrativos, económica) o sube de nuevo las bases si faltó un PDF."
+      },
+      "default": {
+        "status": "Antes de generar archivos de **{session_name}**, debo confirmar el plan de documentos.",
+        "detail": "Así evitamos omitir anexos obligatorios del pliego.",
+        "cta": "Dime qué debemos **redactar aquí** y qué **aportas tú**; luego seguimos con cotización o generación."
+      }
+    }
+  },
+  "expediente_progress": {
+    "card_title": "Avance del expediente",
+    "progress_step": "Paso {current} de {total}",
+    "blocking_hint": "Completa primero lo marcado como urgente para poder generar.",
+    "steady_hint": "Vamos bien. Siguiente: completa los datos que te pido abajo.",
+    "blocking_label": "Urgente",
+    "pending_label": "Por completar",
+    "resumed_badge": "Retomado",
+    "audit_badge": "Vista técnica"
+  },
+  "expediente_mission": {
+    "economic_capture_lead": "**Cotización pendiente — {session_name}**",
+    "economic_capture_body": "En las bases se te solicita cotizar **{service_hint}**. Para armar la propuesta económica, indícame el precio de **{next_label}**.",
+    "economic_capture_body_no_label": "En las bases se te solicita cotizar **{service_hint}**. Empecemos por el primer concepto o zona de tu cotización.",
+    "economic_capture_cta": "Escribe el importe en el chat (ej. «Zona A 45,250 mensual») o pega la tabla de precios desde Excel.",
+    "technical_capture_lead": "**Propuesta técnica — {session_name}**",
+    "technical_capture_body": "Cuando quieras generar la técnica, necesito en el chat: **{missing_labels}**.",
+    "technical_capture_cta": "Cuando la cotización esté lista, escribe **metodología:**, **personal:** y **equipos:** en el chat para armar la técnica.",
+    "quality_gate_lead": "**Plan de documentos — {session_name}**",
+    "ready_dual_lead": "**Listo para generar — {session_name}**",
+    "ready_dual_body": "Técnica y cotización están completas en el chat.",
+    "ready_dual_cta": "Usa **TÉCNICA** y **ECONÓMICA** en el panel izquierdo, o escribe qué quieres generar primero.",
+    "ready_technical_cta": "Pulsa **TÉCNICA** o escribe **generar propuesta técnica**.",
+    "ready_economic_cta": "Pulsa **ECONÓMICA** o escribe **generar propuesta económica**.",
+    "service_dual_lead": "**Cotización pendiente — {session_name}**",
+    "service_dual_body_with_label": "En las bases se te solicita cotizar **{service_hint}**. **Primero** indícame el precio de **{next_label}**. Cuando cerremos precios, completamos la técnica: **{missing_labels}**.",
+    "service_dual_body_no_label": "En las bases se te solicita cotizar **{service_hint}**. **Primero** dime el precio por zona o concepto. Después completamos la técnica: **{missing_labels}**.",
+    "service_dual_body_price_source": "Para cerrar la cotización necesito la **fuente real de precios o costos** que usarás. En las bases aparece, por ejemplo, **{price_ref_label}**. **Primero** comparte importes o catálogo; después completamos la técnica: **{missing_labels}**.",
+    "service_dual_cta": "**Ahora:** escribe un precio (ej. «Zona A 45,250 mensual») o pega tu tabla. **Después:** **metodología:** y **personal:** en el chat."
+  },
+  "ui_shell": {
+    "chat_subtitle_quality_block": "Falta confirmar qué documentos armamos en el sistema — responde en el chat y vuelve a generar.",
+    "chat_subtitle_economic_block": "Hay un detalle en la cotización — corrige en el chat o en Excel y vuelve a generar.",
+    "chat_subtitle_default": "Pregunta por fechas, requisitos o dudas de las bases — aquí abajo",
+    "quality_panel_title": "Confirmar documentos del pliego",
+    "quality_panel_body": "Antes de generar, necesitamos aclarar qué anexos redacta el sistema. Responde en el chat y pulsa revalidar.",
+    "quality_panel_cta": "Revisar y continuar"
+  }
+}

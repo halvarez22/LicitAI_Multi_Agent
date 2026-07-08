@@ -87,6 +87,25 @@ def generation_patches():
     )
 
 
+@pytest.fixture
+def economic_prerequisites_patched():
+    """
+    Evita que el gate de snapshot económico corte el pipeline antes de economic_writer+.
+
+    Los tests de brakes validan pausas por agente, no el gate previo a escritura económica.
+    """
+    with patch(
+        "app.agents.orchestrator._ensure_economic_snapshot_ready",
+        new_callable=AsyncMock,
+    ) as m_ensure, patch(
+        "app.services.generated_outputs_cleanup.wipe_session_output_disk_only",
+        new_callable=AsyncMock,
+    ) as m_wipe:
+        m_ensure.return_value = (True, None)
+        m_wipe.return_value = {"removed_count": 0, "preserved_subdirs": []}
+        yield m_ensure
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_stops_on_technical_waiting_data(mock_ctx, generation_patches):
     """Si TechnicalWriter pide datos, no deben ejecutarse formatos ni etapas posteriores."""
@@ -137,11 +156,21 @@ async def test_orchestrator_stops_on_formats_waiting_data(mock_ctx, generation_p
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stops_on_economic_writer_waiting_data(mock_ctx, generation_patches):
-    """Si EconomicWriter pide datos, no deben ejecutarse packager ni delivery."""
+async def test_orchestrator_stops_on_economic_writer_waiting_data(
+    mock_ctx, generation_patches, economic_prerequisites_patched
+):
+    """
+    Si EconomicWriter pide datos, no deben ejecutarse packager ni delivery.
+
+    Se fuerza ``_can_continue_generation_past_economic_failure=False`` para aislar
+    el freno duro (modo full); con F2 el pipeline puede continuar si técnica+formatos ya están listos.
+    """
     orch = OrchestratorAgent(mock_ctx)
     p_gap, p_tech, p_form, p_econ, p_pack, p_del = generation_patches
-    with p_gap as m_gap, p_tech as m_tech, p_form as m_form, p_econ as m_econ, p_pack as m_pack, p_del as m_del:
+    with p_gap as m_gap, p_tech as m_tech, p_form as m_form, p_econ as m_econ, p_pack as m_pack, p_del as m_del, patch(
+        "app.agents.orchestrator._can_continue_generation_past_economic_failure",
+        return_value=False,
+    ):
         m_gap.return_value = AgentOutput(status=AgentStatus.SUCCESS, agent_id="g", session_id="s", data={})
         m_tech.return_value = AgentOutput(status=AgentStatus.SUCCESS, agent_id="t", session_id="s", data={})
         m_form.return_value = AgentOutput(status=AgentStatus.SUCCESS, agent_id="f", session_id="s", data={})
@@ -160,7 +189,9 @@ async def test_orchestrator_stops_on_economic_writer_waiting_data(mock_ctx, gene
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stops_on_packager_waiting_data(mock_ctx, generation_patches):
+async def test_orchestrator_stops_on_packager_waiting_data(
+    mock_ctx, generation_patches, economic_prerequisites_patched
+):
     """Si DocumentPackager pide datos, no debe ejecutarse Delivery."""
     orch = OrchestratorAgent(mock_ctx)
     p_gap, p_tech, p_form, p_econ, p_pack, p_del = generation_patches
@@ -183,7 +214,9 @@ async def test_orchestrator_stops_on_packager_waiting_data(mock_ctx, generation_
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stops_on_delivery_waiting_data(mock_ctx, generation_patches):
+async def test_orchestrator_stops_on_delivery_waiting_data(
+    mock_ctx, generation_patches, economic_prerequisites_patched
+):
     """Si Delivery pide datos, el orquestador devuelve waiting_for_data (ultima etapa del bucle)."""
     orch = OrchestratorAgent(mock_ctx)
     p_gap, p_tech, p_form, p_econ, p_pack, p_del = generation_patches

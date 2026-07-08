@@ -1,0 +1,97 @@
+{
+  "policy_version": "1.0.0",
+  "description": "Política HRU de alcances de descarga contextual post-generación (F5). Sin mapas por licitación.",
+  "default_scope": "full",
+  "aliases": {
+    "tech": "technical",
+    "tecnica": "technical",
+    "tecnico": "technical",
+    "eco": "economic",
+    "economica": "economic",
+    "economico": "economic",
+    "completo": "full",
+    "expediente": "full"
+  },
+  "generation_mode_to_scope": {
+    "full": "full",
+    "technical": "technical",
+    "economic": "economic"
+  },
+  "scopes": {
+    "technical": {
+      "label": "Propuesta técnica y formatos administrativos",
+      "short_label": "Propuesta técnica",
+      "generation_jobs_hint": ["technical", "formats"],
+      "include_directories": [
+        "1.propuesta tecnica",
+        "1.propuesta_tecnica",
+        "3.documentos administrativos"
+      ],
+      "include_compranet_sobres": ["SobreComplementaria", "SobreTecnica"],
+      "prefer_compranet_validated": false,
+      "include_root_logistics": [],
+      "cta_download": "Descargar propuesta técnica",
+      "cta_download_all": "Descargar todo (técnica y administrativos)"
+    },
+    "economic": {
+      "label": "Propuesta económica",
+      "short_label": "Cotización económica",
+      "generation_jobs_hint": ["economic_writer"],
+      "include_directories": [
+        "2.propuesta_economica",
+        "2.propuesta economica"
+      ],
+      "include_compranet_sobres": ["SobreEconomica"],
+      "prefer_compranet_validated": false,
+      "include_root_logistics": [],
+      "cta_download": "Descargar cotización económica",
+      "cta_download_all": "Descargar todo (económico)"
+    },
+    "full": {
+      "label": "Expediente completo",
+      "short_label": "Expediente",
+      "generation_jobs_hint": [
+        "technical",
+        "formats",
+        "economic_writer",
+        "packager",
+        "delivery"
+      ],
+      "include_directories": [],
+      "include_compranet_sobres": [
+        "SobreComplementaria",
+        "SobreTecnica",
+        "SobreEconomica"
+      ],
+      "prefer_compranet_validated": true,
+      "include_root_logistics": [
+        "LOGISTICA_Y_GUIA_DE_ENTREGA.pdf",
+        "GUIA_DE_ARMADO_Y_CHECKLIST.docx"
+      ],
+      "cta_download": "Descargar expediente",
+      "cta_download_all": "Descargar expediente (ZIP)"
+    }
+  },
+  "allowed_extensions": [".doc", ".docx", ".pdf", ".xlsx", ".xls"],
+  "max_artifacts_list": 100,
+  "directory_display_names": {
+    "1.propuesta tecnica": "Propuesta técnica",
+    "1.propuesta_tecnica": "Propuesta técnica",
+    "3.documentos administrativos": "Formato administrativo",
+    "2.propuesta_economica": "Propuesta económica",
+    "2.propuesta economica": "Propuesta económica",
+    "SobreComplementaria": "Sobre administrativo",
+    "SobreTecnica": "Sobre técnico",
+    "SobreEconomica": "Sobre económico"
+  },
+  "directory_sort_order": [
+    "3.documentos administrativos",
+    "1.propuesta tecnica",
+    "1.propuesta_tecnica",
+    "SobreComplementaria",
+    "SobreTecnica",
+    "2.propuesta_economica",
+    "2.propuesta economica",
+    "SobreEconomica"
+  ]
+}

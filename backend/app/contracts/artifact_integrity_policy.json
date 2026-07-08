@@ -1,0 +1,23 @@
+{
+  "policy_version": "artifact-integrity-v1.0.0",
+  "description": "HRU — fingerprint de artefactos, wipe por mismatch, sidecar en disco.",
+  "schema_version": "artifact_fingerprint_v1",
+  "sidecar_filename": "_LICITAI_FINGERPRINT.json",
+  "hash_truncated_hex_len": 16,
+  "scopes": {
+    "economic": {
+      "writer_job": "economic_writer",
+      "output_subdirs": ["2.propuesta_economica", "2.propuesta economica"]
+    },
+    "technical": {
+      "writer_job": "technical",
+      "output_subdirs": ["1.propuesta tecnica", "1.propuesta_tecnica"]
+    },
+    "admin": {
+      "writer_job": "formats",
+      "output_subdirs": ["3.documentos administrativos"]
+    }
+  },
+  "wipe_on_mismatch": true,
+  "preserve_blocked_only_when_fingerprint_matches": true
+}

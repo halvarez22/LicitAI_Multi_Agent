@@ -1,0 +1,96 @@
+{
+  "policy_version": "technical-capture-v1.0.0",
+  "description": "HRU: reglas universales del copiloto técnico conversacional (F9).",
+  "matrix_capture_min_slots": 5,
+  "slot_kind_inference": [
+    {
+      "slot_kind": "methodology",
+      "label_markers": ["metodologia", "metodología", "forma de trabajo", "ejecucion", "ejecución", "procedimiento"]
+    },
+    {
+      "slot_kind": "workforce",
+      "label_markers": ["personal", "plantilla", "dotacion", "dotación", "turno", "guardias", "empleados"]
+    },
+    {
+      "slot_kind": "equipment",
+      "label_markers": ["equipo", "equipos", "maquinaria", "vehiculo", "vehículo", "herramienta"]
+    },
+    {
+      "slot_kind": "schedule",
+      "label_markers": ["cronograma", "calendario", "programa de trabajo", "plazo de ejecucion"]
+    },
+    {
+      "slot_kind": "quality_plan",
+      "label_markers": ["calidad", "control de calidad", "plan de calidad", "aseguramiento"]
+    },
+    {
+      "slot_kind": "te03_clients",
+      "label_markers": ["clientes", "referencias", "experiencia similar", "contratos similares"]
+    },
+    {
+      "slot_kind": "free_text_annex",
+      "label_markers": ["anexo", "propuesta tecnica", "propuesta técnica", "descripcion tecnica"]
+    }
+  ],
+  "capture_prefixes": [
+    {"prefix": "metodologia", "slot_kind": "methodology"},
+    {"prefix": "metodología", "slot_kind": "methodology"},
+    {"prefix": "personal", "slot_kind": "workforce"},
+    {"prefix": "equipo", "slot_kind": "equipment"},
+    {"prefix": "cronograma", "slot_kind": "schedule"},
+    {"prefix": "calidad", "slot_kind": "quality_plan"}
+  ],
+  "upload_only_label_markers": [
+    "experiencia",
+    "trabajos similares",
+    "capacidad tecnica",
+    "capacidad técnica",
+    "anexo t-2",
+    "anexo t-b-2",
+    "t-2",
+    "t-b-2"
+  ],
+  "upload_only_slot_kinds": ["obra_experience_document"],
+  "compliance_action_allow": ["generar", "rellenar", "generar_documento", "completar"],
+  "defer_capture_phrases": [
+    "despues",
+    "después",
+    "luego",
+    "en tecnica",
+    "en técnica",
+    "en la tecnica",
+    "en la técnica",
+    "mas tarde",
+    "más tarde",
+    "ahorita no"
+  ],
+  "confirm_affirmative": ["si", "sí", "yes", "correcto", "ok", "vale", "confirmo"],
+  "technical_status_markers": [
+    "que falta tecnico",
+    "qué falta técnico",
+    "que falta en tecnica",
+    "qué falta en técnica",
+    "estado tecnico",
+    "estado técnico",
+    "como va la tecnica",
+    "cómo va la técnica",
+    "datos tecnicos pendientes",
+    "datos técnicos pendientes"
+  ],
+  "dual_status_markers": [
+    "como vamos tecnica y economica",
+    "cómo vamos técnica y económica",
+    "que falta en total",
+    "qué falta en total",
+    "estado tecnica y economica",
+    "estado técnica y económica"
+  ],
+  "capture_intent_markers": [
+    "falta metodologia",
+    "falta metodología",
+    "capturar tecnico",
+    "capturar técnico",
+    "dato tecnico",
+    "dato técnico"
+  ]
+}

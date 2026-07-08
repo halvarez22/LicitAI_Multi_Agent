@@ -227,28 +227,15 @@ class ChatbotRAGAgent(BaseAgent):
 
     @staticmethod
     def _pending_from_quality_hints(session_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from app.services.document_quality_ux import build_quality_hint_pending_question
+        from app.services.document_fill_ux_messages import build_fill_blocking_question
+
         out: List[Dict[str, Any]] = []
         q_hint = session_state.get("last_document_quality_waiting_hints")
         f_hint = session_state.get("last_document_fill_quality_waiting_hints")
 
         if isinstance(q_hint, dict):
-            reason = str(q_hint.get("reason") or "").strip()
-            out.append(
-                {
-                    "field": "quality.classification.review",
-                    "label": "Clasificación documental",
-                    "question": (
-                        "Detecté anexos con clasificación ambigua. ¿Confirmas cuáles se deben generar, "
-                        "cuáles se presentan en físico y cuáles son informativos?"
-                    ),
-                    "type": "quality_validation_blocking",
-                    "is_blocking": True,
-                    "priority": "BLOQUEANTE",
-                    "question_id": "QH-CLASS-001",
-                    "required_evidence": "confirmacion_clasificacion_documental",
-                    "provenance_ui": {"source": "document_quality_gate", "confidence": 0.9, "reason": reason},
-                }
-            )
+            out.append(build_quality_hint_pending_question(hint=q_hint, session_state=session_state))
         if isinstance(f_hint, dict):
             blocking = int(f_hint.get("blocking_count", 0) or 0)
             warnings = int(f_hint.get("warning_count", 0) or 0)
@@ -958,13 +945,12 @@ Genera el mensaje conversacional para solicitar este dato."""
         semaforo_change_msg: str = "",
     ) -> Tuple[str, List[Dict[str, str]]]:
         """Mensaje al cerrar la cola de precios unitarios (no confundir con perfil legal)."""
-        lead = f"Listo, guardé **{human_saved}**."
-        body = (
-            "Con esto quedaron registrados los precios que pedía la cola.\n\n"
-            "Siguiente paso: escribe **`generar propuesta economica`** para armar la cotización. "
-            "Cuando esté validada, usa **Generar** en el panel o **`generar documentos`**."
+        from app.services.economic_calculation_service import build_capture_complete_message
+
+        resp = build_capture_complete_message(
+            human_saved=human_saved,
+            semaforo_change_msg=semaforo_change_msg,
         )
-        resp = f"{lead}{semaforo_change_msg}\n\n{body}".strip()
         actions: List[Dict[str, str]] = [
             {
                 "label": "Generar propuesta económica",
@@ -981,7 +967,20 @@ Genera el mensaje conversacional para solicitar este dato."""
         next_q: Dict[str, Any],
         session_state: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Transición corta entre precios (sin repetir plantilla larga ni estado de compliance)."""
+        """Transición corta entre precios (F8: totales recalculados cuando flag activo)."""
+        from app.services.economic_calculation_service import (
+            build_price_capture_followup_message,
+            economic_calc_on_capture_enabled,
+        )
+
+        if economic_calc_on_capture_enabled():
+            return build_price_capture_followup_message(
+                human_saved=human_saved,
+                extracted_value=extracted_value,
+                next_q=next_q,
+                session_state=session_state or {},
+            )
+
         from app.services.chat_economic_matrix import format_matrix_blocks_markdown
 
         concept_next = ChatbotRAGAgent._concept_from_economic_price_pending_q(next_q)
@@ -1015,10 +1014,12 @@ Genera el mensaje conversacional para solicitar este dato."""
         else:
             idx = max(0, min(int(current_idx or 0), total - 1))
         current = idx + 1
+        from app.services.document_quality_ux import build_expediente_progress_label
+
         return {
             "progress_current": current,
             "progress_total": total,
-            "progress_label": f"Pregunta {current} de {total}",
+            "progress_label": build_expediente_progress_label(current, total),
         }
 
     def _resolve_resume_pointer(self, session_state: Dict[str, Any], pending: List[Dict[str, Any]], fallback_idx: int) -> int:
@@ -1104,13 +1105,39 @@ Genera el mensaje conversacional para solicitar este dato."""
         )
         return msg
 
-    def _build_session_resume_message(self, state: Dict[str, Any]) -> str:
+    def _build_session_resume_message(
+        self,
+        state: Dict[str, Any],
+        *,
+        company_label_override: Optional[str] = None,
+    ) -> str:
         """
         Mensaje proactivo de reanudación (Gate 5: ≤3 líneas + 1 CTA).
         """
         from app.services.chat_gate5_formatter import build_compact_session_resume
 
-        return build_compact_session_resume(state)
+        return build_compact_session_resume(
+            state,
+            company_label_override=company_label_override,
+        )
+
+    async def _resolve_session_resume_message(
+        self,
+        state: Dict[str, Any],
+        company_id: str,
+    ) -> str:
+        """Resume con empresa activa de la UI (precedencia sobre sesión stale)."""
+        from app.services.company_context_resolver import resolve_active_company_context
+
+        ctx = await resolve_active_company_context(
+            self.context_manager.memory,
+            state,
+            company_id,
+        )
+        return self._build_session_resume_message(
+            state,
+            company_label_override=str(ctx.get("company_label") or ""),
+        )
 
     async def process(self, agent_input: AgentInput) -> AgentOutput:
         session_id = agent_input.session_id
@@ -1214,7 +1241,9 @@ Genera el mensaje conversacional para solicitar este dato."""
                 await self.context_manager.memory.save_session(session_id, _state_for_resume)
 
             _has_pending_for_resume = bool(_san_pending)
-            if not _has_pending_for_resume:
+            if not _has_pending_for_resume and not self._wants_economic_materialization(
+                user_query, _state_for_resume
+            ):
                 _eco_ready_resume = self._maybe_economic_capture_complete_message(
                     session_id=session_id,
                     session_state=_state_for_resume,
@@ -1241,7 +1270,10 @@ Genera el mensaje conversacional para solicitar este dato."""
                     suggested_actions=[],
                 )
             if _state_for_resume.get("tasks_completed") and not _has_pending_for_resume:  # sesión con trabajo previo y sin pendientes
-                _resume_msg = self._build_session_resume_message(_state_for_resume)
+                _resume_msg = await self._resolve_session_resume_message(
+                    _state_for_resume,
+                    company_id,
+                )
                 if _resume_msg:
                     await self._save_chat_history(session_id, user_query or "Hola", _resume_msg)
 
@@ -1299,23 +1331,9 @@ Genera el mensaje conversacional para solicitar este dato."""
                     ],
                 )
 
-        # Interceptor de Entrevista Laboral (Error 412 Preventivo - Vía A)
-        from app.economic_validation.profiles import session_requires_fsr_labor_profile
-
-        _fsr_labor_required = session_requires_fsr_labor_profile(session_state, session_id)
-        if session_state.get("labor_compliance_interview_step") and not _fsr_labor_required:
-            session_state["labor_compliance_interview_step"] = None
+        # Entrevista laboral legacy (pre-HRU): limpiar estado atascado en sesiones antiguas.
+        if session_state.pop("labor_compliance_interview_step", None) is not None:
             await self.context_manager.memory.save_session(session_id, session_state)
-        elif session_state.get("labor_compliance_interview_step") and user_query:
-            interview_res = await self._handle_labor_compliance_interview(
-                session_id=session_id,
-                company_id=company_id,
-                user_query=user_query,
-                session_state=session_state,
-                correlation_id=correlation_id
-            )
-            if interview_res:
-                return interview_res
 
         # Motor de confirmación de mapeo: si hay una confirmación pendiente, procesarla primero
         _pending_confirmation = session_state.get("pending_mapping_confirmation")
@@ -1449,9 +1467,50 @@ Genera el mensaje conversacional para solicitar este dato."""
             else ("idle_ready_for_upload" if company_valid else "idle_no_company_no_sources")
         )
 
-        # Captura económica proactiva: el asistente explica qué falta (matriz o lista corta)
-        # al abrir el chat o saludar — sin que el usuario adivine comandos.
-        if company_id and pending_questions:
+        # F11: apertura unificada (briefing + primer paso) — sin carreras proactive_*.
+        if company_id:
+            _opening = await self._try_chat_opening_orchestrator(
+                session_id=session_id,
+                company_id=company_id,
+                session_state=session_state,
+                pending_questions=pending_questions,
+                current_idx=current_idx,
+                user_query=user_query,
+                correlation_id=correlation_id,
+                activity_state=activity_state,
+            )
+            if _opening is not None:
+                await self._save_chat_history(
+                    session_id,
+                    user_query or "Hola",
+                    str((_opening.data or {}).get("respuesta") or ""),
+                )
+                return _opening
+
+        from app.services.chat_opening_orchestrator import should_skip_proactive_opening_handlers
+
+        _skip_proactive_opening = should_skip_proactive_opening_handlers(user_query or "")
+
+        if company_id and not _skip_proactive_opening:
+            _mission_boot = await self._try_expediente_mission_bootstrap(
+                session_id=session_id,
+                company_id=company_id,
+                session_state=session_state,
+                pending_questions=pending_questions,
+                current_idx=current_idx,
+                user_query=user_query,
+                correlation_id=correlation_id,
+                activity_state=activity_state,
+            )
+            if _mission_boot is not None:
+                await self._save_chat_history(
+                    session_id,
+                    user_query or "Hola",
+                    str((_mission_boot.data or {}).get("respuesta") or ""),
+                )
+                return _mission_boot
+
+        if company_id and pending_questions and not _skip_proactive_opening:
             _proactive_eco = await self._proactive_economic_capture_offer(
                 session_id=session_id,
                 company_id=company_id,
@@ -1470,7 +1529,31 @@ Genera el mensaje conversacional para solicitar este dato."""
                 )
                 return _proactive_eco
 
-        if company_id and not pending_questions:
+        if (
+            company_id
+            and session_state.get("technical_post_analysis_hook_pending")
+            and not _skip_proactive_opening
+        ):
+            _proactive_tech = await self._proactive_technical_capture_offer(
+                session_id=session_id,
+                session_state=session_state,
+                user_query=user_query,
+                correlation_id=correlation_id,
+                activity_state=activity_state,
+            )
+            if _proactive_tech is not None:
+                await self._save_chat_history(
+                    session_id,
+                    user_query or "Hola",
+                    str((_proactive_tech.data or {}).get("respuesta") or ""),
+                )
+                return _proactive_tech
+
+        if (
+            company_id
+            and not pending_questions
+            and not self._wants_economic_materialization(user_query, session_state)
+        ):
             _eco_ready = self._maybe_economic_capture_complete_message(
                 session_id=session_id,
                 session_state=session_state,
@@ -1554,7 +1637,10 @@ Genera el mensaje conversacional para solicitar este dato."""
             and isinstance(intake_plan, dict)
             and session_state.get("tasks_completed")
         ):
-            _resume_after_plan = self._build_session_resume_message(session_state)
+            _resume_after_plan = await self._resolve_session_resume_message(
+                session_state,
+                company_id,
+            )
             if _resume_after_plan:
                 await self._save_chat_history(session_id, user_query or "Hola", _resume_after_plan)
                 return self._format_response(
@@ -1687,40 +1773,77 @@ Genera el mensaje conversacional para solicitar este dato."""
                 correlation_id=correlation_id,
             )
 
-        # Identidad de anexo (HRU panel) antes de procedencia económica y RAG.
-        if user_query and company_id:
+        # Identidad de anexo (HRU bases primarias + panel) antes de procedencia y RAG.
+        if user_query:
             from app.services.annex_resolution_service import (
                 build_annex_identity_message,
                 detect_annex_identity_intent,
             )
+            from app.services.bases_annex_identity_service import (
+                compose_annex_identity_bases_response,
+                detect_annex_bases_intent,
+                fetch_annex_identity_from_bases,
+            )
 
-            if detect_annex_identity_intent(user_query):
-                _annex_msg = build_annex_identity_message(
-                    session_state,
+            if detect_annex_bases_intent(user_query):
+                _annex_sources = self.vector_db.get_sources(session_id)
+                _primary_bases = self._resolve_primary_bases_doc(_annex_sources)
+                _annex_payload = fetch_annex_identity_from_bases(
+                    session_id,
+                    _primary_bases,
+                    self.vector_db,
                     user_query,
-                    session_id=session_id,
                 )
-                if _annex_msg:
+                if _annex_payload.get("ready"):
+                    _annex_msg = compose_annex_identity_bases_response(_annex_payload)
                     await self._save_chat_history(session_id, user_query, _annex_msg)
                     return self._format_response(
                         session_id=session_id,
                         correlation_id=correlation_id,
                         respuesta=_annex_msg,
                         confianza="Alta",
-                        tipo="annex_identity_hru",
+                        tipo="annex_identity_bases_hru",
                         suggested_actions=[
-                            {
-                                "label": "Ver Formatos y Anexos",
-                                "payload": "CMD_SHOW_PENDING_DOCS",
-                                "style": "primary",
-                            },
                             {
                                 "label": "Ver Fuentes (bases)",
                                 "payload": "CMD_SHOW_SOURCES",
+                                "style": "primary",
+                            },
+                            {
+                                "label": "Ver Formatos y Anexos",
+                                "payload": "CMD_SHOW_PENDING_DOCS",
                                 "style": "secondary",
                             },
                         ],
                     )
+
+                if company_id and detect_annex_identity_intent(user_query):
+                    _annex_msg = build_annex_identity_message(
+                        session_state,
+                        user_query,
+                        session_id=session_id,
+                    )
+                    if _annex_msg:
+                        await self._save_chat_history(session_id, user_query, _annex_msg)
+                        return self._format_response(
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            respuesta=_annex_msg,
+                            confianza="Alta",
+                            tipo="annex_identity_hru",
+                            suggested_actions=[
+                                {
+                                    "label": "Ver Formatos y Anexos",
+                                    "payload": "CMD_SHOW_PENDING_DOCS",
+                                    "style": "primary",
+                                },
+                                {
+                                    "label": "Ver Fuentes (bases)",
+                                    "payload": "CMD_SHOW_SOURCES",
+                                    "style": "secondary",
+                                },
+                            ],
+                        )
 
         # Corrección post-entrega de precios (Ítem B): antes de RAG y sin depender de pending económico.
         if user_query and company_id:
@@ -1793,7 +1916,68 @@ Genera el mensaje conversacional para solicitar este dato."""
         # --- COMANDOS DE GENERACIÓN EXPLÍCITA (Hito A1) ---
         # Si el usuario pide generar la propuesta, disparamos el EconomicAgent directamente
         # para validar si faltan precios, en lugar de dejar que el RAG responda 'cómo' hacerlo.
-        is_gen_request = bool(user_query and self._is_economic_generation_command(user_query))
+        is_gen_request = bool(
+            user_query and self._wants_economic_materialization(user_query, session_state)
+        )
+
+        if user_query and company_id:
+            from app.services.technical_capture_orchestrator import (
+                apply_technical_capture_to_agent_output,
+                try_handle_technical_capture,
+            )
+
+            _tech_cap = try_handle_technical_capture(
+                query=user_query,
+                session_state=session_state,
+            )
+            if _tech_cap is not None:
+                _tech_out = await apply_technical_capture_to_agent_output(
+                    _tech_cap,
+                    agent=self,
+                    session_id=session_id,
+                    user_query=user_query,
+                    session_state=session_state,
+                    correlation_id=correlation_id,
+                    activity_state=activity_state,
+                )
+                if _tech_out is not None:
+                    await self._save_chat_history(
+                        session_id,
+                        user_query,
+                        str((_tech_out.data or {}).get("respuesta") or ""),
+                    )
+                    return _tech_out
+
+            from app.services.economic_capture_orchestrator import (
+                apply_economic_capture_to_agent_output,
+                try_handle_economic_capture,
+            )
+
+            _eco_cap = try_handle_economic_capture(
+                query=user_query,
+                session_state=session_state,
+                pending_questions=pending_questions,
+            )
+            if _eco_cap is not None:
+                _eco_out = await apply_economic_capture_to_agent_output(
+                    _eco_cap,
+                    agent=self,
+                    session_id=session_id,
+                    company_id=company_id,
+                    user_query=user_query,
+                    session_state=session_state,
+                    pending_questions=pending_questions,
+                    current_idx=current_idx,
+                    correlation_id=correlation_id,
+                    activity_state=activity_state,
+                )
+                if _eco_out is not None:
+                    await self._save_chat_history(
+                        session_id,
+                        user_query,
+                        str((_eco_out.data or {}).get("respuesta") or ""),
+                    )
+                    return _eco_out
 
         _early_intent = await self._route_early_user_intent(
             session_id=session_id,
@@ -1831,46 +2015,22 @@ Genera el mensaje conversacional para solicitar este dato."""
             )
         ]
         if is_gen_request and company_id and not _eco_price_pending:
+            from app.services.economic_capture_orchestrator import gate_generar_economica_intent
+
+            _gen_gate = gate_generar_economica_intent(session_state)
+            if _gen_gate.should_block:
+                await self._save_chat_history(session_id, user_query, _gen_gate.message)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=_gen_gate.message,
+                    confianza="Alta",
+                    tipo="pending_economic_list",
+                    intake_active=True,
+                    activity_state=activity_state,
+                )
+
             logger.info("chatbot_explicit_generation_trigger", session_id=session_id)
-            
-            # --- FORENSIC CHECK: Labor Compliance Data (solo licitaciones con FSR) ---
-            try:
-                if _fsr_labor_required:
-                    company = await self.context_manager.memory.get_company(company_id)
-                    mp = company.get("master_profile", {}) if company else {}
-                    labor = mp.get("labor_compliance", {})
-
-                    if (
-                        not labor
-                        or labor.get("status") == "PENDING_INPUT"
-                        or (
-                            float(labor.get("base_salary_per_day", 0)) <= 0
-                            and not labor.get("daily_fsr")
-                        )
-                    ):
-                        session_state["labor_compliance_interview_step"] = "step_1_base_salary"
-                        await self.context_manager.memory.save_session(session_id, session_state)
-
-                        error_msg = (
-                            "⚠️ **Error Code 412: Missing Payroll Base Profile for FSR Calculation.**\n\n"
-                            "No puedo generar la propuesta económica porque tu perfil corporativo no tiene configurados "
-                            "los costos de nómina (Salario Base, Prima de Riesgo IMSS, etc.) exigidos para el "
-                            "**Factor de Salario Real (FSR)** de esta licitación.\n\n"
-                            "Para facilitar tu cotización, **iniciemos la configuración rápida en este chat**.\n\n"
-                            "**Paso 1 de 4:** ¿Cuál es el **Salario Base Diario** en pesos que usarás en el anexo FSR? "
-                            "(Ejemplo: `374.89` o `300.00`)"
-                        )
-                        await self._save_chat_history(session_id, user_query, error_msg)
-                        return self._format_response(
-                            session_id=session_id,
-                            correlation_id=correlation_id,
-                            respuesta=error_msg,
-                            confianza="Alta",
-                            tipo="labor_compliance_interview",
-                            activity_state="active",
-                        )
-            except Exception as e:
-                logger.error(f"Error in forensic labor check: {e}")
 
             from app.agents.economic import EconomicAgent
             econ_agent = EconomicAgent(self.context_manager)
@@ -1951,8 +2111,22 @@ Genera el mensaje conversacional para solicitar este dato."""
                         intake_active=True,
                         activity_state=activity_state,
                     )
-                msg_ok = "✅ Propuesta económica validada y lista para generación. Ya puedes proceder a generar los anexos finales."
+                from app.services.economic_calculation_service import load_chat_copilot_ux_messages
+
+                _eco_ux = (load_chat_copilot_ux_messages().get("economic_capture") or {})
+                msg_ok = str(
+                    _eco_ux.get("economic_validated_ready")
+                    or "✅ Propuesta económica validada. Pulsa **Generar económica** para materializar archivos."
+                )
                 await self._save_chat_history(session_id, user_query, msg_ok)
+                try:
+                    from app.services.expediente_guided_service import mark_economic_validated_patch
+
+                    await self.context_manager.memory.save_session(
+                        session_id, mark_economic_validated_patch()
+                    )
+                except Exception:
+                    pass
                 return self._format_response(
                     session_id=session_id,
                     correlation_id=correlation_id,
@@ -1961,8 +2135,14 @@ Genera el mensaje conversacional para solicitar este dato."""
                     tipo="economic_success",
                     activity_state=activity_state,
                     suggested_actions=[
-                        {"label": "🚀 Generar Documentos", "payload": "CMD_TRIGGER_DOC_GEN", "style": "primary"}
-                    ]
+                        {
+                            "label": "Crear archivos económicos",
+                            "payload": "",
+                            "style": "primary",
+                            "action_kind": "ui",
+                            "action_id": "TRIGGER_GENERATION_ECONOMIC",
+                        }
+                    ],
                 )
 
         if is_gen_request and company_id and _eco_price_pending:
@@ -1988,6 +2168,20 @@ Genera el mensaje conversacional para solicitar este dato."""
             )
             await self._save_chat_history(session_id, user_query, msg_pending)
             # Caer al flujo de pending_questions más abajo (no ejecutar EconomicAgent aún).
+
+        if user_query and company_id:
+            price_src_ack = await self._try_acknowledge_uploaded_price_source(
+                session_id=session_id,
+                company_id=company_id,
+                session_state=session_state,
+                user_query=user_query,
+                correlation_id=correlation_id,
+            )
+            if price_src_ack is not None:
+                await self._save_chat_history(
+                    session_id, user_query, str(price_src_ack.data.get("respuesta") or "")
+                )
+                return price_src_ack
 
         if user_query and company_id and _is_economic_pending:
             matrix_early = await self._maybe_redirect_to_matrix_capture(
@@ -2080,68 +2274,27 @@ Genera el mensaje conversacional para solicitar este dato."""
 
             # --- CAPTURA INTELIGENTE (LLM EXTRACTION) ---
             if intent == "DATA_INTAKE":
-                extractions = await self._extract_economic_data_llm(user_query, session_state)
-                if (
-                    not extractions
-                    and pending_questions
-                    and current_idx < len(pending_questions)
-                    and str(pending_questions[current_idx].get("type") or "") == "economic_price"
-                ):
-                    val_num = self._clean_currency_value(user_query)
-                    if val_num is not None and val_num > 0:
-                        q_cur = pending_questions[current_idx]
-                        concept_hint = self._concept_from_economic_price_pending_q(q_cur) or "concepto"
-                        extractions = [
-                            {
-                                "value": user_query.strip(),
-                                "concept_hint": concept_hint,
-                                "concept_label": concept_hint,
-                            }
-                        ]
-                if extractions:
-                    pending_concept = ""
-                    if (
-                        pending_questions
-                        and 0 <= current_idx < len(pending_questions)
-                        and str(pending_questions[current_idx].get("type") or "") == "economic_price"
-                    ):
-                        pending_concept = self._concept_from_economic_price_pending_q(
-                            pending_questions[current_idx]
-                        )
-                    tx_list = []
-                    for ext in extractions:
-                        val_raw = str(ext.get("value") or "")
-                        val_num = self._clean_currency_value(val_raw)
-                        hint = ext.get("concept_label") or ext.get("concept") or ext.get("concept_hint")
-                        if pending_concept and self._is_generic_economic_concept_label(str(hint or "")):
-                            hint = pending_concept
-                        if val_num is not None and hint:
-                            tx_list.append({
-                                "kind": "economic_set_value",
-                                "key": "concept_price",
-                                "concept": hint,
-                                "concept_hint": hint,
-                                "value": val_raw,
-                                "value_numeric": val_num,
-                            })
-                    
-                    if tx_list:
-                        return await self._handle_economic_transaction(
-                            session_id=session_id,
-                            company_id=company_id,
-                            session_state=session_state,
-                            tx=tx_list,
-                            raw_user_query=user_query,
-                            correlation_id=correlation_id,
-                        )
-                
-                # Si el LLM no pudo extraer nada de forma segura, abortar y pedir aclaración explícita
+                eco_intake = await self._try_route_economic_price_intake_from_query(
+                    session_id=session_id,
+                    company_id=company_id,
+                    session_state=session_state,
+                    pending_questions=pending_questions,
+                    current_idx=current_idx,
+                    user_query=user_query,
+                    correlation_id=correlation_id,
+                )
+                if eco_intake is not None:
+                    return eco_intake
                 return self._format_response(
                     session_id=session_id,
                     correlation_id=correlation_id,
-                    respuesta="Entiendo que intentas ingresar datos, pero no logro distinguir el precio de las especificaciones técnicas. ¿Podrías indicarme el valor monetario aislado o con el símbolo $?",
+                    respuesta=(
+                        "Entiendo que intentas ingresar datos económicos. "
+                        "Indica los importes con claridad, por ejemplo: "
+                        "«diario 560, mensual 16,800» o pega tu tabla desde Excel."
+                    ),
                     confianza="Media",
-                    tipo="clarification_needed"
+                    tipo="clarification_needed",
                 )
             # Rescate: bloqueo por validación + número solo → PU al primer concepto bloqueado
             if active_blocking_q is not None:
@@ -2282,6 +2435,19 @@ Genera el mensaje conversacional para solicitar este dato."""
 
                 # Caso A: Bloqueo económico (Lista de precios pendientes)
                 if str(question.get("type")) == "economic_validation_blocking":
+                    if not user_query:
+                        _eco_opening = await self._try_expediente_mission_bootstrap(
+                            session_id=session_id,
+                            company_id=company_id,
+                            session_state=session_state,
+                            pending_questions=pending_questions,
+                            current_idx=current_idx,
+                            user_query=user_query,
+                            correlation_id=correlation_id,
+                            activity_state=activity_state,
+                        )
+                        if _eco_opening is not None:
+                            return _eco_opening
                     if self._economic_blocking_requires_source_input(question):
                         return self._format_response(
                             session_id=session_id,
@@ -2314,24 +2480,28 @@ Genera el mensaje conversacional para solicitar este dato."""
                 if str(question.get("type")) != "economic_validation_blocking" and not _looks_like_bases_clarification_query(user_query):
                     q_label = str(question.get("label") or "").strip()
                     q_text = str(question.get("question") or "").strip()
-                    # Humanizar el label para evitar variables técnicas en el chat
-                    _raw_label_b = q_label or str(question.get("field_target") or question.get("field") or "")
-                    q_label_human = self._humanize_field_target(_raw_label_b) if _raw_label_b else ""
-                    # Si el pendiente tiene pregunta completa pero sin label (ej: intake_planner INTAKE-A-*),
-                    # mostrar la pregunta directamente sin el wrapper "Necesito Campo."
-                    if not q_label_human and q_text:
+                    q_type_b = str(question.get("type") or "profile")
+                    if q_type_b == "quality_validation_blocking" and q_text:
                         respuesta_pendiente = q_text
                     else:
-                        respuesta_pendiente = self.conversation_normalizer.normalize_capture_message(
-                            field_label=q_label_human or "dato pendiente",
-                            question=q_text,
-                            intent_type=str(question.get("type", "profile")),
-                            state_hint="first_item",
-                        )
+                        # Humanizar el label para evitar variables técnicas en el chat
+                        _raw_label_b = q_label or str(question.get("field_target") or question.get("field") or "")
+                        q_label_human = self._humanize_field_target(_raw_label_b) if _raw_label_b else ""
+                        # Si el pendiente tiene pregunta completa pero sin label (ej: intake_planner INTAKE-A-*),
+                        # mostrar la pregunta directamente sin el wrapper "Necesito Campo."
+                        if not q_label_human and q_text:
+                            respuesta_pendiente = q_text
+                        else:
+                            respuesta_pendiente = self.conversation_normalizer.normalize_capture_message(
+                                field_label=q_label_human or "dato pendiente",
+                                question=q_text,
+                                intent_type=q_type_b,
+                                state_hint="first_item",
+                            )
                     # Motor conversacional con misión activa (Req 7.1)
                     # Solo aplica a tipos no económicos especializados
                     _q_type_b = str(question.get("type", "profile"))
-                    if _q_type_b not in ("economic_price", "economic_validation_blocking"):
+                    if _q_type_b not in ("economic_price", "economic_validation_blocking", "quality_validation_blocking"):
                         try:
                             _question_enriched = await self._enrich_pending_with_rag_context(session_id, question)
                             _tone_mode = self._detect_tone_mode(session_state, pending_questions, current_idx)
@@ -2441,6 +2611,24 @@ Genera el mensaje conversacional para solicitar este dato."""
                     "y habilitar recomendaciones del asistente."
                 )
             elif pending_questions:
+                _opening_boot = await self._try_expediente_mission_bootstrap(
+                    session_id=session_id,
+                    company_id=company_id,
+                    session_state=session_state,
+                    pending_questions=pending_questions,
+                    current_idx=current_idx,
+                    user_query=user_query,
+                    correlation_id=correlation_id,
+                    activity_state=activity_state,
+                )
+                if _opening_boot is not None:
+                    await self._save_chat_history(
+                        session_id,
+                        user_query or "Hola",
+                        str((_opening_boot.data or {}).get("respuesta") or ""),
+                    )
+                    return _opening_boot
+
                 # Si hay pendientes, vamos directo al grano
                 question = pending_questions[current_idx]
                 
@@ -2524,12 +2712,15 @@ Genera el mensaje conversacional para solicitar este dato."""
                     else:
                         respuesta = f"{progress['progress_label']}\n\n{base_q}"
             else:
-                _ready_boot = self._maybe_economic_capture_complete_message(
-                    session_id=session_id,
-                    session_state=session_state,
-                    correlation_id=correlation_id,
-                    activity_state=activity_state,
-                )
+                if not self._wants_economic_materialization(user_query, session_state):
+                    _ready_boot = self._maybe_economic_capture_complete_message(
+                        session_id=session_id,
+                        session_state=session_state,
+                        correlation_id=correlation_id,
+                        activity_state=activity_state,
+                    )
+                else:
+                    _ready_boot = None
                 if _ready_boot is not None:
                     await self._save_chat_history(
                         session_id,
@@ -2553,6 +2744,20 @@ Genera el mensaje conversacional para solicitar este dato."""
                 intake_active=bool(pending_questions),
                 activity_state=activity_state,
             )
+
+        # F12.2: «muéstrame el párrafo» — precedencia sobre aclaración / repeat-pending.
+        if user_query:
+            _excerpt_out = await self._maybe_handle_bases_show_paragraph_request(
+                session_id=session_id,
+                user_query=user_query,
+                session_state=session_state,
+                pending_questions=pending_questions,
+                current_idx=current_idx,
+                correlation_id=correlation_id,
+                activity_state=activity_state,
+            )
+            if _excerpt_out is not None:
+                return _excerpt_out
 
         # =====================================================================
         # FASE 1: DETERMINÍSTICA — ¿El usuario pide aclarar qué falta? (Rama de Estado)
@@ -2578,7 +2783,8 @@ Genera el mensaje conversacional para solicitar este dato."""
             if self._evaluate_clarification_intent(user_query):
                 logger.info(f"[Chatbot] Rama DETERMINÍSTICA detectada para: '{user_query}'")
                 return await self._handle_clarification(
-                    session_id, pending_questions, correlation_id, current_idx=current_idx
+                    session_id, pending_questions, correlation_id, current_idx=current_idx,
+                    user_query=user_query,
                 )
 
         if (
@@ -2722,7 +2928,13 @@ Genera el mensaje conversacional para solicitar este dato."""
         
         if silent_extraction and silent_extraction.value is not None and silent_extraction.confidence in ("Alta", "Media"):
             mode = "DATA_INTAKE"
-            logger.info(f"[Chatbot] Extracción SILENCIOSA exitosa para '{pending_questions[current_idx]['label']}'")
+            _q_silent = pending_questions[current_idx] if pending_questions else {}
+            _lbl_silent = (
+                str(_q_silent.get("label") or "").strip()
+                or str(_q_silent.get("field") or "").strip()
+                or "dato"
+            )
+            logger.info(f"[Chatbot] Extracción SILENCIOSA exitosa para '{_lbl_silent}'")
         else:
             mode = await self._classify_message(user_query, pending_questions, current_idx, correlation_id)
         
@@ -2743,7 +2955,40 @@ Genera el mensaje conversacional para solicitar este dato."""
             )
             if matrix_gate is not None:
                 return matrix_gate
-            logger.info(f"[Chatbot] Iniciando Captura de Datos para campo '{pending_questions[current_idx]['label']}'")
+
+            # F12: precios en cola económica → canal transaccional (no perfil HITL / KeyError label).
+            _cur_q_intake = pending_questions[current_idx] if 0 <= current_idx < len(pending_questions) else {}
+            _cur_type_intake = str(_cur_q_intake.get("type") or "")
+            if _cur_type_intake in ("economic_price", "economic_price_matrix", "economic_validation_blocking"):
+                eco_intake = await self._try_route_economic_price_intake_from_query(
+                    session_id=session_id,
+                    company_id=company_id,
+                    session_state=session_state,
+                    pending_questions=pending_questions,
+                    current_idx=current_idx,
+                    user_query=user_query,
+                    correlation_id=correlation_id,
+                )
+                if eco_intake is not None:
+                    return eco_intake
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=(
+                        "Entiendo que quieres registrar precios. "
+                        "Indica el valor con claridad, por ejemplo: "
+                        "«diario 560, mensual 16,800» o pega tu tabla desde Excel."
+                    ),
+                    confianza="Media",
+                    tipo="clarification_needed",
+                )
+
+            _lbl_intake = (
+                str(_cur_q_intake.get("label") or "").strip()
+                or str(_cur_q_intake.get("field") or "").strip()
+                or "dato"
+            )
+            logger.info(f"[Chatbot] Iniciando Captura de Datos para campo '{_lbl_intake}'")
             return await self._handle_data_intake(
                 session_id, user_query, company_id,
                 pending_questions, current_idx, session_state, correlation_id
@@ -2907,6 +3152,25 @@ Genera el mensaje conversacional para solicitar este dato."""
             and idx < len(pending)
             and str(pending[idx].get("type")) == "economic_validation_blocking"
         )
+
+        if blocking_economic:
+            low_eco = query.lower()
+            if re.search(r"\d", query) and any(
+                s in low_eco
+                for s in (
+                    "peso",
+                    "diario",
+                    "diaria",
+                    "mensual",
+                    "mensuales",
+                    "iva",
+                    "cotiz",
+                    "precio",
+                    "costo",
+                    "importe",
+                )
+            ):
+                return "DATA_INTAKE"
 
         # Precio unitario: el usuario suele responder solo con el número (sin "mi " ni "es ")
         if pending and idx < len(pending) and pending[idx].get("type") == "economic_price":
@@ -3221,6 +3485,7 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
         current_idx: int,
         user_query: str,
         eco_n: int,
+        session_state: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """True en bootstrap/saludo cuando lo prioritario es captura económica."""
         q_norm = (user_query or "").strip().lower()
@@ -3238,8 +3503,14 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             "buen dia",
             "buen día",
         ) or self._looks_like_greeting_or_progress_intent(user_query or "")
-        if eco_n <= 0 or not is_opening:
+        if not is_opening:
             return False
+        if eco_n <= 0:
+            from app.services.economic_capture_matrix_service import economic_capture_status
+
+            cap = economic_capture_status(session_state or {})
+            if int(cap.get("missing") or 0) <= 0:
+                return False
         cur_type = ""
         if pending and 0 <= current_idx < len(pending):
             cur_type = str(pending[current_idx].get("type") or "")
@@ -3247,6 +3518,181 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             return True
         if eco_n >= 5 and eco_n >= max(1, len(pending)) // 2:
             return True
+        return False
+
+    async def _try_chat_opening_orchestrator(
+        self,
+        *,
+        session_id: str,
+        company_id: str,
+        session_state: Dict[str, Any],
+        pending_questions: List[Dict[str, Any]],
+        current_idx: int,
+        user_query: str,
+        correlation_id: str,
+        activity_state: str,
+    ) -> Optional[AgentOutput]:
+        """
+        F11: apertura única con briefing de convocatoria + primer paso en lenguaje llano.
+        """
+        from app.services.chat_opening_orchestrator import resolve_chat_opening
+        from app.services.convocatoria_briefing_service import merge_convocatoria_briefing_v1
+
+        opening = resolve_chat_opening(
+            session_state=session_state,
+            pending_questions=pending_questions,
+            current_idx=current_idx,
+            user_query=user_query,
+            company_id=company_id,
+        )
+        if opening is None:
+            return None
+
+        briefing_updates = merge_convocatoria_briefing_v1(session_state)
+        if briefing_updates:
+            session_state = {**session_state, **briefing_updates}
+            await self.context_manager.memory.save_session(session_id, briefing_updates)
+
+        progress = None
+        if pending_questions:
+            progress = self._compute_pending_progress(
+                pending_questions, current_idx, session_state
+            )
+        extra: Dict[str, Any] = {
+            "opening_v1": opening.opening_v1,
+            "convocatoria_briefing_v1": opening.briefing_v1,
+        }
+        claim_anchor = {}
+        if isinstance(opening.briefing_v1, dict):
+            action = opening.briefing_v1.get("recommended_first_action")
+            if isinstance(action, dict) and isinstance(action.get("evidence_anchor"), dict):
+                claim_anchor = action["evidence_anchor"]
+        if claim_anchor:
+            try:
+                await self.context_manager.memory.save_session(
+                    session_id,
+                    {
+                        "last_chat_claim_v1": {
+                            "claim_id": "briefing.first_action",
+                            "plain_text": str(opening.message or "")[:500],
+                            "evidence_anchor": claim_anchor,
+                        }
+                    },
+                )
+            except Exception:
+                pass
+        return self._format_response(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            respuesta=opening.message,
+            confianza="Alta",
+            tipo="chat_opening",
+            progress=progress,
+            intake_active=opening.mission_id not in ("ready_dual", "ready_economic", "ready_technical"),
+            activity_state=activity_state,
+            **extra,
+        )
+
+    async def _try_expediente_mission_bootstrap(
+        self,
+        *,
+        session_id: str,
+        company_id: str,
+        session_state: Dict[str, Any],
+        pending_questions: List[Dict[str, Any]],
+        current_idx: int,
+        user_query: str,
+        correlation_id: str,
+        activity_state: str,
+    ) -> Optional[AgentOutput]:
+        """
+        HRU: presenta la misión de negocio (cotizar / técnica / plan documental)
+        antes que copy forense legacy en saludo o apertura de chat.
+        """
+        from app.services.expediente_mission_router import (
+            is_greeting_or_opening,
+            resolve_expediente_mission,
+        )
+
+        if not company_id or not is_greeting_or_opening(user_query):
+            return None
+
+        mission = resolve_expediente_mission(session_state)
+        if not mission or not mission.present_on_greeting:
+            return None
+
+        if mission.mission_id == "technical_capture":
+            delegated = await self._proactive_technical_capture_offer(
+                session_id=session_id,
+                session_state=session_state,
+                user_query=user_query,
+                correlation_id=correlation_id,
+                activity_state=activity_state,
+            )
+            if delegated is not None:
+                return delegated
+
+        extra: Dict[str, Any] = {
+            "expediente_mission_v1": {
+                "mission_id": mission.mission_id,
+                "title": mission.title,
+                "provenance_ui": mission.provenance,
+            }
+        }
+        progress = None
+        if pending_questions:
+            progress = self._compute_pending_progress(
+                pending_questions, current_idx, session_state
+            )
+        return self._format_response(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            respuesta=mission.message,
+            confianza="Alta",
+            tipo="expediente_mission",
+            progress=progress,
+            intake_active=mission.mission_id != "ready_dual",
+            activity_state=activity_state,
+            **extra,
+        )
+
+    def _wants_economic_materialization(
+        self,
+        user_query: str,
+        session_state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        True si el usuario pide materializar la propuesta económica (no el banner «8/8 listo»).
+
+        Incluye comando explícito y atajos cortos («generar») cuando la cotización ya está completa.
+        """
+        if not str(user_query or "").strip():
+            return False
+        if self._is_economic_generation_command(user_query):
+            return True
+        state = session_state if isinstance(session_state, dict) else {}
+        from app.services.expediente_guided_service import economic_capture_honest_status
+
+        if not economic_capture_honest_status(state).get("capture_complete"):
+            return False
+        qn = self._normalize_query_for_intent(user_query).replace("ó", "o")
+        if qn in ("generar", "genera", "adelante", "listo"):
+            return True
+        if re.search(r"\b(generar|genera|armar|cotizar)\b", qn):
+            if any(
+                x in qn
+                for x in (
+                    "tecnica",
+                    "formato",
+                    "administrativ",
+                    "expediente",
+                    "documento",
+                    "completo",
+                )
+            ):
+                return False
+            if len(qn.split()) <= 4:
+                return True
         return False
 
     def _maybe_economic_capture_complete_message(
@@ -3258,9 +3704,9 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
         activity_state: str,
     ) -> Optional[AgentOutput]:
         """Mensaje cuando la matriz de precios ya está capturada (p. ej. tras importar Excel)."""
-        from app.services.economic_capture_matrix_service import economic_capture_status
+        from app.services.expediente_guided_service import economic_capture_honest_status
 
-        cap = economic_capture_status(session_state)
+        cap = economic_capture_honest_status(session_state)
         if not cap.get("capture_complete"):
             return None
         missing = int(cap.get("missing") or 0)
@@ -3272,8 +3718,7 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
         msg = (
             f"Tu **cotización económica está lista**: registré **{cap.get('filled')}** de "
             f"**{cap.get('total')}** precio(s) unitario(s).{extra}\n\n"
-            "Siguiente paso: pulsa **Generar propuesta** en el panel principal o escribe "
-            "**generar propuesta económica** para materializar el expediente."
+            "Siguiente paso: escribe **generar propuesta económica** para materializar archivos."
         )
         return self._format_response(
             session_id=session_id,
@@ -3282,6 +3727,58 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             confianza="Alta",
             tipo="economic_capture_ready",
             intake_active=False,
+            activity_state=activity_state,
+        )
+
+    async def _proactive_technical_capture_offer(
+        self,
+        *,
+        session_id: str,
+        session_state: Dict[str, Any],
+        user_query: str,
+        correlation_id: str,
+        activity_state: str,
+    ) -> Optional[AgentOutput]:
+        """CA-2.7: matriz técnica proactiva tras post-análisis."""
+        from app.services.technical_capture_ux import build_technical_discovery_message
+        from app.services.technical_slot_mapper import technical_capture_status
+
+        if not session_state.get("technical_post_analysis_hook_pending"):
+            return None
+        from app.services.expediente_mission_router import _economic_mission_needed
+
+        if _economic_mission_needed(session_state):
+            return None
+        cap = technical_capture_status(session_state)
+        if cap.get("capture_complete"):
+            await self.context_manager.memory.save_session(
+                session_id, {"technical_post_analysis_hook_pending": False}
+            )
+            return None
+        q_norm = (user_query or "").strip().lower()
+        is_opening = q_norm in (
+            "",
+            "hola",
+            "hi",
+            "hello",
+            "buenas",
+            "buenos dias",
+            "buenos días",
+            "hey",
+        ) or self._looks_like_greeting_or_progress_intent(user_query or "")
+        if not is_opening:
+            return None
+        msg = build_technical_discovery_message(session_state)
+        await self.context_manager.memory.save_session(
+            session_id, {"technical_post_analysis_hook_pending": False}
+        )
+        return self._format_response(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            respuesta=msg,
+            confianza="Alta",
+            tipo="technical_capture_offer",
+            intake_active=True,
             activity_state=activity_state,
         )
 
@@ -3310,7 +3807,7 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             return None
         eco_n = self._count_economic_price_pending(pending)
         if not self._should_proactively_offer_economic_capture(
-            pending, current_idx, user_query, eco_n
+            pending, current_idx, user_query, eco_n, session_state
         ):
             return None
 
@@ -3451,7 +3948,7 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             correlation_id=correlation_id,
             respuesta=(
                 f"Perfecto, registré **{filled}** precio(s) en la matriz. "
-                "Cuando quieras, escribe **generar propuesta económica** o usa el panel **Generar**."
+                "Escribe **generar propuesta económica** cuando quieras materializar archivos."
             ),
             confianza="Alta",
             tipo="data_saved",
@@ -3528,6 +4025,17 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
     ) -> AgentOutput:
         """Procesa la aportación de datos del usuario, la guarda y avanza al siguiente pendiente."""
 
+        if self._detect_uploaded_price_source_acknowledgment(user_input):
+            ack = await self._try_acknowledge_uploaded_price_source(
+                session_id=session_id,
+                company_id=company_id,
+                session_state=session_state,
+                user_query=user_input,
+                correlation_id=correlation_id,
+            )
+            if ack is not None:
+                return ack
+
         confirm = session_state.get("_price_confirm_pending")
         if isinstance(confirm, dict) and confirm.get("value"):
             low = (user_input or "").strip().lower()
@@ -3573,6 +4081,62 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
             return matrix_in_intake
 
         current_q = pending[current_idx]
+        _cur_type = str(current_q.get("type") or "")
+        _price_preempt_note = ""
+        if _cur_type not in (
+            "economic_price",
+            "economic_price_matrix",
+            "economic_validation_blocking",
+        ):
+            from app.services.expediente_guided_service import (
+                expediente_guided_enabled,
+                find_economic_price_pending_index,
+                load_expediente_guided_ux_messages,
+                looks_like_economic_price_reply,
+            )
+
+            if expediente_guided_enabled() and looks_like_economic_price_reply(user_input):
+                eco_idx = find_economic_price_pending_index(
+                    pending, user_input, session_state
+                )
+                if eco_idx is not None:
+                    preempt_q = pending[eco_idx]
+                    if str(preempt_q.get("type") or "") == "economic_price":
+                        if eco_idx != current_idx:
+                            current_idx = eco_idx
+                            current_q = preempt_q
+                            _cur_type = "economic_price"
+                            await self.context_manager.memory.save_session(
+                                session_id, {"current_question_index": current_idx}
+                            )
+                        ux_pre = (load_expediente_guided_ux_messages().get("price_preempt") or {})
+                        tpl = ux_pre.get("routed_to_economic") or ""
+                        if tpl:
+                            lbl = self._concept_from_economic_price_pending_q(preempt_q)
+                            _price_preempt_note = tpl.format(label=lbl) + "\n\n"
+        if _cur_type in ("economic_price", "economic_price_matrix", "economic_validation_blocking"):
+            eco_intake = await self._try_route_economic_price_intake_from_query(
+                session_id=session_id,
+                company_id=company_id,
+                session_state=session_state,
+                pending_questions=pending,
+                current_idx=current_idx,
+                user_query=user_input,
+                correlation_id=correlation_id,
+            )
+            if eco_intake is not None:
+                return eco_intake
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=(
+                    "Para registrar precios, escribe los importes con claridad "
+                    "(ej. «diario 560, mensual 16,800») o pega tu tabla desde Excel."
+                ),
+                confianza="Media",
+                tipo="clarification_needed",
+            )
+
         if str(current_q.get("type")) == "evidence_profile_conflict":
             return await self._handle_evidence_profile_conflict_resolution(
                 session_id=session_id,
@@ -3664,6 +4228,7 @@ Responde SOLO: QUERY, DATA_INTAKE o META""",
                 correlation_id=correlation_id,
                 saved_via="chat",
                 companion_schedule=schedule_tail,
+                response_prefix=_price_preempt_note,
             )
 
         wclean = (
@@ -3736,6 +4301,149 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         state["economic_user_inputs"] = inputs
         await self.context_manager.memory.save_session(session_id, state)
 
+    async def _maybe_handle_bases_show_paragraph_request(
+        self,
+        *,
+        session_id: str,
+        user_query: str,
+        session_state: Dict[str, Any],
+        pending_questions: List,
+        current_idx: int,
+        correlation_id: str,
+        activity_state: str,
+    ) -> Optional[AgentOutput]:
+        """F12.2: excerpt anclado al claim activo cuando el usuario pide ver el párrafo."""
+        from app.services.bases_anchor_excerpt_service import (
+            build_show_paragraph_chat_message,
+            detect_show_paragraph_intent,
+            fetch_excerpt_from_evidence_anchor,
+            resolve_active_claim_anchor,
+        )
+
+        if not user_query or not detect_show_paragraph_intent(user_query):
+            return None
+
+        anchor = resolve_active_claim_anchor(session_state, pending_questions, current_idx)
+        excerpt = await fetch_excerpt_from_evidence_anchor(
+            session_id,
+            anchor,
+            memory=self.context_manager.memory,
+            session_state=session_state,
+            vector_db=getattr(self, "vector_db", None),
+        )
+        reminder = ""
+        if pending_questions and 0 <= current_idx < len(pending_questions):
+            pq = pending_questions[current_idx]
+            reminder = str(pq.get("label") or pq.get("field") or "").strip()
+            if reminder == "economic_price_source":
+                reminder = "fuente de precios / cotización"
+        msg = build_show_paragraph_chat_message(excerpt, reminder_label=reminder)
+        citations = []
+        if excerpt.get("available") and excerpt.get("page"):
+            citations.append(
+                {
+                    "documento": str(
+                        (anchor or {}).get("source_name") or excerpt.get("source") or "bases"
+                    ),
+                    "pagina": excerpt.get("page"),
+                    "fragmento": str(excerpt.get("paragraph") or "")[:180],
+                }
+            )
+        await self._save_chat_history(session_id, user_query, msg)
+        return self._format_response(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            respuesta=msg,
+            confianza="Alta" if excerpt.get("available") else "Media",
+            tipo="bases_excerpt",
+            citations=citations,
+            bases_excerpt_v1=excerpt,
+            evidence_anchor_v1=anchor,
+            activity_state=activity_state,
+        )
+
+    async def _try_route_economic_price_intake_from_query(
+        self,
+        *,
+        session_id: str,
+        company_id: str,
+        session_state: Dict[str, Any],
+        pending_questions: List,
+        current_idx: int,
+        user_query: str,
+        correlation_id: str,
+    ) -> Optional[AgentOutput]:
+        """
+        Canal transaccional económico desde lenguaje natural (price_source / PU).
+
+        Returns:
+            ``AgentOutput`` si hubo captura o mensaje de guía; ``None`` si no aplica al pendiente.
+        """
+        if not (pending_questions and 0 <= current_idx < len(pending_questions)):
+            return None
+
+        cur_q = pending_questions[current_idx]
+        cur_type = str(cur_q.get("type") or "")
+        if cur_type not in ("economic_price", "economic_price_matrix", "economic_validation_blocking"):
+            if str(cur_q.get("field") or "") != "economic_price_source":
+                return None
+            cur_type = "economic_validation_blocking"
+
+        extractions = await self._extract_economic_data_llm(user_query, session_state)
+        if not extractions and cur_type == "economic_price":
+            val_num = self._clean_currency_value(user_query)
+            if val_num is not None and val_num > 0:
+                concept_hint = self._concept_from_economic_price_pending_q(cur_q) or "concepto"
+                extractions = [
+                    {
+                        "value": user_query.strip(),
+                        "concept_hint": concept_hint,
+                        "concept_label": concept_hint,
+                    }
+                ]
+        if not extractions and cur_type == "economic_validation_blocking":
+            extractions = self._parse_price_source_reply_heuristic(user_query)
+
+        if not extractions:
+            return None
+
+        pending_concept = ""
+        if cur_type == "economic_price":
+            pending_concept = self._concept_from_economic_price_pending_q(cur_q)
+
+        tx_list = []
+        for ext in extractions:
+            val_raw = str(ext.get("value") or "")
+            val_num = self._clean_currency_value(val_raw)
+            hint = ext.get("concept_label") or ext.get("concept") or ext.get("concept_hint")
+            if pending_concept and self._is_generic_economic_concept_label(str(hint or "")):
+                hint = pending_concept
+            if not hint and cur_type == "economic_validation_blocking":
+                hint = self._price_source_concept_hint_from_query(user_query, ext)
+            if val_num is not None and val_num > 0 and hint:
+                tx_list.append(
+                    {
+                        "kind": "economic_set_value",
+                        "key": "concept_price",
+                        "concept": hint,
+                        "concept_hint": hint,
+                        "value": val_raw,
+                        "value_numeric": val_num,
+                    }
+                )
+
+        if not tx_list:
+            return None
+
+        return await self._handle_economic_transaction(
+            session_id=session_id,
+            company_id=company_id,
+            session_state=session_state,
+            tx=tx_list,
+            raw_user_query=user_query,
+            correlation_id=correlation_id,
+        )
+
     async def _apply_saved_pending_value(
         self,
         *,
@@ -3750,12 +4458,25 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         correlation_id: str = "",
         saved_via: str = "chat",
         companion_schedule: str = "",
+        response_prefix: str = "",
     ) -> AgentOutput:
         """Persiste un valor ya validado para el pendiente actual y avanza la cola HITL."""
         completion_actions: List[Dict[str, str]] = []
         field_key = str(current_q.get("field") or current_q.get("field_target") or "unknown")
-        field_label = str(current_q.get("label") or current_q.get("question") or "dato")
-        q_type = current_q.get("type", "profile")
+        field_label = str(current_q.get("label") or current_q.get("field") or current_q.get("question") or "dato")
+        q_type = str(current_q.get("type") or "profile")
+
+        if q_type == "economic_validation_blocking" or str(field_key) == "economic_price_source":
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=(
+                    "Ese dato es de **cotización económica**, no del perfil legal. "
+                    "Indica los importes (ej. «diario 560, mensual 16,800») o pega tu tabla."
+                ),
+                confianza="Alta",
+                tipo="clarification_needed",
+            )
 
         if q_type == "economic_price":
             saved = await self._save_price_to_catalog(company_id, current_q, extracted_value)
@@ -3772,6 +4493,8 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 # Clave técnica (price_<id>) para EconomicRefresher; etiqueta para fuzzy match.
                 if field_key and field_key.startswith("price_"):
                     bucket[field_key] = price_num
+                if field_key and price_num is not None:
+                    latest[field_key] = price_num
                 if resolved:
                     bucket[resolved] = price_num
                 latest["concept_prices"] = bucket
@@ -3898,6 +4621,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             next_idx = 0
         fresh_s["pending_questions"] = fresh_pending
         fresh_s["current_question_index"] = next_idx
+        if saved and q_type == "economic_price":
+            from app.services.economic_canonical_v1 import sync_economic_canonical_v1
+
+            fresh_s.update(sync_economic_canonical_v1(fresh_s))
         await self.context_manager.memory.save_session(session_id, fresh_s)
         session_state = fresh_s
 
@@ -3972,7 +4699,7 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     "Puedes continuar con **Generar** en el panel o escribir **generar documentos**."
                 )
                 completion_actions: List[Dict[str, str]] = []
-            elif q_type == "economic_price":
+            elif q_type in ("economic_price", "economic_validation_blocking"):
                 resp, completion_actions = self._build_economic_price_queue_completed_response(
                     human_saved=human_saved_done,
                     semaforo_change_msg=semaforo_change_msg,
@@ -3982,6 +4709,9 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     human_saved=human_saved_done,
                     semaforo_change_msg=semaforo_change_msg,
                 )
+
+        if response_prefix and str(resp or "").strip():
+            resp = f"{response_prefix}{resp}"
 
         return self._format_response(
             session_id=session_id,
@@ -4490,16 +5220,10 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                     })
                 except: continue
 
-        # 1. PARÁMETROS FASAR / FSR (Bidireccional + Multi-capture)
-        FASAR_BASE = {
-            "imss": r"imss|cuota\s+patronal",
-            "sar": r"sar",
-            "infonavit": r"infonavit",
-            "dias_no_laborados": r"dias?\s+no\s+laborados|festivos|inh[aá]biles|descansos?",
-            "dias_laborados": r"dias?\s+laborados|calendario",
-            "prima_vacacional": r"prima\s+vacacional",
-            "aguinaldo_dias": r"aguinaldo|dias?\s+de\s+aguinaldo",
-        }
+        # 1. PARÁMETROS FSR (Bidireccional + Multi-capture) — política HRU versionada
+        from app.services.economic_fsr_policy import chat_capture_patterns
+
+        FASAR_BASE = chat_capture_patterns()
 
         for key, base_pattern in FASAR_BASE.items():
             if key in captured_keys:
@@ -4745,6 +5469,25 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             state["current_question_index"] = (
                 max(0, min(pending_idx, len(pending_list) - 1)) if pending_list else 0
             )
+        # Captura de precios bajo price_source: si ya hay importes en chat, cerrar el pending de fuente.
+        if _saved_concept_price and pending_list:
+            bucket = latest_inputs.get("concept_prices") if isinstance(latest_inputs.get("concept_prices"), dict) else {}
+            if len(bucket) >= 1:
+                pending_list = [
+                    q
+                    for q in pending_list
+                    if not (
+                        str(q.get("type") or "") == "economic_validation_blocking"
+                        and (
+                            str(q.get("field") or "") == "economic_price_source"
+                            or str(q.get("input_mode") or "").lower() == "price_source"
+                        )
+                    )
+                ]
+                state["pending_questions"] = pending_list
+                state["current_question_index"] = (
+                    max(0, min(pending_idx, len(pending_list) - 1)) if pending_list else 0
+                )
         await self.context_manager.memory.save_session(session_id, state)
 
         # Resumen amigable de captura múltiple
@@ -4927,6 +5670,130 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 "summary": summary_txt
             }
         )
+
+
+    @staticmethod
+    def _detect_uploaded_price_source_acknowledgment(query: str) -> bool:
+        """True si el usuario indica que los precios ya están en un Excel/archivo subido."""
+        q = ChatbotRAGAgent._normalize(query or "")
+        if len(q) < 15:
+            return False
+        file_signals = (
+            "excel",
+            "xlsx",
+            "xls",
+            "archivo",
+            "subi",
+            "subí",
+            "plantilla",
+            "calculo costo",
+            "calculo",
+            "costo issste",
+        )
+        price_signals = (
+            "precio",
+            "costo",
+            "cotiz",
+            "importe",
+            "fuente",
+            "pagina 28",
+            "operario",
+            "iva",
+            "unitario",
+        )
+        has_file = any(s in q for s in file_signals)
+        has_price = any(s in q for s in price_signals)
+        return has_file and has_price
+
+    async def _try_acknowledge_uploaded_price_source(
+        self,
+        *,
+        session_id: str,
+        company_id: str,
+        session_state: Dict[str, Any],
+        user_query: str,
+        correlation_id: str = "",
+    ) -> Optional[AgentOutput]:
+        """
+        Cierra fuente de precios cuando el usuario apunta al Excel ya cargado en Fuentes.
+        Evita desviar la respuesta a INE u otros pendientes administrativos.
+        """
+        if not self._detect_uploaded_price_source_acknowledgment(user_query):
+            return None
+        from app.services.economic_tabular_ingest_sync import (
+            acknowledge_uploaded_price_source_hitl,
+        )
+
+        result = await acknowledge_uploaded_price_source_hitl(
+            self.context_manager.memory,
+            session_id,
+            user_query=user_query,
+        )
+        if not result.get("acknowledged"):
+            return None
+        msg = (
+            "Entendido: tomaré **el Excel de costos que ya subiste** como fuente de precios "
+            "(referencia de la página 28 de las bases).\n\n"
+            "**Siguiente paso:** escribe **generar propuesta económica** en el chat. "
+            "Cuando confirme la validación, pulsa **Crear archivos económicos** en el panel.\n\n"
+            "_No uses todavía los archivos viejos en «Descargar cotización» — pueden ser de otra corrida._"
+        )
+        return self._format_response(
+            session_id=session_id,
+            correlation_id=correlation_id,
+            respuesta=msg,
+            confianza="Alta",
+            tipo="economic_price_source_ack",
+            intake_active=False,
+        )
+
+    @staticmethod
+    def _parse_price_source_reply_heuristic(user_query: str) -> List[Dict[str, Any]]:
+        """Extrae pares diario/mensual sin LLM cuando el usuario escribe importes en chat."""
+        low = (user_query or "").lower()
+        if not re.search(r"\d", low):
+            return []
+
+        patterns = (
+            (r"diari[ao][^0-9]{0,40}(\d[\d,]*)", "precio diario por operario"),
+            (r"(\d[\d,]*)[^0-9]{0,40}diari[ao]", "precio diario por operario"),
+            (r"mensual[^0-9]{0,40}(\d[\d,]*)", "precio mensual por operario"),
+            (r"(\d[\d,]*)[^0-9]{0,40}mensual", "precio mensual por operario"),
+        )
+        out: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for pat, hint in patterns:
+            m = re.search(pat, low)
+            if not m:
+                continue
+            if hint in seen:
+                continue
+            seen.add(hint)
+            out.append(
+                {
+                    "value": m.group(1),
+                    "concept_hint": hint,
+                    "concept_label": hint,
+                }
+            )
+        return out
+
+    @staticmethod
+    def _price_source_concept_hint_from_query(user_query: str, extraction: dict | None = None) -> str:
+        """Deriva etiqueta humana (diario/mensual/zona) cuando el pending es price_source."""
+        blob = f"{user_query or ''} {((extraction or {}).get('concept_hint') or '')} {((extraction or {}).get('concept_label') or '')}"
+        low = blob.lower()
+        if "diario" in low or "diaria" in low:
+            return "precio diario por operario"
+        if "mensual" in low or "mensuales" in low:
+            return "precio mensual por operario"
+        import re as _re
+        m = _re.search(r"zona\s+([a-z0-9]+)", low)
+        if m:
+            return f"Zona {m.group(1).upper()}"
+        hint = str((extraction or {}).get("concept_hint") or (extraction or {}).get("concept_label") or "").strip()
+        return hint or "precio unitario"
+
 
     def _resolve_economic_concept(self, hint: str, state: Dict[str, Any]) -> Optional[str]:
         """Resuelve un hint del usuario (ej: 'zona a') a un concepto real de la sesión."""
@@ -7416,11 +8283,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         qn = ChatbotRAGAgent._normalize_query_for_intent(raw).replace("ó", "o")
         if not qn:
             return False
+        if "tecnica" in qn and "economica" not in qn and "economico" not in qn:
+            return False
+        if any(x in qn for x in ("formato", "administrativ", "expediente completo")):
+            return False
         if re.search(r"\b(generar|genera|armar|calcular|cotizar)\b", qn) and (
             "propuesta" in qn or "economica" in qn or "economico" in qn or "cotizacion" in qn
         ):
             return True
-        return "generar propuesta" in qn or "genera propuesta" in qn
+        return ("generar propuesta" in qn or "genera propuesta" in qn) and "tecnica" not in qn
 
     @staticmethod
     def _detect_user_confusion_intent(query: str) -> bool:
@@ -7807,6 +8678,11 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 s = sent.strip()
                 sl = s.lower()
                 if len(s) < 35 or len(s) > 480:
+                    continue
+                if re.search(
+                    r"(?i)80%,\s*90%,\s*2%|constantes,\s*f[oó]rmulas,\s*fechas y valores monetarios",
+                    s,
+                ):
                     continue
                 if not any(k in sl for k in topic_keys):
                     continue
@@ -8270,28 +9146,24 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             return True
         return False
 
+    @staticmethod
+    def _operational_deduction_llm_rule() -> str:
+        from app.services.operational_deduction_ux import llm_system_rule_text
+
+        return llm_system_rule_text() or (
+            "DISTINCIÓN CRÍTICA DE DEDUCCIONES OPERATIVAS Y PENAS POR BIENES: "
+            "En servicios con personal en sitio, reporta solo deducciones operativas del pliego."
+        )
+
     @classmethod
     def _detect_operational_personnel_penalty_intent(cls, query: str) -> bool:
-        """
-        Deducciones por ausencias/turnos (vigilancia u operación), no penas convencionales genéricas.
-        """
-        q = cls._normalize_query_for_intent(query)
-        if cls._detect_penalty_intent(query):
-            return False
-        return any(
-            k in q
-            for k in (
-                "falta",
-                "inasist",
-                "ausenc",
-                "retard",
-                "turno no cubierto",
-                "turno vacio",
-                "elemento que falte",
-                "vigilancia",
-                "personal",
-            )
-        ) and any(k in q for k in ("penaliz", "deducc", "descuento", "sancion"))
+        """Deducciones por ausencias/turnos (servicios en sitio), no penas contractuales genéricas."""
+        from app.services.operational_deduction_ux import detect_operational_personnel_penalty_intent
+
+        return detect_operational_personnel_penalty_intent(
+            query,
+            penalty_intent=cls._detect_penalty_intent(query),
+        )
 
     @staticmethod
     def _is_penalty_contract_chunk(text: str) -> bool:
@@ -8771,6 +9643,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         guarantee_intent = self._detect_guarantee_intent(user_query)
         solvency_intent = self._detect_solvency_intent(user_query)
         supplies_intent = self._detect_supplies_technical_intent(user_query)
+        from app.services.bases_sample_delivery_excerpt_service import detect_sample_delivery_intent
+        from app.services.bases_annex_identity_service import detect_annex_bases_intent
+
+        sample_delivery_intent = detect_sample_delivery_intent(user_query)
+        annex_bases_intent = detect_annex_bases_intent(user_query)
+        if sample_delivery_intent:
+            supplies_intent = False
+        if annex_bases_intent:
+            supplies_intent = False
         economic_intent = self._detect_economic_intent(user_query)
         adjudication_intent = self._detect_adjudication_intent(user_query)
         penalty_intent = self._detect_penalty_intent(user_query)
@@ -9513,8 +10394,8 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             "7. INTEGRACIÓN CON MOTOR ECONÓMICO (ALERTA LFT): Si la consulta es sobre la cantidad de elementos o turnos de 24 horas en un área (ej. Entrada Principal o Control de Pases), es OBLIGATORIO inyectar el aviso de Alerta LFT. Si el pliego indica 4 elementos físicos en el turno de 24 horas, la respuesta debe ser: 'Se solicitan 4 elementos físicos en el área indicada. ALERTA LFT: El motor ajustará la cotización a 8 elementos en nómina para cubrir el turno 24/7 sin pérdidas financieras.'\n"
             "8. PROTOCOLO DE DESACOPLAMIENTO SEMÁNTICO ESTRICTO: Queda prohibido asumir que términos semánticos próximos son sinónimos (ej. 'Control de Pases' NO es lo mismo que 'Entrada Principal', ni 'Caseta' es lo mismo que 'Acceso Vehicular'). Si el pliego contiene nomenclatura diferente a la consultada por el usuario, debes advertir de esta diferencia, responder por lo que realmente dice el pliego y pedir confirmación de la nomenclatura oficial de las bases.\n"
             "9. REGLA DE PONDERACIÓN TEMÁTICA (FILTRO DINÁMICO DE INCISOS): Si el usuario pregunta por un subtema específico (como registros, acreditaciones, REPSE, autorizaciones SSPC, seguros o fianzas) dentro de un numeral extenso o kilométrico (como el 6.1), tienes estrictamente PROHIBIDO transcribir la lista completa de incisos de forma secuencial desde el inciso A si eso consume el contexto. Debes escanear todos los fragmentos, saltar el ruido administrativo general (identificaciones, actas, cartas membretadas generales) y enfocar tu respuesta única y directamente en los incisos específicos que regulan o contienen el subtema consultado (ej. si los registros de seguridad o REPSE están en los incisos H, I, K, etc., expón directamente la regulación de esos incisos con su letra correspondiente).\n"
-            "10. DISTINCIÓN CRÍTICA ENTRE GARANTÍAS Y PAGOS: Si la consulta del usuario es sobre la Garantía de Cumplimiento, fianza del contrato o cheques de garantía, tienes estrictamente PROHIBIDO reportar los métodos de facturación, transferencias bancarias, calendarios de estimaciones o pagos de servicios que el Instituto hace al proveedor. Debes enfocarte única y exclusivamente en los instrumentos de garantía o cobertura que el licitante/proveedor entrega para garantizar el contrato (como cheques de caja, cheques certificados, pólizas de fianza) y el porcentaje o monto que figure literalmente en los fragmentos (sin asumir porcentajes genéricos de ley si el pliego trae otro dato).\n"
-            "11. DISTINCIÓN CRÍTICA DE DEDUCCIONES OPERATIVAS Y PENAS POR BIENES: Si la licitación es de Servicios (como Vigilancia, Limpieza, etc.) y el usuario pregunta por inasistencias del personal, faltas, retardos o turnos no cubiertos, tienes estrictamente PROHIBIDO citar cláusulas genéricas de penas convencionales por mora/atraso en la entrega de bienes o insumos materiales (ej. el 2.5% por mora en bienes pendientes de entregar). Debes buscar de forma exclusiva y reportar únicamente las DEDUCCIONES especiales aplicables por fallas operativas en el servicio de vigilancia o turnos vacíos (descuento del costo diario, penas específicas por falta de elementos).\n"
+            "10. DISTINCIÓN CRÍTICA ENTRE GARANTÍAS Y PAGOS: Si la consulta del usuario es sobre la Garantía de Cumplimiento, fianza del contrato o cheques de garantía, tienes estrictamente PROHIBIDO reportar los métodos de facturación, transferencias bancarias, calendarios de estimaciones o pagos de servicios que la convocante hace al proveedor. Debes enfocarte única y exclusivamente en los instrumentos de garantía o cobertura que el licitante/proveedor entrega para garantizar el contrato (como cheques de caja, cheques certificados, pólizas de fianza) y el porcentaje o monto que figure literalmente en los fragmentos (sin asumir porcentajes genéricos de ley si el pliego trae otro dato).\n"
+            f"11. {self._operational_deduction_llm_rule()}\n"
             "12. REGLA DE AISLAMIENTO DE ÍNDICES (INDEX ANCHORING): Si el usuario pregunta por la correspondencia o nombre exacto de un Anexo (ej. '¿Qué es el Anexo X?'), tienes estrictamente PROHIBIDO extraer la respuesta de los párrafos introductorios, acuerdos federales o notas de marco legal del inicio del PDF. Debes forzar al motor a buscar y priorizar exclusivamente la Tabla del Índice de Anexos (comúnmente denominada 'Relación de Anexos' o 'Formatos') y los encabezados principales del cuerpo del documento. No reportes menos anexos de los que figuran en la lista completa (ej. si hay 17 o 18 anexos en total, repórtalo completo de acuerdo con el índice).\n\n"
             f"{normative_ctx}"
             f"{pending_context}"
@@ -9615,6 +10496,58 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             session_id=session_id,
             session_state=_sess,
         )
+        if sample_delivery_intent and primary_doc:
+            from app.services.bases_sample_delivery_excerpt_service import (
+                compose_sample_delivery_chat_response,
+                fetch_sample_delivery_excerpt_from_session,
+            )
+
+            sd_payload = fetch_sample_delivery_excerpt_from_session(
+                session_id, primary_doc, self.vector_db
+            )
+            if sd_payload.get("ready"):
+                sd_content = compose_sample_delivery_chat_response(sd_payload)
+                await self._save_chat_history(session_id, user_query, sd_content)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=sd_content,
+                    confianza="Alta",
+                    tipo="bases_excerpt",
+                    suggested_actions=suggested_actions,
+                )
+        if annex_bases_intent and primary_doc:
+            from app.services.bases_annex_identity_service import (
+                compose_annex_identity_bases_response,
+                fetch_annex_identity_from_bases,
+            )
+
+            annex_payload = fetch_annex_identity_from_bases(
+                session_id, primary_doc, self.vector_db, user_query
+            )
+            if annex_payload.get("ready"):
+                annex_content = compose_annex_identity_bases_response(annex_payload)
+                await self._save_chat_history(session_id, user_query, annex_content)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=annex_content,
+                    confianza="Alta",
+                    tipo="annex_identity_bases_hru",
+                    suggested_actions=suggested_actions
+                    or [
+                        {
+                            "label": "Ver Fuentes (bases)",
+                            "payload": "CMD_SHOW_SOURCES",
+                            "style": "primary",
+                        },
+                        {
+                            "label": "Ver Formatos y Anexos",
+                            "payload": "CMD_SHOW_PENDING_DOCS",
+                            "style": "secondary",
+                        },
+                    ],
+                )
         if literary_hit:
             lit_tipo, lit_early, lit_top = (
                 literary_hit
@@ -9925,44 +10858,17 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                             content, context_docs, True
                         )
             
-            # Deducciones operativas por personal (vigilancia): no mezclar con penas convencionales contractuales (P8).
+            # Deducciones operativas por personal (servicios en sitio): no mezclar con penas contractuales.
             if (
                 not penalty_intent
                 and self._detect_operational_personnel_penalty_intent(user_query)
             ):
-                # Si el bot citó la alucinación de los bienes materiales y mora
-                if any(w in content.lower() for w in ["mora", "bienes pendientes de entregar", "2.5%", "atraso en la entrega", "retraso en la entrega"]):
-                    deduc_text = ""
-                    for doc in context_docs:
-                        doc_lower = doc.lower()
-                        # Buscar la cláusula de deducciones por turnos no cubiertos
-                        if any(w in doc_lower for w in ["deducciones", "deducción", "deduccion", "descuento", "turno no cubierto"]):
-                            if "por cada elemento que falte" in doc_lower or "deficiencia" in doc_lower or "sanción" in doc_lower or "sancion" in doc_lower or "2%" in doc_lower or "1%" in doc_lower or "turno" in doc_lower:
-                                deduc_text = (
-                                    "• **Deducción Operativa Directa (Páginas 68-70):** Por cada elemento de vigilancia que no asista a su turno, se descontará el 100% de la cuota diaria del servicio no prestado, más una penalización adicional del 2% al 10% sobre la facturación del período por cada evento de incumplimiento o elemento faltante no cubierto dentro de las primeras dos horas."
-                                )
-                                break
-                    
-                    if not deduc_text:
-                        # Respaldo legal determinista si los fragmentos de deducciones específicas del pliego no fueron indexados con suficiente score
-                        deduc_text = "• **Deducción por Ausencia (Estándar de Vigilancia ISSSTE/IMSS):** En caso de inasistencia o turno no cubierto, la convocante realiza el descuento del 100% del costo del turno no laborado, más una pena convencional o deducción del 2% diario del valor facturado del turno por cada elemento faltante."
-                    
-                    # Remplazar activamente la alucinación de mora de bienes
-                    clean_content = content
-                    for h_phrase in [
-                        "se aplicará una pena convencional del 2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar, hasta su cumplimiento a entera satisfacción del Instituto.",
-                        "se aplicará una pena convencional del 2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar",
-                        "2.5% por día natural de mora sobre el valor de los bienes pendientes de entregar"
-                    ]:
-                        if h_phrase in clean_content:
-                            clean_content = clean_content.replace(h_phrase, "se aplicarán deducciones proporcionales por cada hora o turno no cubierto conforme al Anexo Técnico.")
-                    
-                    if "deducciones proporcionales" not in clean_content:
-                        clean_content += "\n\n**Nota de Corrección Operativa:** Si el servicio contratado es de vigilancia, las faltas de personal se regulan mediante deducciones operativas (descuento del turno) y no por mora en entrega de bienes."
-                    
-                    content = clean_content
-                    if "deducción" not in content.lower():
-                        content += f"\n\n**Deducciones específicas por inasistencia de personal (Páginas 68-70):**\n{deduc_text}"
+                from app.services.operational_deduction_ux import apply_operational_deduction_post_llm
+
+                content = apply_operational_deduction_post_llm(
+                    content,
+                    context_docs=context_docs,
+                )
 
             # Inyección robusta post-LLM si se omitió o mutiló el índice de anexos (17/18 anexos) o el Anexo 9 (Salario Real)
             if "anexo" in user_query.lower() and ("cuál" in user_query.lower() or "cuantos" in user_query.lower() or "cuántos" in user_query.lower() or "9" in user_query.lower() or "totales" in user_query.lower()):
@@ -9993,9 +10899,11 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             if any(w in user_query.lower() for w in ["presupuesto máximo", "presupuesto maximo", "presupuesto mínimo", "presupuesto minimo", "techo", "límites de presupuesto", "limites de presupuesto"]):
                 if any(w in content.lower() for w in ["no existe", "no se menciona", "no publicado", "no hay", "inexistente"]):
                     if "alerta de riesgo de insolvencia" not in content.lower():
-                        content += (
-                            "\n\n**ALERTA DE RIESGO DE INSOLVENCIA:** Aunque las bases no publican un presupuesto máximo por ser información reservada, el piso de tu propuesta económica está estrictamente limitado por la Ley Federal del Trabajo. Cualquier cotización por debajo del salario mínimo integrado, prestaciones de ley y las cuotas IMSS/INFONAVIT calculadas en tu Anexo 9 será desechada automáticamente por insolvencia técnica."
-                        )
+                        from app.services.operational_deduction_ux import insolvency_budget_alert_text
+
+                        alert = insolvency_budget_alert_text().strip()
+                        if alert:
+                            content += f"\n\n{alert}"
 
             # AGREGAR FOOTER DE BLOQUEO SI APLICA
             # --- HITO: Humanización de Salida (Anti-Cantinflas) ---
@@ -10092,8 +11000,21 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             extra = {"extra_info": extra}
             
         for k, v in kwargs.items():
-            if k != "data":
+            if k != "data" and k != "session_state":
                 payload[k] = v
+
+        if "economic_capture_v1" not in payload:
+            ss = kwargs.get("session_state")
+            if isinstance(ss, dict):
+                from app.services.economic_canonical_v1 import build_economic_capture_v1_api_payload
+
+                payload["economic_capture_v1"] = build_economic_capture_v1_api_payload(ss)
+        if "technical_capture_v1" not in payload:
+            ss = kwargs.get("session_state")
+            if isinstance(ss, dict):
+                from app.services.technical_canonical_v1 import build_technical_capture_v1_api_payload
+
+                payload["technical_capture_v1"] = build_technical_capture_v1_api_payload(ss)
         
         # Merge final
         payload.update(extra)
@@ -10656,9 +11577,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             if str(q.get("type") or "")
             in ("economic_price", "economic_price_matrix", "economic_validation_blocking")
         ]
+        tech_pending = [
+            q
+            for q in (pending_questions or [])
+            if str(q.get("type") or "") == "technical_slot"
+        ]
         resolved = resolve_user_intent(
             user_query,
             has_economic_pending=bool(eco_pending),
+            has_technical_pending=bool(tech_pending),
             has_any_pending=bool(pending_questions),
             current_pending_type=current_pending_type,
             is_explicit_gen_command=is_gen_request,
@@ -10696,12 +11623,87 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 company_id=company_id,
             )
 
+        if resolved.intent == UserChatIntent.VER_ESTADO_DUAL:
+            from app.services.technical_capture_ux import build_dual_copilot_status_message
+
+            msg = build_dual_copilot_status_message(session_state)
+            await self._save_chat_history(session_id, user_query, msg)
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=msg,
+                confianza="Alta",
+                tipo="copilot_dual_status",
+                activity_state=activity_state,
+                session_state=session_state,
+            )
+
+        if resolved.intent == UserChatIntent.CAPTURAR_TECNICO:
+            from app.services.technical_capture_ux import build_technical_discovery_message
+
+            msg = build_technical_discovery_message(session_state)
+            await self._save_chat_history(session_id, user_query, msg)
+            return self._format_response(
+                session_id=session_id,
+                correlation_id=correlation_id,
+                respuesta=msg,
+                confianza="Alta",
+                tipo="technical_capture_status",
+                activity_state=activity_state,
+                session_state=session_state,
+            )
+
+        if resolved.intent == UserChatIntent.GENERAR_TECNICA and company_id:
+            from app.services.technical_capture_orchestrator import gate_generar_tecnica_intent
+
+            gate = gate_generar_tecnica_intent(session_state)
+            if gate.should_block:
+                await self._save_chat_history(session_id, user_query, gate.message)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=gate.message,
+                    confianza="Alta",
+                    tipo="pending_technical_list",
+                    intake_active=True,
+                    activity_state=activity_state,
+                    session_state=session_state,
+                )
+            if gate.materializing_lead:
+                await self._save_chat_history(session_id, user_query, gate.materializing_lead)
+            return None
+
+        if resolved.intent == UserChatIntent.GENERAR_ECONOMICA:
+            from app.services.economic_capture_orchestrator import gate_generar_economica_intent
+
+            gate = gate_generar_economica_intent(session_state)
+            if gate.should_block:
+                await self._save_chat_history(session_id, user_query, gate.message)
+                return self._format_response(
+                    session_id=session_id,
+                    correlation_id=correlation_id,
+                    respuesta=gate.message,
+                    confianza="Alta",
+                    tipo="pending_economic_list",
+                    intake_active=True,
+                    activity_state=activity_state,
+                    session_state=session_state,
+                )
+            if gate.materializing_lead:
+                await self._save_chat_history(session_id, user_query, gate.materializing_lead)
+            return None
+
         if resolved.intent == UserChatIntent.GENERAR_EXPEDIENTE and company_id:
             from app.services.chat_gate5_formatter import format_gate5_message
             from app.services.chat_stop_reason_map import single_cta_for_context
+            from app.services.economic_calculation_service import load_chat_copilot_ux_messages
 
+            _eco_ux = (load_chat_copilot_ux_messages().get("economic_capture") or {})
             msg = format_gate5_message(
-                status="Puedes generar el expediente cuando la cotización económica esté lista.",
+                status=str(
+                    _eco_ux.get("expediente_ready_cta")
+                    or "Puedes generar el expediente cuando la cotización económica esté lista."
+                ),
                 cta=single_cta_for_context(stop_reason="IDLE", has_economic_pending=False),
             )
             await self._save_chat_history(session_id, user_query, msg)
@@ -10712,7 +11714,13 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
                 confianza="Alta",
                 tipo="meta_answer",
                 suggested_actions=[
-                    {"label": "🚀 Generar Documentos", "payload": "CMD_TRIGGER_DOC_GEN", "style": "primary"}
+                    {
+                        "label": "Crear expediente completo",
+                        "payload": "",
+                        "style": "primary",
+                        "action_kind": "ui",
+                        "action_id": "TRIGGER_GENERATION_FULL",
+                    }
                 ],
                 activity_state=activity_state,
             )
@@ -10750,7 +11758,13 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
     @staticmethod
     def _evaluate_clarification_intent(query: str) -> bool:
         """Determina si el usuario está pidiendo aclarar qué información falta (Robusto)."""
-        if not query: return False
+        if not query:
+            return False
+
+        from app.services.bases_anchor_excerpt_service import detect_show_paragraph_intent
+
+        if detect_show_paragraph_intent(query):
+            return False
         
         q = ChatbotRAGAgent._normalize(query)
         
@@ -11296,7 +12310,11 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             intake_active = True
         elif pending:
             q = pending[max(0, min(int(current_idx or 0), len(pending) - 1))]
-            lbl = self._humanize_field_target(str(q.get("label") or q.get("field") or "dato"))
+            raw_lbl = str(q.get("label") or q.get("field") or "dato")
+            if str(q.get("field") or "") == "economic_price_source" or str(q.get("input_mode") or "").lower() == "price_source":
+                lbl = "fuente de precios / cotización"
+            else:
+                lbl = self._humanize_field_target(raw_lbl)
             msg = (
                 f"Ahora necesito un dato de tu empresa o expediente: **{lbl}**.\n\n"
                 f"Pregunta: {str(q.get('question') or '')[:500]}\n\n"
@@ -11520,8 +12538,23 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
         correlation_id: str = "",
         *,
         current_idx: int = 0,
+        user_query: str = "",
     ) -> AgentOutput:
         """Responde con el **único** pendiente activo (cola HITL uno a la vez)."""
+        if user_query:
+            session_state = await self.context_manager.memory.get_session(session_id) or {}
+            excerpt_out = await self._maybe_handle_bases_show_paragraph_request(
+                session_id=session_id,
+                user_query=user_query,
+                session_state=session_state,
+                pending_questions=pending,
+                current_idx=current_idx,
+                correlation_id=correlation_id,
+                activity_state="",
+            )
+            if excerpt_out is not None:
+                return excerpt_out
+
         pending, current_idx = await self._load_fresh_pending_state(
             session_id, fallback_pending=pending, fallback_idx=current_idx
         )
@@ -11530,6 +12563,15 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
 
         idx = max(0, min(int(current_idx or 0), len(pending) - 1))
         q = pending[idx]
+        from app.services.expediente_mission_router import _is_price_source_pending_question
+
+        if _is_price_source_pending_question(q):
+            resp = self._economic_blocking_source_reply(q)
+            await self._save_chat_history(session_id, user_query or "Solicitud de aclaración", resp)
+            return self._format_response(
+                session_id, correlation_id, resp, tipo="economic_validation_blocking_info"
+            )
+
         ft = str(q.get("field") or q.get("field_target") or "")
         if str(q.get("type")) == "quality_validation_blocking" and ft == "quality.fill.review":
             session_state = await self.context_manager.memory.get_session(session_id) or {}
@@ -12782,177 +13824,4 @@ Responde SOLO con el valor puro (máximo 100 caracteres):""",
             tipo="pending_question",
             activity_state=activity_state,
         )
-
-    async def _handle_labor_compliance_interview(
-        self, session_id: str, company_id: str, user_query: str, session_state: Dict, correlation_id: str
-    ) -> Optional[AgentOutput]:
-        """
-        Gestiona la entrevista interactiva secuencial (Paso a Paso) de variables de nómina
-        para completar el perfil de labor_compliance de la empresa.
-        """
-        step = session_state.get("labor_compliance_interview_step")
-        if not step or not company_id:
-            return None
-
-        # Intentar extraer número de la respuesta
-        import re
-        val_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", user_query)
-        
-        company = await self.context_manager.memory.get_company(company_id)
-        if not company:
-            return None
-        profile = company.get("master_profile", {})
-        labor = profile.get("labor_compliance", {})
-        if not isinstance(labor, dict):
-            labor = {
-                "base_salary_per_day": 0.0,
-                "imss_risk_class": "V",
-                "infonavit_rate": 0.05,
-                "isn_rate": 0.03,
-                "daily_fsr": 0.0,
-                "status": "PENDING_INPUT"
-            }
-
-        # Procesar según el paso actual
-        if step == "step_1_base_salary":
-            if not val_match:
-                err = "Por favor, proporciona un valor numérico válido para el **Salario Base Diario** (Ejemplo: `374.89`):"
-                return self._format_response(
-                    session_id=session_id,
-                    correlation_id=correlation_id,
-                    respuesta=err,
-                    confianza="Alta",
-                    tipo="labor_compliance_interview"
-                )
-            
-            val = float(val_match.group(1))
-            labor["base_salary_per_day"] = val
-            session_state["labor_compliance_interview_step"] = "step_2_imss_risk"
-            await self.context_manager.memory.save_session(session_id, session_state)
-            
-            profile["labor_compliance"] = labor
-            company["master_profile"] = profile
-            await self.context_manager.memory.save_company(company_id, company)
-            
-            msg = (
-                f"✅ **Salario Base Diario guardado:** ${val:,.2f} MXN.\n\n"
-                "**Paso 2 de 4:** Por favor, indícame la **Clase de Riesgo IMSS** (romana: `I`, `II`, `III`, `IV` o `V`). (Ejemplo: clase `V` para seguridad privada):"
-            )
-            await self._save_chat_history(session_id, user_query, msg)
-            return self._format_response(
-                session_id=session_id,
-                correlation_id=correlation_id,
-                respuesta=msg,
-                confianza="Alta",
-                tipo="labor_compliance_interview"
-            )
-
-        elif step == "step_2_imss_risk":
-            risk_class = "V"
-            for r in ("V", "IV", "III", "II", "I"):
-                if r in user_query.upper():
-                    risk_class = r
-                    break
-            
-            labor["imss_risk_class"] = risk_class
-            session_state["labor_compliance_interview_step"] = "step_3_isn_rate"
-            await self.context_manager.memory.save_session(session_id, session_state)
-            
-            profile["labor_compliance"] = labor
-            company["master_profile"] = profile
-            await self.context_manager.memory.save_company(company_id, company)
-            
-            msg = (
-                f"✅ **Clase de Riesgo IMSS guardada:** Clase {risk_class}.\n\n"
-                "**Paso 3 de 4:** Por favor, indica la tasa del **Impuesto Sobre Nómina (ISN)** de tu estado. (Ejemplo: `0.03` para 3% o `0.04` para 4%):"
-            )
-            await self._save_chat_history(session_id, user_query, msg)
-            return self._format_response(
-                session_id=session_id,
-                correlation_id=correlation_id,
-                respuesta=msg,
-                confianza="Alta",
-                tipo="labor_compliance_interview"
-            )
-
-        elif step == "step_3_isn_rate":
-            if not val_match:
-                err = "Por favor, proporciona un valor numérico válido para la **Tasa de ISN** (Ejemplo: `0.03` o `3`):"
-                return self._format_response(
-                    session_id=session_id,
-                    correlation_id=correlation_id,
-                    respuesta=err,
-                    confianza="Alta",
-                    tipo="labor_compliance_interview"
-                )
-            
-            val = float(val_match.group(1))
-            if val > 1.0:
-                val = val / 100.0
-            
-            labor["isn_rate"] = val
-            session_state["labor_compliance_interview_step"] = "step_4_daily_fsr"
-            await self.context_manager.memory.save_session(session_id, session_state)
-            
-            profile["labor_compliance"] = labor
-            company["master_profile"] = profile
-            await self.context_manager.memory.save_company(company_id, company)
-            
-            msg = (
-                f"✅ **Tasa de ISN guardada:** {val*100:g}%.\n\n"
-                "**Paso 4 de 4:** Finalmente, introduce el **Factor de Salario Real (FSR)** diario para el cálculo. (Ejemplo: `1.7645`):"
-            )
-            await self._save_chat_history(session_id, user_query, msg)
-            return self._format_response(
-                session_id=session_id,
-                correlation_id=correlation_id,
-                respuesta=msg,
-                confianza="Alta",
-                tipo="labor_compliance_interview"
-            )
-
-        elif step == "step_4_daily_fsr":
-            if not val_match:
-                err = "Por favor, proporciona un valor numérico válido para el **FSR** (Ejemplo: `1.7645`):"
-                return self._format_response(
-                    session_id=session_id,
-                    correlation_id=correlation_id,
-                    respuesta=err,
-                    confianza="Alta",
-                    tipo="labor_compliance_interview"
-                )
-            
-            val = float(val_match.group(1))
-            labor["daily_fsr"] = val
-            labor["status"] = "VALIDATED"
-            
-            session_state["labor_compliance_interview_step"] = None
-            await self.context_manager.memory.save_session(session_id, session_state)
-            
-            profile["labor_compliance"] = labor
-            company["master_profile"] = profile
-            await self.context_manager.memory.save_company(company_id, company)
-            
-            msg = (
-                f"🎉 **¡Perfil de Nómina y FSR configurados con éxito!**\n\n"
-                f"Hemos registrado en el Perfil Corporativo de **{profile.get('razon_social', 'la Empresa')}**:\n"
-                f"• Salario Base Diario: **${labor['base_salary_per_day']:,.2f} MXN**\n"
-                f"• Clase de Riesgo IMSS: **Clase {labor['imss_risk_class']}**\n"
-                f"• Impuesto Sobre Nómina: **{labor['isn_rate']*100:g}%**\n"
-                f"• Factor de Salario Real (FSR): **{labor['daily_fsr']:.4f}**\n\n"
-                "Ya estoy listo para generar la propuesta económica oficial. Escribe **'generar propuesta económica'** para arrancar el motor transaccional."
-            )
-            await self._save_chat_history(session_id, user_query, msg)
-            return self._format_response(
-                session_id=session_id,
-                correlation_id=correlation_id,
-                respuesta=msg,
-                confianza="Alta",
-                tipo="labor_compliance_success",
-                suggested_actions=[
-                    {"label": "🚀 Generar Propuesta Económica", "payload": "CMD_TRIGGER_GENERATION", "style": "primary"}
-                ]
-            )
-
-        return None
 

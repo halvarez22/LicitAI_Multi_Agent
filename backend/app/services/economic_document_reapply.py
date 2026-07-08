@@ -199,11 +199,31 @@ def build_economic_doc_metadata(
             if lp and os.path.exists(str(lp)):
                 logo_path = str(lp)
 
+    from app.services.document_date_resolver import (
+        resolve_document_date,
+        resolve_generation_header_date,
+    )
+
+    date_info = resolve_document_date(session_state)
+    gen_info = resolve_generation_header_date()
+    fecha_doc = (
+        resumen.get("fecha_es")
+        or date_info.get("fecha_es")
+        or resumen.get("fecha")
+        or ""
+    )
+
     return {
         "logo_path": logo_path,
         "tender_name": session_id.replace("_", " ").upper(),
-        "fecha": resumen.get("fecha_es") or resumen.get("fecha"),
-        "fecha_corta": resumen.get("fecha_corta") or resumen.get("fecha"),
+        "fecha": fecha_doc,
+        "fecha_documental": fecha_doc,
+        "fecha_encabezado": gen_info.get("fecha_es") or "",
+        "fecha_generacion": gen_info.get("fecha_es") or "",
+        "fecha_corta": resumen.get("fecha_corta") or date_info.get("fecha_corta") or "",
+        "fecha_documental_source": date_info.get("source", ""),
+        "fecha_encabezado_source": gen_info.get("source", "generation_timestamp"),
+        "generated_at_iso": gen_info.get("generated_at_iso", ""),
         "empresa": master_profile.get("razon_social"),
         "rfc": master_profile.get("rfc"),
         "representante": master_profile.get("representante_legal"),
@@ -421,16 +441,6 @@ def reapply_obra_economic_annexes(
     """
     import shutil
 
-    from app.agents.formats import _save_docx
-    from app.services.administrative_letter_clauses import resolve_letter_asunto
-    from app.services.obra_economic_annex_clauses import (
-        assemble_obra_e1_corpus,
-        build_obra_e1_carta_compromiso_markdown,
-        build_obra_e4_programa_markdown,
-        build_obra_e5_cotizaciones_markdown,
-        is_official_obra_e1_mirror_content,
-    )
-
     economic_data, mapeo_items, resumen = load_economic_payload(
         session_state, session_id=session_id, memory=memory
     )
@@ -438,6 +448,10 @@ def reapply_obra_economic_annexes(
         return {"updated": [], "error": "sin_partidas"}
 
     session_state = dict(session_state)
+    if session_id:
+        from app.services.official_format_resolver import enrich_obra_official_corpus
+
+        enrich_obra_official_corpus(session_id, session_state)
     for row in (gap_report or {}).get("rows") or []:
         key = str(row.get("dedupe_key") or "")
         snip = str(row.get("snippet") or "")
@@ -447,20 +461,12 @@ def reapply_obra_economic_annexes(
             session_state["_obra_e2_snippet"] = snip
         if key == "obra|E3" and snip:
             session_state["_obra_e3_snippet"] = snip
+        if key == "obra|E3E" and snip:
+            session_state["_obra_e3e_snippet"] = snip
+        if key == "obra|E4" and snip:
+            session_state["_obra_e4_snippet"] = snip
         if key == "obra|E5" and snip:
             session_state["_obra_e5_snippet"] = snip
-
-    econ_dir = os.path.join("/data/outputs", session_id, "2.propuesta_economica")
-    os.makedirs(econ_dir, exist_ok=True)
-    updated = reapply_economic_documents(
-        session_id=session_id,
-        session_state=session_state,
-        master_profile=master_profile,
-        output_dir=econ_dir,
-        economic_data=economic_data or {},
-        mapeo_items=mapeo_items,
-        resumen=resumen,
-    )
 
     snippet_by_key: Dict[str, str] = {}
     for row in (gap_report or {}).get("rows") or []:
@@ -468,207 +474,45 @@ def reapply_obra_economic_annexes(
         if key:
             snippet_by_key[key] = str(row.get("snippet") or "")
 
+    econ_dir = os.path.join("/data/outputs", session_id, "2.propuesta_economica")
+    os.makedirs(econ_dir, exist_ok=True)
+
+    if resumen.get("obra_breakdown"):
+        from app.services.official_format_resolver import materialize_obra_economic_envelope
+
+        tabla_name = ""
+        xp = os.path.join(econ_dir, "TABLA_PRECIOS_UNITARIOS.xlsx")
+        if os.path.isfile(xp):
+            tabla_name = os.path.basename(xp)
+        obra_docs = materialize_obra_economic_envelope(
+            session_id=session_id,
+            session_state=session_state,
+            master_profile=master_profile,
+            output_dir=econ_dir,
+            economic_data=economic_data,
+            mapeo_items=mapeo_items,
+            resumen=resumen,
+            snippets_by_key=snippet_by_key,
+            tabla_precios_basename=tabla_name,
+        )
+        updated = [str(d.get("ruta")) for d in obra_docs if d.get("ruta")]
+    else:
+        updated = reapply_economic_documents(
+            session_id=session_id,
+            session_state=session_state,
+            master_profile=master_profile,
+            output_dir=econ_dir,
+            economic_data=economic_data or {},
+            mapeo_items=mapeo_items,
+            resumen=resumen,
+        )
+
     doc_meta = build_economic_doc_metadata(
         session_id=session_id,
         session_state=session_state,
         master_profile=master_profile,
         resumen=resumen,
     )
-    concurso = str(doc_meta.get("concurso_label") or session_id.replace("_", " ").upper())
-
-    # E-1 carta-compromiso de la proposición
-    if resumen.get("obra_breakdown"):
-        e1_snippet = snippet_by_key.get("obra|E1", "")
-        e1_corpus = assemble_obra_e1_corpus(
-            session_id=session_id,
-            session_state=session_state,
-            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
-            req_snippet=str(e1_snippet or ""),
-        )
-        e1_body = build_obra_e1_carta_compromiso_markdown(
-            concurso=concurso,
-            master_profile=master_profile,
-            resumen=resumen,
-            req_snippet=e1_corpus,
-            session_id=session_id,
-            session_state=session_state,
-            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
-            obra_descripcion=str(
-                session_state.get("objeto_obra")
-                or doc_meta.get("obra_descripcion")
-                or ""
-            ),
-            session_name=str(session_state.get("name") or ""),
-        )
-        e1_meta = {
-            **doc_meta,
-            "obra_pliego_contract": True,
-            "official_bases_mirror": is_official_obra_e1_mirror_content(e1_body),
-            "formal_closing": not is_official_obra_e1_mirror_content(e1_body),
-        }
-        e1_candidates = [
-            _find_sobre_economic_path(session_id, "obra|E1"),
-            os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx"),
-            os.path.join(
-                "/data/outputs",
-                session_id,
-                "economic_proposal",
-                "CARTA_COMPROMISO_PROPOSICION.docx",
-            ),
-        ]
-        for e1_path in e1_candidates:
-            if not e1_path or not os.path.isfile(e1_path):
-                continue
-            e1_meta = {
-                **e1_meta,
-                "document_title": resolve_letter_asunto(
-                    os.path.basename(e1_path), e1_snippet, "obra|E1"
-                ),
-                "req_snippet": e1_snippet,
-                "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
-            }
-            _save_docx(
-                "CARTA-COMPROMISO DE LA PROPOSICIÓN",
-                e1_body,
-                e1_path,
-                e1_meta,
-            )
-            if e1_path not in updated:
-                updated.append(e1_path)
-        e1_new = os.path.join(econ_dir, "CARTA_COMPROMISO_PROPOSICION.docx")
-        if not os.path.isfile(e1_new):
-            e1_meta_new = {
-                **e1_meta,
-                "document_title": "Carta-Compromiso de la Proposición",
-                "req_snippet": e1_snippet,
-            }
-            _save_docx(
-                "CARTA-COMPROMISO DE LA PROPOSICIÓN",
-                e1_body,
-                e1_new,
-                e1_meta_new,
-            )
-            updated.append(e1_new)
-
-    # E-3 E — utilidad propuesta (machote publicado en bases)
-    if resumen.get("obra_breakdown"):
-        from app.services.obra_economic_annex_clauses import (
-            build_obra_e3e_utilidad_markdown,
-            is_official_obra_e3e_mirror_content,
-        )
-
-        util_rate = float(resumen.get("utilidad_rate") or 0)
-        if util_rate <= 0:
-            calc = (economic_data or {}).get("calculator_result") or {}
-            util_rate = float(calc.get("utilidad_rate") or 0)
-        e3e_snippet = snippet_by_key.get("obra|E3", "")
-        e3e_body = build_obra_e3e_utilidad_markdown(
-            concurso=concurso,
-            master_profile=master_profile,
-            utilidad_rate=util_rate,
-            session_id=session_id,
-            session_state=session_state,
-            bases_corpus_hint=str(session_state.get("bases_corpus_hint") or ""),
-            req_snippet=e3e_snippet,
-            obra_descripcion=str(session_state.get("objeto_obra") or ""),
-            session_name=str(session_state.get("name") or ""),
-        )
-        e3e_mirror = is_official_obra_e3e_mirror_content(e3e_body)
-        e3e_meta = {
-            **doc_meta,
-            "obra_pliego_contract": True,
-            "official_bases_mirror": e3e_mirror,
-            "formal_closing": not e3e_mirror,
-            "document_title": "Anexo E-3 E — Utilidad propuesta",
-        }
-        e3e_path = os.path.join(econ_dir, "Anexo_E-3E_Utilidad_Propuesta.docx")
-        _save_docx("ANEXO E-3 E — UTILIDAD PROPUESTA", e3e_body, e3e_path, e3e_meta)
-        updated.append(e3e_path)
-
-    # E-4 programas Gantt
-    e4_snippet = snippet_by_key.get("obra|E4", "")
-    e4_body = build_obra_e4_programa_markdown(concurso=concurso, req_snippet=e4_snippet)
-    e4_candidates = [
-        _find_sobre_economic_path(session_id, "obra|E4"),
-        os.path.join(econ_dir, "Anexo_E-4_Programas_Obra_Gantt.docx"),
-        os.path.join(
-            "/data/outputs",
-            session_id,
-            "economic_proposal",
-            "Anexo_E-4_Programas_Obra_Gantt.docx",
-        ),
-    ]
-    for e4_path in e4_candidates:
-        if not e4_path or not os.path.isfile(e4_path):
-            continue
-        e4_meta = {
-            **doc_meta,
-            "obra_pliego_contract": True,
-            "document_title": resolve_letter_asunto(
-                os.path.basename(e4_path), e4_snippet, "obra|E4"
-            ),
-            "req_snippet": e4_snippet,
-            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
-        }
-        _save_docx("ANEXO E-4 — PROGRAMAS DE OBRA", e4_body, e4_path, e4_meta)
-        if e4_path not in updated:
-            updated.append(e4_path)
-
-    # E-5 cotizaciones de materiales
-    e5_snippet = snippet_by_key.get("obra|E5", "")
-    e5_corpus = "\n".join(
-        p
-        for p in (
-            str(session_state.get("_obra_e5_snippet") or ""),
-            str(e5_snippet or ""),
-            str(session_state.get("bases_corpus_hint") or "")[:120000],
-        )
-        if p
-    )
-    e5_body = build_obra_e5_cotizaciones_markdown(
-        concurso=concurso,
-        req_snippet=e5_corpus,
-    )
-    e5_candidates = [
-        _find_sobre_economic_path(session_id, "obra|E5"),
-        os.path.join(econ_dir, "Anexo_E-5_Cotizaciones_Materiales.docx"),
-        os.path.join(
-            "/data/outputs",
-            session_id,
-            "economic_proposal",
-            "Anexo_E-5_Cotizaciones_Materiales.docx",
-        ),
-    ]
-    e5_written = False
-    for e5_path in e5_candidates:
-        if not e5_path:
-            continue
-        if not os.path.isfile(e5_path):
-            continue
-        e5_meta = {
-            **doc_meta,
-            "obra_pliego_contract": True,
-            "document_title": resolve_letter_asunto(
-                os.path.basename(e5_path), e5_snippet, "obra|E5"
-            ),
-            "req_snippet": e5_snippet,
-            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
-        }
-        _save_docx("ANEXO E-5 — COTIZACIONES DE MATERIALES", e5_body, e5_path, e5_meta)
-        if e5_path not in updated:
-            updated.append(e5_path)
-        e5_written = True
-    if not e5_written:
-        e5_new = os.path.join(econ_dir, "Anexo_E-5_Cotizaciones_Materiales.docx")
-        e5_meta = {
-            **doc_meta,
-            "obra_pliego_contract": True,
-            "document_title": "Cotizaciones de Materiales",
-            "req_snippet": e5_snippet,
-            "bases_corpus_hint": session_state.get("bases_corpus_hint", ""),
-        }
-        _save_docx("ANEXO E-5 — COTIZACIONES DE MATERIALES", e5_body, e5_new, e5_meta)
-        updated.append(e5_new)
 
     # Sincronizar propuesta económica → sobre (por huella de nombre; evita colisión obra|E2)
     from app.services.pliego_formats_enrichment_service import pliego_format_dedupe_key

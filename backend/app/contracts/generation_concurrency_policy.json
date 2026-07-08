@@ -1,0 +1,35 @@
+{
+  "policy_version": "generation-concurrency-v1.0.0",
+  "description": "HRU F6 (ADR-001): streams concurrentes técnico/económico en una sesión. Sin hardcode por licitación.",
+  "streams": {
+    "technical": {
+      "label": "Propuesta técnica y formatos administrativos",
+      "job_ids": ["datagap", "technical", "formats"],
+      "writable_scope": "technical"
+    },
+    "economic": {
+      "label": "Propuesta económica",
+      "job_ids": ["economic_writer"],
+      "writable_scope": "economic"
+    },
+    "shared": {
+      "label": "Empaquetado y entrega",
+      "job_ids": ["packager", "delivery"],
+      "writable_scope": "full",
+      "requires_idle_streams": ["technical", "economic"]
+    }
+  },
+  "parallel_stream_pairs": [
+    ["technical", "economic"]
+  ],
+  "generation_mode_default_stream": {
+    "technical": "technical",
+    "economic": "economic",
+    "full": "full"
+  },
+  "aliases": {
+    "generation_technical": "technical",
+    "generation_economic": "economic",
+    "generation_full": "full"
+  }
+}

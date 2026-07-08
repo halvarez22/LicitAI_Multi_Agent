@@ -335,6 +335,8 @@ def _should_block_by_quality_gate(
     evidence_match_ratio: float,
     presentar_fisico_count: int = 0,
     triage_context: Optional[Dict[str, Any]] = None,
+    queued_requirements_count: int = 0,
+    actionable_action_count: int = 0,
 ) -> Dict[str, Any]:
     """
     Gate duro: evita generación cuando la lista documental está degradada.
@@ -348,6 +350,18 @@ def _should_block_by_quality_gate(
     """
     if not bool(app_settings.DOCUMENT_QUALITY_HARD_GATE_ENABLED):
         return {"block": False, "reason": "", "metrics": {}}
+
+    if queued_requirements_count > 0:
+        return {
+            "block": False,
+            "reason": "queued_requirements_present",
+            "metrics": {
+                "queued_requirements_count": queued_requirements_count,
+                "total_items": total_items,
+                "generar_count": generar_count,
+                "actionable_action_count": actionable_action_count,
+            },
+        }
 
     # ── Excepción por categoría de licitación ──────────────────────────────
     tender_category = ""
@@ -376,13 +390,14 @@ def _should_block_by_quality_gate(
     if total_items < min_items:
         return {"block": False, "reason": "", "metrics": {}}
     unknown_ratio = (unknown_count / total_items) if total_items else 0.0
-    if generar_count == 0:
+    if generar_count == 0 and actionable_action_count == 0:
         return {
             "block": True,
             "reason": "no_actionable_generate_items",
             "metrics": {
                 "total_items": total_items,
                 "generar_count": generar_count,
+                "actionable_action_count": actionable_action_count,
                 "unknown_ratio": unknown_ratio,
                 "evidence_match_ratio": evidence_match_ratio,
                 "tender_category": tender_category or None,
@@ -567,7 +582,12 @@ class TechnicalWriterAgent(BaseAgent):
             else None
         )
         _date_info = resolve_document_date(session_state_early)
-        fecha_es = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
+        from app.services.document_date_resolver import resolve_generation_header_date
+
+        _gen_info = resolve_generation_header_date()
+        fecha_doc = _date_info.get("fecha_es") or datetime.now().strftime("%d de %B de %Y")
+        fecha_hdr = _gen_info.get("fecha_es") or fecha_doc
+        fecha_es = fecha_doc  # cuerpo / fecha canónica expediente
         destinatario = resolve_addressee_lines(session_state_early, triage_ctx)
 
         # Metadata para Word
@@ -575,8 +595,14 @@ class TechnicalWriterAgent(BaseAgent):
         doc_metadata = {
             "logo_path": logo_path,
             "tender_name": tender_name,
-            "fecha": fecha_es,
+            "fecha": fecha_doc,
+            "fecha_documental": fecha_doc,
+            "fecha_encabezado": fecha_hdr,
+            "fecha_generacion": fecha_hdr,
             "fecha_corta": _date_info.get("fecha_corta") or "",
+            "fecha_documental_source": _date_info.get("source", ""),
+            "fecha_encabezado_source": _gen_info.get("source", "generation_timestamp"),
+            "generated_at_iso": _gen_info.get("generated_at_iso", ""),
             "empresa": razon_social,
             "rfc": rfc,
             "representante": representante,
@@ -595,6 +621,21 @@ class TechnicalWriterAgent(BaseAgent):
 
         # 1.1 Inyección de Overrides Económicos (Hito 3.1)
         session_state = context.get("session_state", {})
+        from app.services.technical_canonical_v1 import gate_technical_generation_chat_first
+
+        _tech_chat_gate = gate_technical_generation_chat_first(session_state)
+        if _tech_chat_gate:
+            return AgentOutput(
+                status=AgentStatus.WAITING_FOR_DATA,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                message=str(_tech_chat_gate.get("message") or ""),
+                data={
+                    "technical_capture_v1": _tech_chat_gate.get("technical_capture_v1"),
+                    "missing_labels": _tech_chat_gate.get("missing_labels") or [],
+                },
+                correlation_id=correlation_id,
+            )
         user_inputs = session_state.get("economic_user_inputs") or {}
         econ_parts = []
         for k, v in user_inputs.items():
@@ -681,7 +722,9 @@ class TechnicalWriterAgent(BaseAgent):
 
         from app.config.settings import settings
         from app.services.document_deliverable_filter import (
+            count_actionable_generation_actions,
             is_generable_tipo_accion,
+            is_technical_writer_queue_eligible,
             normalize_deliverable_key,
             should_show_deliverable_in_ui,
         )
@@ -690,10 +733,12 @@ class TechnicalWriterAgent(BaseAgent):
         seen_sigs: set[str] = set()
         for req in all_candidates:
             action = str(req.get("tipo_accion", "unknown") or "unknown").lower()
+            if is_technical_writer_queue_eligible(req) and not is_generable_tipo_accion(action):
+                action = "generar"
             if action not in action_counts:
                 action = "unknown"
             action_counts[action] = action_counts.get(action, 0) + 1
-            if not is_generable_tipo_accion(action):
+            if not is_technical_writer_queue_eligible(req):
                 continue
             nombre_u = str(req.get("nombre") or "")
             desc_u = str(req.get("descripcion") or "")
@@ -730,10 +775,16 @@ class TechnicalWriterAgent(BaseAgent):
             exclude_sobre=("administrativo", "economico"),
         )
         tech_requirements = catalog_tech + tech_requirements
+        # Inventario canónico (Modo Fábrica) antes del gate: si hay plantillas PENDING,
+        # deben contar como trabajo generable aunque compliance marque todo como unknown.
+        tech_requirements = _merge_document_inventory_technical(
+            company_data, tech_dir, tech_requirements, seen_ids
+        )
 
         total_candidates = len(all_candidates)
         evidence_true = sum(1 for r in all_candidates if bool(r.get("evidence_match")))
         evidence_ratio = (evidence_true / total_candidates) if total_candidates else 1.0
+        actionable_action_count = count_actionable_generation_actions(action_counts)
         gate = _should_block_by_quality_gate(
             total_items=total_candidates,
             generar_count=action_counts.get("generar", 0),
@@ -741,15 +792,15 @@ class TechnicalWriterAgent(BaseAgent):
             evidence_match_ratio=evidence_ratio,
             presentar_fisico_count=action_counts.get("presentar_fisico", 0),
             triage_context=agent_input.triage_context,
+            queued_requirements_count=len(tech_requirements),
+            actionable_action_count=actionable_action_count,
         )
         if gate.get("block"):
-            # En lugar de bloquear al usuario con un pendiente técnico,
-            # logueamos y continuamos con lo que tenemos.
-            # Solo bloqueamos si realmente no hay nada que generar ni presentar.
+            # Solo bloqueamos si no hay cola real ni acciones materializables.
             has_anything_to_do = (
-                action_counts.get("generar", 0) > 0
+                len(tech_requirements) > 0
+                or actionable_action_count > 0
                 or action_counts.get("presentar_fisico", 0) > 0
-                or len(tech_requirements) > 0
             )
             logger.warning(
                 "technical_writer_quality_gate_triggered",
@@ -759,36 +810,27 @@ class TechnicalWriterAgent(BaseAgent):
                 continuing=has_anything_to_do,
             )
             if not has_anything_to_do:
+                from app.services.document_quality_ux import (
+                    build_document_quality_agent_pause_message,
+                    build_document_quality_pending_question,
+                )
+
                 missing = [
-                    {
-                        "field": "document_quality_gate",
-                        "label": "Confirmar clasificación documental",
-                        "question": (
-                            "La lista documental técnica tiene baja calidad estructural. "
-                            "Debes reclasificar requisitos (generar/presentar_fisico/informativo) "
-                            "o mejorar anclas de evidencia antes de generar documentos."
-                        ),
-                        "document_hint": f"Motivo gate: {gate.get('reason')}. Métricas: {gate.get('metrics')}",
-                        "type": "document_quality_gate_blocking",
-                        "blocking_items": [],
-                    }
+                    build_document_quality_pending_question(
+                        gate=gate,
+                        session_state=company_data,
+                        stage="technical",
+                    )
                 ]
                 await self._save_pending_questions(session_id, missing)
                 return AgentOutput(
                     status=AgentStatus.WAITING_FOR_DATA,
                     agent_id=self.agent_id,
                     session_id=session_id,
-                    message=(
-                        "Pausa por calidad documental: la clasificación de requisitos técnicos "
-                        "no es suficientemente confiable para generar archivos sin riesgo."
-                    ),
+                    message=build_document_quality_agent_pause_message(stage="technical"),
                     data={"missing": missing, "document_quality_gate": gate},
                     correlation_id=correlation_id,
                 )
-
-        tech_requirements = _merge_document_inventory_technical(
-            company_data, tech_dir, tech_requirements, seen_ids
-        )
 
         from app.services.ingested_file_resolver import (
             build_ingested_file_index,
@@ -1327,7 +1369,17 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
         run = p_info.add_run(f"{metadata.get('tender_name', 'LICITACIÓN').upper()}\n")
         run.bold = True
         run.font.size = Pt(9)
-        run_date = p_info.add_run(f"Fecha: {metadata.get('fecha', '')}")
+        fecha_hdr = str(
+            metadata.get("fecha_encabezado")
+            or metadata.get("fecha_generacion")
+            or metadata.get("fecha")
+            or ""
+        ).strip()
+        if not fecha_hdr:
+            from app.services.document_date_resolver import resolve_generation_header_date
+
+            fecha_hdr = resolve_generation_header_date()["fecha_es"]
+        run_date = p_info.add_run(f"Fecha: {fecha_hdr}")
         run_date.font.size = Pt(8)
 
     # Pie de Página
@@ -1352,7 +1404,17 @@ def _save_docx(title: str, content: str, file_path: str, metadata: dict = None):
             if "Domicilio:" in footer_text
             else "México"
         )
-        p_fecha = doc.add_paragraph(f"LUGAR Y FECHA: {lugar} a {metadata.get('fecha', '')}")
+        fecha_hdr = str(
+            (metadata or {}).get("fecha_encabezado")
+            or (metadata or {}).get("fecha_generacion")
+            or (metadata or {}).get("fecha")
+            or ""
+        ).strip()
+        if not fecha_hdr:
+            from app.services.document_date_resolver import resolve_generation_header_date
+
+            fecha_hdr = resolve_generation_header_date()["fecha_es"]
+        p_fecha = doc.add_paragraph(f"LUGAR Y FECHA: {lugar} a {fecha_hdr}")
         p_fecha.alignment = WD_ALIGN_PARAGRAPH.LEFT
         dest = (metadata or {}).get("destinatario") or "A QUIEN CORRESPONDA:"
         p_dest = doc.add_paragraph(f"\n{dest}")

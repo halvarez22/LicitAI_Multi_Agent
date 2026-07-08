@@ -1,0 +1,33 @@
+{
+  "policy_version": "evidence-anchor-v1.0.0",
+  "description": "HRU universal: reglas de calidad y precedencia para anclas de bases. Sin mapas por convocante.",
+  "schema_version": "evidence-anchor-v1.0.0",
+  "min_snippet_len": 12,
+  "min_snippet_len_verified": 20,
+  "synthetic_snippet_markers": [
+    "(?i)^cotizaci[oó]n en chat\\s*[—\\-]",
+    "(?i)^captura\\s+en\\s+chat",
+    "(?i)^pendiente\\s+econ[oó]mico"
+  ],
+  "synthetic_source_markers": [
+    "(?i)^bases_licitacion$",
+    "(?i)^chat$",
+    "(?i)^synthetic"
+  ],
+  "claim_visibility": {
+    "verified": "show_page",
+    "document_only": "show_document_only",
+    "insufficient": "degrade_no_locus",
+    "synthetic": "degrade_as_insufficient"
+  },
+  "precedence_sources": [
+    "pending_blocking_item",
+    "pending_original_item",
+    "compliance_item",
+    "session_line_item",
+    "briefing_block_page_refs",
+    "insufficient"
+  ],
+  "forbid_synthetic_as_verified": true,
+  "feature_flag": "EVIDENCE_ANCHOR_ENABLED"
+}

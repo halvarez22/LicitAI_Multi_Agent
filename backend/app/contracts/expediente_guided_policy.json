@@ -1,0 +1,61 @@
+{
+  "policy_version": "expediente-guided-v1.0.0",
+  "description": "HRU P0 — flujo expediente guiado (bases → cotización → validar → plan → materializar). Sin mapas por convocante.",
+  "feature_flag": "EXPEDIENTE_GUIDED_ENABLED",
+  "step_order": [
+    "bases",
+    "cotizacion",
+    "validar_economica",
+    "plan_documentos",
+    "materializar"
+  ],
+  "analysis_task": "stage_completed:analysis",
+  "economic_pending_types": [
+    "economic_price",
+    "economic_price_matrix",
+    "economic_validation_blocking"
+  ],
+  "quality_pending_types": [
+    "document_quality_gate_blocking",
+    "quality_validation_blocking"
+  ],
+  "panel_button_labels": {
+    "analyze_bases": "Releer bases",
+    "analyze_bases_first": "Analizar bases",
+    "generation_full": "Crear expediente completo",
+    "generation_economic": "Crear archivos económicos",
+    "generation_technical": "Crear archivos técnicos",
+    "generation_full_short": "Completo",
+    "generation_economic_short": "Económica",
+    "generation_technical_short": "Técnica"
+  },
+  "generation_hints": {
+    "full": "Técnica, formatos administrativos, económica y empaquetado",
+    "technical": "Propuesta técnica y formatos admin — sin cotización económica",
+    "economic": "Solo propuesta económica — requiere cotización validada en chat"
+  },
+  "overlay_kinds": {
+    "bases_analysis": "bases_analysis",
+    "document_generation": "document_generation"
+  },
+  "primary_cta_by_step": {
+    "bases": { "action_kind": "ui", "action_id": "TRIGGER_ANALYZE_BASES" },
+    "cotizacion": { "action_kind": "chat", "payload": "estado de cotización" },
+    "validar_economica": { "action_kind": "chat", "payload": "generar propuesta económica" },
+    "plan_documentos": { "action_kind": "chat", "payload": "confirmar plan documental" },
+    "materializar": { "action_kind": "ui", "action_id": "TRIGGER_GENERATION_ECONOMIC" }
+  },
+  "economic_price_reply": {
+    "schedule_split_semicolon": true,
+    "schedule_token_regex": "[xX×]",
+    "numeric_strict_regex": "^-?\\d+(?:\\.\\d+)?$"
+  },
+  "capture_honesty": {
+    "matrix_complete_tolerance": 0,
+    "require_pending_economic_zero": true
+  },
+  "preempt_price_routing": {
+    "enabled": true,
+    "prefer_guard_schedule_pending_when_schedule_in_reply": true
+  }
+}

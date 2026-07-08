@@ -17,10 +17,14 @@ class UserChatIntent(str, Enum):
     """Intenciones canónicas del chat licitante."""
 
     COTIZAR = "COTIZAR"
+    CAPTURAR_TECNICO = "CAPTURAR_TECNICO"
+    GENERAR_ECONOMICA = "GENERAR_ECONOMICA"
+    GENERAR_TECNICA = "GENERAR_TECNICA"
     GENERAR_EXPEDIENTE = "GENERAR_EXPEDIENTE"
     RESPONDER_PENDIENTE = "RESPONDER_PENDIENTE"
     PREGUNTAR_BASES = "PREGUNTAR_BASES"
     VER_ESTADO = "VER_ESTADO"
+    VER_ESTADO_DUAL = "VER_ESTADO_DUAL"
     AYUDA = "AYUDA"
     DESAMBIGUAR_GENERAR = "DESAMBIGUAR_GENERAR"
     UNKNOWN = "UNKNOWN"
@@ -152,11 +156,53 @@ def is_economic_generation_command(query: str) -> bool:
         return False
     if ("propuesta tecnica" in q or "sobre tecnico" in q) and "economica" not in q and "economico" not in q:
         return False
-    if re.search(r"\b(generar|genera|armar|calcular|cotizar|validar|recalcular|cerrar)\b", q) and (
+    if "sobre economico" in q and "propuesta" not in q:
+        return False
+    if any(
+        m in q
+        for m in (
+            "cerrar cotizacion",
+            "validar propuesta",
+            "recalcular propuesta",
+            "capturar precio",
+            "matriz de precio",
+        )
+    ):
+        return False
+    if "propuesta" in q and ("economica" in q or "economico" in q):
+        return True
+    if re.search(r"\b(generar|genera|armar|calcular|cotizar)\b", q) and (
         "propuesta" in q or "economica" in q or "economico" in q or "cotizacion" in q
     ):
         return True
     return "generar propuesta" in q or "genera propuesta" in q
+
+
+def is_technical_generation_command(query: str) -> bool:
+    """Generar propuesta técnica / sobre técnico (sin económica)."""
+    q = normalize_for_intent(query).replace("ó", "o")
+    if not q:
+        return False
+    if "economica" in q or "economico" in q or "cotizacion" in q:
+        return False
+    markers = (
+        "propuesta tecnica",
+        "sobre tecnico",
+        "anexo tecnico",
+        "generar tecnica",
+        "genera tecnica",
+        "generar la tecnica",
+        "genera la tecnica",
+        "solo tecnica",
+        "solo la tecnica",
+        "expediente tecnico",
+        "propuesta tecnica nomas",
+        "generar propuesta tecnica y formatos",
+        "armar propuesta tecnica",
+        "quiero generar la tecnica",
+        "generar anexo tecnico",
+    )
+    return any(m in q for m in markers)
 
 
 def is_status_query(query: str) -> bool:
@@ -293,10 +339,40 @@ def is_cotizar_query(query: str) -> bool:
     return any(m in q for m in cotizar_markers)
 
 
+def is_technical_capture_query(query: str) -> bool:
+    q = normalize_for_intent(query).replace("ó", "o")
+    if not q:
+        return False
+    markers = (
+        "falta metodologia",
+        "falta personal",
+        "capturar tecnico",
+        "dato tecnico",
+        "datos tecnicos",
+        "metodologia:",
+        "personal:",
+        "equipo:",
+        "cronograma:",
+    )
+    return any(m in q for m in markers)
+
+
+def is_dual_status_query(query: str) -> bool:
+    q = normalize_for_intent(query).replace("ó", "o")
+    markers = (
+        "como vamos tecnica y economica",
+        "que falta en total",
+        "estado tecnica y economica",
+        "tecnica y economica",
+    )
+    return any(m in q for m in markers)
+
+
 def resolve_user_intent(
     query: Optional[str],
     *,
     has_economic_pending: bool = False,
+    has_technical_pending: bool = False,
     has_any_pending: bool = False,
     current_pending_type: str = "",
     is_explicit_gen_command: bool = False,
@@ -320,17 +396,26 @@ def resolve_user_intent(
         if "DOC_GEN" in qu:
             return ResolvedUserIntent(UserChatIntent.GENERAR_EXPEDIENTE, reason="cmd_doc_gen")
         if "ECONOMIC" in qu or "GENERATION" in qu:
-            return ResolvedUserIntent(UserChatIntent.COTIZAR, reason="cmd_economic")
+            return ResolvedUserIntent(UserChatIntent.GENERAR_ECONOMICA, reason="cmd_economic")
         return ResolvedUserIntent(UserChatIntent.VER_ESTADO, reason="ui_command")
 
     if is_help_query(q):
         return ResolvedUserIntent(UserChatIntent.AYUDA, reason="help_markers")
 
+    if is_economic_generation_command(q) or is_explicit_gen_command:
+        return ResolvedUserIntent(UserChatIntent.GENERAR_ECONOMICA, reason="economic_gen_cmd")
+
+    if is_technical_generation_command(q):
+        return ResolvedUserIntent(UserChatIntent.GENERAR_TECNICA, reason="technical_gen_cmd")
+
+    if is_dual_status_query(q):
+        return ResolvedUserIntent(UserChatIntent.VER_ESTADO_DUAL, reason="dual_status")
+
+    if is_technical_capture_query(q):
+        return ResolvedUserIntent(UserChatIntent.CAPTURAR_TECNICO, reason="technical_capture")
+
     if is_expediente_generation_command(q):
         return ResolvedUserIntent(UserChatIntent.GENERAR_EXPEDIENTE, reason="expediente_cmd")
-
-    if is_economic_generation_command(q) or is_explicit_gen_command:
-        return ResolvedUserIntent(UserChatIntent.COTIZAR, reason="economic_gen_cmd")
 
     if is_bare_generar_ambiguous(q) and not is_explicit_gen_command:
         return ResolvedUserIntent(UserChatIntent.DESAMBIGUAR_GENERAR, reason="bare_generar")
@@ -340,6 +425,10 @@ def resolve_user_intent(
 
     if is_bases_query(q):
         return ResolvedUserIntent(UserChatIntent.PREGUNTAR_BASES, reason="bases_query")
+
+    if has_technical_pending and current_pending_type == "technical_slot":
+        if is_technical_capture_query(q) or not is_status_query(q):
+            return ResolvedUserIntent(UserChatIntent.CAPTURAR_TECNICO, reason="tech_pending_active")
 
     if has_economic_pending and current_pending_type in (
         "economic_price",

@@ -1,0 +1,44 @@
+{
+  "policy_version": "company-binding-v1.0.0",
+  "description": "HRU — ligado transaccional de empresa a sesión. Sin hardcode por licitación.",
+  "precedence": [
+    "user_ui_company_id",
+    "companies_master_profile_db",
+    "session_master_profile_if_binding_valid",
+    "never_llm_inference"
+  ],
+  "invalidate_on_company_change": {
+    "tasks_remove_exact": [
+      "economic_proposal",
+      "stage_completed:economic"
+    ],
+    "session_keys_clear": [
+      "artifact_fingerprints_v1",
+      "expediente_guided_v1"
+    ],
+    "generation_jobs_reset_to_pending": [
+      "economic_writer",
+      "packager",
+      "delivery"
+    ],
+    "wipe_output_subdirs": [
+      "2.propuesta_economica",
+      "2.propuesta economica",
+      "SOBRE_3_ECONOMICO",
+      "_compranet_validated"
+    ],
+    "preserve_economic_user_inputs": true
+  },
+  "invalidate_on_profile_refresh_same_company": {
+    "tasks_remove_exact": [],
+    "session_keys_clear": [],
+    "generation_jobs_reset_to_pending": [],
+    "wipe_output_subdirs": [],
+    "update_master_profile_only": true
+  },
+  "error_types": {
+    "COMPANY_NOT_FOUND": "La empresa indicada no existe en el catálogo.",
+    "SESSION_NOT_FOUND": "La sesión no existe.",
+    "COMPANY_ID_REQUIRED": "Debes indicar company_id."
+  }
+}

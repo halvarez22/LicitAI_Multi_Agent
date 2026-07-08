@@ -24,12 +24,19 @@ if _BACKEND_ROOT not in sys.path:
 
 def _mock_answer(question: dict) -> str:
     """Respuesta simulada del usuario según tipo de pregunta pendiente."""
-    if question.get("type") == "economic_price":
-        field = str(question.get("field") or "")
+    q_type = str(question.get("type") or "")
+    field = str(question.get("field") or "")
+
+    if q_type in ("economic_price", "economic_validation_blocking", "quality_validation_blocking"):
         if "location" in field:
             return "1325"
+        if field.startswith("price_") or field.startswith("validation_rule"):
+            return "35 mil 529"
+        blocking = question.get("blocking_items") or []
+        if blocking:
+            return "El servicio de integración E2E cuesta 35 mil 529 pesos"
         return "35 mil 529"
-    field = question.get("field") or ""
+
     if field == "rfc":
         return "mi rfc es E2E850101XYZ"
     if field == "domicilio_fiscal":
@@ -110,14 +117,6 @@ async def main() -> int:
         ],
     }
 
-    tasks_completed = [
-        {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
-        {
-            "task": "stage_completed:compliance",
-            "result": {"status": "success", "data": compliance_data},
-        },
-    ]
-
     company = {
         "id": cid,
         "name": "E2E Mock SA de CV",
@@ -125,10 +124,44 @@ async def main() -> int:
         "master_profile": {
             "razon_social": "E2E Mock SA de CV",
             "tipo": "moral",
+            "rfc": "E2E850101XYZ",
+            "domicilio_fiscal": "Calle E2E 100, Col. Mock, CDMX, CP 01000",
+            "representante_legal": "Juan Mock Pérez",
         },
     }
 
+    economic_snapshot = {
+        "status": "complete",
+        "currency": "MXN",
+        "items": [
+            {
+                "concepto": "Servicio de integración E2E",
+                "concepto_id": "t_e2e_1",
+                "cantidad": 1,
+                "precio_unitario": 35529.0,
+                "subtotal": 35529.0,
+                "status": "matched",
+                "price_source": "e2e_mock_seed",
+            }
+        ],
+        "total_base": 35529.0,
+        "grand_total": round(35529.0 * 1.16, 2),
+        "validation_result": {"perfil_usado": "generic_v1", "blocking_issues": []},
+    }
+
+    tasks_completed = [
+        {"task": "stage_completed:analysis", "result": {"status": "success", "data": {}}},
+        {
+            "task": "stage_completed:compliance",
+            "result": {"status": "success", "data": compliance_data},
+        },
+        {"task": "stage_completed:economic", "result": {"status": "success", "data": {}}},
+        {"task": "economic_proposal", "result": economic_snapshot},
+    ]
+
     await memory.save_company(cid, company)
+    from app.services.go_no_go_session_bridges import build_silent_go_no_go_override
+
     await memory.save_session(
         sid,
         {
@@ -136,6 +169,13 @@ async def main() -> int:
             "tasks_completed": tasks_completed,
             "pending_questions": [],
             "current_question_index": 0,
+            # E2E ficticio: evita pausa GO_NO_GO_PENDING en generation_only
+            "go_no_go_override": build_silent_go_no_go_override(
+                {"semaforo": "YELLOW", "brechas": []},
+                mode="generation_only",
+                policy="e2e_mock_auto",
+            ),
+            "economic_user_inputs": {"price_t_e2e_1": 35529.0},
         },
     )
 
@@ -145,7 +185,7 @@ async def main() -> int:
 
     print(f"\n[E2E] session_id={sid} company_id={cid}\n")
 
-    max_orchestrator_rounds = 15
+    max_orchestrator_rounds = 20
     total_chat_turns = 0
 
     for round_i in range(1, max_orchestrator_rounds + 1):
@@ -177,6 +217,20 @@ async def main() -> int:
             n = await _drain_pending_chatbot(memory, bot, sid, cid)
             total_chat_turns += n
             print(f"  Drenado chat: {n} mensajes mock.")
+            continue
+
+        if st == "go_no_go_pending":
+            from app.services.go_no_go_session_bridges import build_silent_go_no_go_override
+
+            gng = res.get("go_no_go_result") or {}
+            snap = await memory.get_session(sid) or {}
+            snap["go_no_go_override"] = build_silent_go_no_go_override(
+                gng if isinstance(gng, dict) else {},
+                mode="generation_only",
+                policy="e2e_mock_auto",
+            )
+            await memory.save_session(sid, snap)
+            print("  Auto-autorizado Go/No-Go (E2E mock).")
             continue
 
         print(f"[E2E] Estado no manejado: {res}")

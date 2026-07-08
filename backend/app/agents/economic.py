@@ -485,6 +485,9 @@ def _has_strict_anchor_for_user(item: Dict[str, Any]) -> bool:
 def _ensure_chat_anchor(original_item: Dict[str, Any], concepto: str) -> Dict[str, Any]:
     """
     Ancla mínima para captura de precios en chat cuando el pliego no trae snippet/página.
+
+    F12.1: marca ``is_synthetic=True``. Nunca debe tratarse como ancla verified
+    en claims visibles al usuario (ver ``evidence_anchor_service``).
     """
     oi = dict(original_item or {})
     if not str(oi.get("source") or "").strip():
@@ -498,6 +501,8 @@ def _ensure_chat_anchor(original_item: Dict[str, Any], concepto: str) -> Dict[st
     if len(sn) < 12:
         label = str(concepto or "Partida").strip() or "Partida"
         oi["snippet"] = f"Cotización en chat — {label}"[:220]
+    oi["is_synthetic"] = True
+    oi["anchor_quality"] = "synthetic"
     return oi
 
 
@@ -1342,19 +1347,20 @@ class EconomicAgent(BaseAgent):
             )
         alertas_merged = _dedupe_economic_alert_strings(alertas_merged)
         if calc_blocking_issues:
-            fsr_msg = (
-                "No cierres la app. Faltan parámetros obligatorios para calcular el Factor de Salario Real "
-                "(Anexos 8/9/9A/13). Captura los datos requeridos y vuelve a generar."
+            from app.services.economic_fsr_ux import (
+                build_fsr_blocking_chat_message,
+                build_fsr_pending_question,
+            )
+
+            fsr_msg = build_fsr_blocking_chat_message(
+                blocking_issues=calc_blocking_issues,
+                session_state=session_state,
             )
             calc_missing = [
-                {
-                    "field": "validation_rule_fsr_required",
-                    "label": "Completar parámetros FSR",
-                    "question": str(calc_blocking_issues[0]),
-                    "document_hint": "Captura IMSS, SAR, Infonavit, días laborados/no laborados y prestaciones.",
-                    "type": "economic_validation_blocking",
-                    "blocking_items": [],
-                }
+                build_fsr_pending_question(
+                    blocking_issues=calc_blocking_issues,
+                    session_state=session_state,
+                )
             ]
             await self._save_pending_questions(session_id, calc_missing)
             blocked_payload: Dict[str, Any] = {

@@ -6,7 +6,7 @@ Sin hardcode por licitación: patrones de encabezado de bases, triage y análisi
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 _AYUNTAMIENTO_RE = re.compile(
     r"(?im)^\s*(H\.\s*AYUNTAMIENTO\s+[^\n]{4,120})$",
@@ -128,6 +128,57 @@ def extract_convocante_from_text(text: str, *, max_scan: int = 120_000) -> Dict[
     if lugar:
         out["lugar_convocante"] = lugar
     return out
+
+
+def fetch_convocante_header_from_index(session_id: str) -> str:
+    """
+    Recupera encabezados de convocante desde el índice de bases (HRU).
+
+    Complementa ``bases_corpus_hint`` cuando el snippet del requisito es estrecho.
+    """
+    if not str(session_id or "").strip():
+        return ""
+    from app.services.vector_service import VectorDbServiceClient
+
+    vdb = VectorDbServiceClient()
+    parts: List[str] = []
+    seen: set = set()
+    queries = (
+        "H AYUNTAMIENTO MUNICIPIO DE DIRECTOR GENERAL OBRA PUBLICA PRESENTE",
+        "COMITE DE ADQUISICIONES CONTRATACION PRESENTE",
+        "LICITACION PUBLICA NUM DIRECTOR GENERAL",
+        "SECRETARIA DE DEPENDENCIA CONVOCANTE",
+    )
+
+    def _add(text: str) -> None:
+        t = str(text or "").strip()
+        if not t or t in seen:
+            return
+        low = t.lower()
+        if not any(
+            k in low
+            for k in (
+                "ayuntamiento",
+                "director general",
+                "comité",
+                "comite",
+                "secretaría",
+                "secretaria",
+                "presente",
+            )
+        ):
+            return
+        seen.add(t)
+        parts.append(t)
+
+    for q in queries:
+        try:
+            res = vdb.query_texts(session_id, q, n_results=12)
+            for doc in res.get("documents") or []:
+                _add(str(doc or ""))
+        except Exception:
+            continue
+    return "\n\n".join(parts)[:80000]
 
 
 def city_from_convocante_text(text: str) -> str:
